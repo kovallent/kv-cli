@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+# Grant explicit permission to create releases and upload assets
+permissions:
+  contents: write
+
 jobs:
   build-release:
     name: Build ${{ matrix.target }}
@@ -49,7 +53,7 @@ jobs:
           fi
 
       - name: Upload Binary to GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
         env:
