@@ -12,16 +12,167 @@ pub struct Contract {
     pub version: u32,
     #[serde(default)]
     pub scan: ScanConfig,
-    /// Parameters every in-scope function must declare.
-    #[serde(default)]
+    /// Parameters every in-scope function must declare. Omitting the key
+    /// uses the built-in defaults; an explicit `parameters: []` disables KV001.
+    #[serde(default = "default_parameters")]
     pub parameters: Vec<RequiredParameter>,
     /// Which functions the contract applies to.
     #[serde(default)]
     pub applies_to: AppliesTo,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    /// KV003: identifiers that should vary by environment.
+    #[serde(default)]
+    pub infrastructure: InfraConfig,
+    #[serde(default)]
+    pub frameworks: FrameworkConfig,
     #[serde(default)]
     pub fix: FixConfig,
+}
+
+/// Which built-in framework profiles apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameworkConfig {
+    /// `auto` detects each framework from a file's imports (and, for dbt, its
+    /// model signature). Naming frameworks explicitly applies them everywhere.
+    #[serde(default = "auto_list")]
+    pub enable: Vec<String>,
+    /// Never apply these, even when detected.
+    #[serde(default)]
+    pub disable: Vec<String>,
+}
+
+fn auto_list() -> Vec<String> {
+    vec!["auto".into()]
+}
+
+impl Default for FrameworkConfig {
+    fn default() -> Self {
+        Self {
+            enable: auto_list(),
+            disable: Vec::new(),
+        }
+    }
+}
+
+impl FrameworkConfig {
+    pub fn is_auto(&self) -> bool {
+        self.enable.iter().any(|e| e == "auto")
+    }
+}
+
+/// KV003: hardcoded warehouses, catalogs, buckets, cluster IDs and endpoints.
+/// Report-only - `kv-cli fix` never rewrites these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfraConfig {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Defaults to `warning` so adopting KV003 does not break CI on day one.
+    #[serde(default = "Severity::warning")]
+    pub severity: Severity,
+    #[serde(default = "default_infra_keys")]
+    pub key_patterns: Vec<String>,
+    #[serde(default = "default_infra_values")]
+    pub value_patterns: Vec<ValuePattern>,
+    #[serde(default = "default_infra_allow")]
+    pub allow_values: Vec<String>,
+    #[serde(default = "default_infra_marker")]
+    pub ignore_marker: String,
+    #[serde(default = "default_infra_min_len")]
+    pub min_value_length: usize,
+}
+
+// Per-field defaults delegate to each section's `Default`, so omitting a key
+// inside a section leaves the documented default in place instead of blanking
+// it. An explicitly written empty list still means "none".
+fn default_include() -> Vec<String> {
+    ScanConfig::default().include
+}
+fn default_exclude() -> Vec<String> {
+    ScanConfig::default().exclude
+}
+fn default_parameters() -> Vec<RequiredParameter> {
+    Contract::default().parameters
+}
+fn default_name_patterns() -> Vec<String> {
+    AppliesTo::default().name_patterns
+}
+fn default_decorators() -> Vec<String> {
+    AppliesTo::default().decorators
+}
+fn default_exempt() -> Vec<String> {
+    AppliesTo::default().exempt_name_patterns
+}
+fn default_secret_keys() -> Vec<String> {
+    SecretsConfig::default().key_patterns
+}
+fn default_secret_values() -> Vec<ValuePattern> {
+    SecretsConfig::default().value_patterns
+}
+fn default_secret_allow() -> Vec<String> {
+    SecretsConfig::default().allow_values
+}
+fn default_secret_marker() -> String {
+    SecretsConfig::default().ignore_marker
+}
+fn default_infra_keys() -> Vec<String> {
+    InfraConfig::default().key_patterns
+}
+fn default_infra_values() -> Vec<ValuePattern> {
+    InfraConfig::default().value_patterns
+}
+fn default_infra_allow() -> Vec<String> {
+    InfraConfig::default().allow_values
+}
+fn default_infra_marker() -> String {
+    InfraConfig::default().ignore_marker
+}
+fn default_infra_min_len() -> usize {
+    InfraConfig::default().min_value_length
+}
+
+impl Default for InfraConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            severity: Severity::Warning,
+            key_patterns: [
+                "*warehouse*",
+                "*catalog*",
+                "*cluster_id*",
+                "*workspace_url*",
+                "*bucket*",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            value_patterns: vec![
+                ValuePattern {
+                    name: "object_store_uri".into(),
+                    regex: r"\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\s\x22']+".into(),
+                },
+                ValuePattern {
+                    name: "jdbc_url".into(),
+                    regex: r"\bjdbc:[a-z0-9]+://[^\s\x22']+".into(),
+                },
+            ],
+            allow_values: [
+                "local",
+                "localhost",
+                "dev",
+                "test",
+                "default",
+                "main",
+                "memory",
+                "sample",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            ignore_marker: "kovallent:allow-infra".into(),
+            min_value_length: 3,
+        }
+    }
 }
 
 fn default_version() -> u32 {
@@ -30,14 +181,19 @@ fn default_version() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanConfig {
+    #[serde(default = "default_include")]
     pub include: Vec<String>,
+    #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            include: vec!["**/*.py".into()],
+            include: ["**/*.py", "**/*.yml", "**/*.yaml"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             exclude: [
                 "**/.venv/**",
                 "**/venv/**",
@@ -47,8 +203,10 @@ impl Default for ScanConfig {
                 "**/site-packages/**",
                 "**/build/**",
                 "**/dist/**",
+                "**/target/**",
                 "**/.tox/**",
                 "**/.mypy_cache/**",
+                "**/.kovallent.yaml",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -83,6 +241,9 @@ impl Severity {
     fn error() -> Self {
         Severity::Error
     }
+    fn warning() -> Self {
+        Severity::Warning
+    }
     pub fn is_error(self) -> bool {
         self == Severity::Error
     }
@@ -93,16 +254,16 @@ impl Severity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppliesTo {
     /// Wildcard patterns matched against the function name.
-    #[serde(default)]
+    #[serde(default = "default_name_patterns")]
     pub name_patterns: Vec<String>,
     /// Decorator names, matched against the dotted decorator path.
-    #[serde(default)]
+    #[serde(default = "default_decorators")]
     pub decorators: Vec<String>,
     /// Require the contract on every function definition.
     #[serde(default)]
     pub all_functions: bool,
     /// Never require the contract on these (checked before the rules above).
-    #[serde(default)]
+    #[serde(default = "default_exempt")]
     pub exempt_name_patterns: Vec<String>,
 }
 
@@ -128,12 +289,16 @@ pub struct SecretsConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
     /// Assignment targets that indicate a secret when bound to a string literal.
+    #[serde(default = "default_secret_keys")]
     pub key_patterns: Vec<String>,
     /// High-confidence literal shapes matched anywhere in the file.
+    #[serde(default = "default_secret_values")]
     pub value_patterns: Vec<ValuePattern>,
     /// Placeholder values that are never reported.
+    #[serde(default = "default_secret_allow")]
     pub allow_values: Vec<String>,
     /// A line containing this marker is skipped.
+    #[serde(default = "default_secret_marker")]
     pub ignore_marker: String,
     /// Minimum literal length before a `key_patterns` hit is reported.
     #[serde(default = "default_min_len")]
@@ -278,6 +443,8 @@ impl Default for Contract {
             ],
             applies_to: AppliesTo::default(),
             secrets: SecretsConfig::default(),
+            infrastructure: InfraConfig::default(),
+            frameworks: FrameworkConfig::default(),
             fix: FixConfig::default(),
         }
     }
@@ -319,8 +486,12 @@ version: 1
 
 # Which files participate in the audit.
 scan:
+  # Python files get the full audit. YAML files (dbt profiles.yml,
+  # dbt_project.yml, CI config) are scanned for credentials only.
   include:
     - "**/*.py"
+    - "**/*.yml"
+    - "**/*.yaml"
   exclude:
     - "**/.venv/**"
     - "**/venv/**"
@@ -330,8 +501,10 @@ scan:
     - "**/site-packages/**"
     - "**/build/**"
     - "**/dist/**"
+    - "**/target/**"
     - "**/.tox/**"
     - "**/.mypy_cache/**"
+    - "**/.kovallent.yaml"
 
 # Every in-scope function must declare these parameters.
 # `annotation` and `default` are the text `kv-cli fix` inserts.
@@ -415,6 +588,48 @@ secrets:
   ignore_marker: "kovallent:allow-secret"
   min_value_length: 4
 
+# Built-in framework profiles. Each one contributes signatures the framework
+# owns (never given contract parameters), credential shapes, and infrastructure
+# identifiers - all scoped to files where the framework is actually used.
+# Available: dbt, polars, flink, databricks, snowpark. Run `kv-cli frameworks`.
+frameworks:
+  # "auto" detects each framework per file from its imports. Naming frameworks
+  # explicitly applies them to every scanned file instead.
+  enable:
+    - auto
+  # Never apply these, even when detected.
+  disable: []
+
+# KV003: identifiers that should vary by target_environment - warehouses,
+# catalogs, buckets, cluster IDs, endpoints. Reported only; `fix` never
+# rewrites them, because the right replacement is a deployment decision.
+infrastructure:
+  enabled: true
+  # Defaults to `warning` so adopting KV003 does not break CI on day one.
+  severity: warning
+  key_patterns:
+    - "*warehouse*"
+    - "*catalog*"
+    - "*cluster_id*"
+    - "*workspace_url*"
+    - "*bucket*"
+  value_patterns:
+    - name: object_store_uri
+      regex: '\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\s\x22'']+'
+    - name: jdbc_url
+      regex: '\bjdbc:[a-z0-9]+://[^\s\x22'']+'
+  allow_values:
+    - "local"
+    - "localhost"
+    - "dev"
+    - "test"
+    - "default"
+    - "main"
+    - "memory"
+    - "sample"
+  ignore_marker: "kovallent:allow-infra"
+  min_value_length: 3
+
 # Behaviour of `kv-cli fix`.
 fix:
   insert_missing_parameters: true
@@ -453,6 +668,47 @@ mod tests {
                 .map(|v| v.name.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// A partial contract must keep every default it did not mention.
+    /// Previously `parameters` fell back to an empty list, silently switching
+    /// KV001 off for anyone who wrote a minimal file.
+    #[test]
+    fn partial_contract_keeps_unmentioned_defaults() {
+        let c: Contract =
+            serde_yaml::from_str("version: 1\nframeworks:\n  disable: [databricks]\n").unwrap();
+        let d = Contract::default();
+        assert_eq!(c.parameters.len(), d.parameters.len());
+        assert_eq!(c.parameters[0].name, "target_environment");
+        assert_eq!(c.applies_to.name_patterns, d.applies_to.name_patterns);
+        assert_eq!(c.secrets.key_patterns, d.secrets.key_patterns);
+        assert_eq!(c.scan.include, d.scan.include);
+        assert_eq!(c.frameworks.disable, vec!["databricks".to_string()]);
+        assert!(c.frameworks.is_auto());
+    }
+
+    /// Overriding one key inside a section must not blank the others.
+    #[test]
+    fn partial_section_keeps_sibling_defaults() {
+        let c: Contract =
+            serde_yaml::from_str("version: 1\napplies_to:\n  decorators: [my.task]\n").unwrap();
+        assert_eq!(c.applies_to.decorators, vec!["my.task".to_string()]);
+        assert_eq!(
+            c.applies_to.name_patterns,
+            AppliesTo::default().name_patterns
+        );
+        assert_eq!(
+            c.applies_to.exempt_name_patterns,
+            AppliesTo::default().exempt_name_patterns
+        );
+    }
+
+    /// An explicitly empty list still means "none" - that is how a user turns
+    /// a check off.
+    #[test]
+    fn explicit_empty_list_disables_a_check() {
+        let c: Contract = serde_yaml::from_str("version: 1\nparameters: []\n").unwrap();
+        assert!(c.parameters.is_empty());
     }
 
     #[test]

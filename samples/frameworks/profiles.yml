@@ -1,0 +1,19 @@
+# dbt profiles.yml - per-target values belong here; credentials do not.
+acme:
+  target: prod
+  outputs:
+    prod:
+      type: snowflake
+      account: acme-prod.us-east-1
+      user: svc_dbt
+      password: s3cr3t-production-pw
+      role: TRANSFORMER
+      warehouse: PROD_WH
+      schema: analytics
+    dev:
+      type: snowflake
+      account: acme-dev.us-east-1
+      user: svc_dbt
+      password: "{{ env_var('DBT_PASSWORD') }}"
+      warehouse: DEV_WH
+      schema: dev

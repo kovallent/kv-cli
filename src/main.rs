@@ -3,12 +3,15 @@
 mod audit;
 mod config;
 mod fix;
+mod frameworks;
 mod python;
+mod yamlscan;
 
 use audit::{Engine, Finding};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use config::{Contract, CONTRACT_FILE, DEFAULT_CONTRACT_YAML};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -61,6 +64,9 @@ enum Command {
         strict: bool,
     },
 
+    /// List the built-in framework profiles and what each contributes.
+    Frameworks,
+
     /// Apply the standard fixes to non-compliant files.
     Fix {
         /// Files or directories to repair.
@@ -98,6 +104,7 @@ fn main() -> ExitCode {
             format,
             strict,
         } => cmd_audit(&paths, config.as_deref(), format, strict),
+        Command::Frameworks => cmd_frameworks(),
         Command::Fix {
             paths,
             config,
@@ -150,7 +157,79 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
         c.secrets.key_patterns.len(),
         c.secrets.value_patterns.len()
     );
+    println!(
+        "  {} framework profiles: {} (auto-detected per file)",
+        "·".dimmed(),
+        frameworks::PROFILES
+            .iter()
+            .map(|p| p.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("\nNext: {}", "kv-cli audit".cyan());
+    Ok(EXIT_OK)
+}
+
+fn is_yaml(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yml") | Some("yaml")
+    )
+}
+
+fn cmd_frameworks() -> Result<u8, String> {
+    println!(
+        "{} built-in framework profiles\n",
+        frameworks::PROFILES.len().to_string().bold()
+    );
+    for p in frameworks::PROFILES {
+        println!("{}", p.name.cyan().bold());
+        println!("  {}", p.summary.dimmed());
+        if !p.detect_imports.is_empty() {
+            println!(
+                "  detected by   import {}",
+                p.detect_imports.join(", import ")
+            );
+        }
+        for (name, leading) in p.owned_signatures {
+            println!("  owns          def {name}({})", leading.join(", "));
+        }
+        if !p.owned_decorators.is_empty() {
+            println!("  owns          @{}", p.owned_decorators.join(", @"));
+        }
+        if !p.governed_decorators.is_empty() {
+            let note = if p.governed_auto_fix {
+                ""
+            } else {
+                "  (reported, never auto-fixed)"
+            };
+            println!(
+                "  governs       @{}{note}",
+                p.governed_decorators.join(", @")
+            );
+        }
+        let counts = [
+            ("secret keys", p.secret_keys.len()),
+            ("secret values", p.secret_values.len()),
+            ("infra keys", p.infra_keys.len()),
+            ("infra values", p.infra_values.len()),
+        ];
+        let rules: Vec<String> = counts
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(label, n)| format!("{n} {label}"))
+            .collect();
+        if !rules.is_empty() {
+            println!("  adds          {}", rules.join(", "));
+        }
+        println!();
+    }
+    println!(
+        "{}",
+        "Signatures a framework owns are never given contract parameters:\n\
+         the framework calls them, so kv-cli must not change how."
+            .dimmed()
+    );
     Ok(EXIT_OK)
 }
 
@@ -217,8 +296,10 @@ fn cmd_audit(
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
+    let mut detected: BTreeMap<&'static str, usize> = BTreeMap::new();
     for file in &files {
         match read_source(file) {
+            Ok(src) if is_yaml(file) => findings.extend(engine.audit_yaml(file, &src)),
             Ok(src) => {
                 let analysis = python::analyze(&src);
                 // A file we cannot parse is a hole in the gate, not a pass.
@@ -228,7 +309,12 @@ fn cmd_audit(
                         file.display()
                     ));
                 }
-                findings.extend(engine.audit_analyzed(file, &src, &analysis));
+                let ctx = engine.context(&analysis);
+                for name in ctx.frameworks() {
+                    detected.entry(name).or_insert(0);
+                    *detected.get_mut(name).unwrap() += 1;
+                }
+                findings.extend(ctx.audit(file, &src, &analysis));
             }
             Err(e) => unreadable.push(e),
         }
@@ -247,6 +333,7 @@ fn cmd_audit(
             &files,
             contract_path.as_deref(),
             &unreadable,
+            &detected,
             errors,
             warnings,
             strict,
@@ -283,6 +370,7 @@ fn print_text(
     files: &[PathBuf],
     contract_path: Option<&Path>,
     unreadable: &[String],
+    detected: &BTreeMap<&'static str, usize>,
     errors: usize,
     warnings: usize,
     strict: bool,
@@ -300,6 +388,17 @@ fn print_text(
         if files.len() == 1 { "" } else { "s" }
     );
 
+    if !detected.is_empty() {
+        let list: Vec<String> = detected
+            .iter()
+            .map(|(name, n)| format!("{name} ({n})"))
+            .collect();
+        println!(
+            "  {} frameworks: {}",
+            "\u{b7}".dimmed(),
+            list.join(", ").cyan()
+        );
+    }
     for u in unreadable {
         println!("  {} {u}", "skipped:".yellow());
     }
@@ -316,8 +415,12 @@ fn print_text(
         } else {
             "warning".yellow().bold()
         };
+        let via = match f.framework {
+            Some(name) => format!("  [{name}]").cyan().to_string(),
+            None => String::new(),
+        };
         println!(
-            "  {:>4}  {}  {}  {}",
+            "  {:>4}  {}  {}  {}{via}",
             f.line.to_string().dimmed(),
             label,
             f.code.dimmed(),

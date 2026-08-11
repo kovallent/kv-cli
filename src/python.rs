@@ -98,6 +98,9 @@ pub struct Imports {
     /// Offset just past the module prelude: shebang, comments, docstring and
     /// `__future__` imports.
     pub after_prelude: usize,
+    /// Root module name of every import, e.g. `snowflake` for
+    /// `from snowflake.snowpark import Session`. Used to detect frameworks.
+    pub modules: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -211,8 +214,14 @@ fn scan_imports(root: Node, ctx: &Ctx) -> Imports {
             if imports.first.is_none() {
                 imports.first = Some(child.start_byte());
             }
-        } else if kind == "import_from_statement" && !is_future && imports.first.is_none() {
-            imports.first = Some(child.start_byte());
+            collect_modules(child, ctx, &mut imports.modules);
+        } else if kind == "import_from_statement" {
+            if !is_future && imports.first.is_none() {
+                imports.first = Some(child.start_byte());
+            }
+            if let Some(m) = child.child_by_field_name("module_name") {
+                push_root_module(ctx.text(m), &mut imports.modules);
+            }
         }
 
         if prelude_open {
@@ -225,6 +234,29 @@ fn scan_imports(root: Node, ctx: &Ctx) -> Imports {
         }
     }
     imports
+}
+
+/// Record the root module of every name in an `import a.b, c as d` statement.
+fn collect_modules(node: Node, ctx: &Ctx, out: &mut Vec<String>) {
+    for child in named_children(node) {
+        match child.kind() {
+            "dotted_name" => push_root_module(ctx.text(child), out),
+            // `import polars as pl` - the module is the aliased name's target.
+            "aliased_import" => {
+                if let Some(name) = child.child_by_field_name("name") {
+                    push_root_module(ctx.text(name), out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_root_module(dotted: &str, out: &mut Vec<String>) {
+    let root = dotted.split('.').next().unwrap_or("").trim();
+    if !root.is_empty() && !out.iter().any(|m| m == root) {
+        out.push(root.to_string());
+    }
 }
 
 /// True for `import os` / `import os.path`, which bind the name `os`.

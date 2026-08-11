@@ -3,7 +3,7 @@
 //! Every change is expressed as a byte-range edit against the original source
 //! and applied back-to-front, so offsets computed during analysis stay valid.
 
-use crate::audit::{render_param, Engine};
+use crate::audit::{render_param, Engine, FileContext};
 use crate::config::RequiredParameter;
 use crate::python::{self, Analysis, BindingSource, FunctionDef, ParamKind};
 use std::path::{Path, PathBuf};
@@ -53,12 +53,13 @@ pub fn fix_source(engine: &Engine, path: &Path, source: &str) -> FixReport {
         return report;
     }
 
+    let ctx = engine.context(&a);
     if engine.contract.fix.insert_missing_parameters {
-        collect_param_edits(engine, source, &a, &mut edits, &mut report);
+        collect_param_edits(engine, &ctx, source, &a, &mut edits, &mut report);
     }
     let mut needs_os_import = false;
     if engine.contract.fix.externalize_secrets {
-        needs_os_import = collect_secret_edits(engine, source, &a, &mut edits, &mut report);
+        needs_os_import = collect_secret_edits(engine, &ctx, source, &a, &mut edits, &mut report);
     }
 
     if edits.is_empty() {
@@ -96,13 +97,14 @@ pub fn fix_source(engine: &Engine, path: &Path, source: &str) -> FixReport {
 
 fn collect_param_edits(
     engine: &Engine,
+    ctx: &FileContext,
     source: &str,
     a: &Analysis,
     edits: &mut Vec<Edit>,
     report: &mut FixReport,
 ) {
     for f in &a.functions {
-        if !engine.governs(f) {
+        if !ctx.governs(f) {
             continue;
         }
         let missing: Vec<&RequiredParameter> = engine
@@ -112,6 +114,16 @@ fn collect_param_edits(
             .filter(|p| !f.has_param(&p.name))
             .collect();
         if missing.is_empty() {
+            continue;
+        }
+        if let Some(fw) = ctx.no_auto_fix_framework(f) {
+            report.skipped.push(format!(
+                "{}:{} `{}` is under the contract via {fw}, but its call sites are in \
+                 your own code - add the parameter and thread the value through by hand",
+                display(&report.file),
+                f.line,
+                f.name
+            ));
             continue;
         }
 
@@ -211,6 +223,7 @@ fn line_indent(source: &str, a: &Analysis, offset: usize) -> String {
 /// reports, so the two commands can never disagree about what is a secret.
 fn collect_secret_edits(
     engine: &Engine,
+    ctx: &FileContext,
     source: &str,
     a: &Analysis,
     edits: &mut Vec<Edit>,
@@ -218,7 +231,7 @@ fn collect_secret_edits(
 ) -> bool {
     let mut rewrote = false;
 
-    for b in engine.flagged_bindings(source, a) {
+    for b in ctx.flagged_secrets(source, a) {
         if b.source == BindingSource::ParameterDefault {
             report.skipped.push(format!(
                 "{}:{} `{}` has a hardcoded default; move the lookup into the body \
@@ -240,7 +253,7 @@ fn collect_secret_edits(
     }
 
     // Value-pattern hits are free-floating text with no binding to rewrite.
-    for f in engine.audit_analyzed(&report.file.clone(), source, a) {
+    for f in ctx.audit(&report.file.clone(), source, a) {
         if let crate::audit::FindingKind::HardcodedSecret { key: None, .. } = &f.kind {
             report.skipped.push(format!(
                 "{}:{} credential-shaped literal has no assignment target - remove it by hand",
@@ -302,8 +315,10 @@ mod tests {
     }
 
     fn audit_clean(src: &str) -> bool {
-        engine()
-            .audit_source(Path::new("t.py"), src)
+        let e = engine();
+        let a = python::analyze(src);
+        e.context(&a)
+            .audit(Path::new("t.py"), src, &a)
             .iter()
             .all(|f| !f.severity.is_error())
     }
@@ -454,6 +469,40 @@ mod tests {
         let out = fixed("from os import environ\nTOKEN = \"abcd1234efgh\"\n");
         assert!(out.starts_with("import os\nfrom os import environ\n"));
         assert!(out.contains("os.environ[\"TOKEN\"]"));
+    }
+
+    /// Airflow `@task` is governed, so `audit` reports it - but `fix` must not
+    /// insert the parameter, because the call sites in the DAG body would not
+    /// pass it and the default would read "dev" in every environment.
+    #[test]
+    fn airflow_tasks_are_reported_but_never_rewritten() {
+        let src = "from airflow.decorators import task\n\n@task\ndef extract_orders(bucket):\n    return bucket\n";
+        let r = fix_source(&engine(), Path::new("t.py"), src);
+        assert!(!r.changed());
+        assert!(r.params_added.is_empty());
+        assert!(r
+            .skipped
+            .iter()
+            .any(|s| s.contains("airflow") && s.contains("by hand")));
+        // `audit` still flags it, so it is not silently dropped.
+        assert!(!audit_clean(src));
+    }
+
+    /// The block is scoped to the framework, not to fixing in general.
+    #[test]
+    fn ordinary_functions_in_an_airflow_file_are_still_fixed() {
+        let src = "import airflow\n\ndef run_backfill(day):\n    return day\n";
+        let out = fixed(src);
+        assert!(out.contains("def run_backfill(day, target_environment: str = \"dev\""));
+    }
+
+    /// A compliant task produces no `manual:` noise.
+    #[test]
+    fn compliant_airflow_task_is_silent() {
+        let src = "from airflow.decorators import task\n\n@task\ndef extract_orders(bucket, target_environment: str = \"dev\", dry_run: bool = False):\n    return bucket\n";
+        let r = fix_source(&engine(), Path::new("t.py"), src);
+        assert!(r.skipped.is_empty());
+        assert!(!r.changed());
     }
 
     #[test]
