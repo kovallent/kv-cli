@@ -111,7 +111,3 @@ make demo     # Audits samples/ directory (exits 1 by design)
 ## License
 
 Distributed under the Apache 2.0 License. See [`LICENSE`](LICENSE) for details.
-
-```
-
-```
