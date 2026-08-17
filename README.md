@@ -247,6 +247,13 @@ make check    # fmt --check + clippy -D warnings + tests
 make demo     # audit samples/ (exits 1 by design)
 ```
 
+## 💬 Community & Feedback
+
+Have a question, feature request, or idea for a new `kv-cli` rule? 
+- 💡 [Propose a Feature](https://github.com/kovallent/kv-cli/discussions/new?category=ideas)
+- ❓ [Ask a Question](https://github.com/kovallent/kv-cli/discussions/new?category=q-a)
+- 🌐 [Join the Kovallent Enterprise Waitlist](https://www.kovallent.com)
+
 `samples/deploy.py` exercises every detector and every suppression path;
 `samples/compliant.py` must always audit clean. `samples/frameworks/` has one
 file per supported stack, each demonstrating both the signature exemption and
