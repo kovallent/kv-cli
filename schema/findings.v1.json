@@ -1,0 +1,375 @@
+{
+  "$defs": {
+    "Finding": {
+      "oneOf": [
+        {
+          "properties": {
+            "function": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "missing_parameter",
+              "type": "string"
+            },
+            "parameter": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "function",
+            "parameter"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detector": {
+              "type": "string"
+            },
+            "key": {
+              "description": "The assignment target, when the finding came from a name rule.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "hardcoded_secret",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "detector"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An environment-specific identifier written into the source.",
+          "properties": {
+            "detector": {
+              "type": "string"
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "hardcoded_infrastructure",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "detector"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "description": "Stable identity across runs. Excludes the line number on purpose - see\n[`finding_fingerprint`].",
+          "type": "string"
+        },
+        "framework": {
+          "description": "Framework profile that contributed the rule, when one did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository-relative, forward-slashed. Normalized before hashing so the\nsame file yields the same identity however the scan was invoked.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Intrinsic severity, as emitted. `--strict` is a gating policy applied\nby the consumer, not folded into this value or into the counts.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "What about it: the required parameter for KV001, the detector name for\nKV002 and KV003.",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The thing the finding is about, as data: the governed function name for\nKV001, the assignment target or key for KV002 and KV003. Empty when a\nvalue-pattern rule matched free-floating text with no binding.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "path",
+        "line",
+        "code",
+        "severity",
+        "symbol",
+        "subject",
+        "message"
+      ],
+      "type": "object"
+    },
+    "IdentitySource": {
+      "description": "Provenance of each run-identity field: `\"flag\"`, `\"env:NAME\"`, or absent.",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RunMeta": {
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit": {
+          "description": "Full commit SHA, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract_drift": {
+          "type": "boolean"
+        },
+        "contract_expected": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract_path": {
+          "description": "`null` means the run used built-in defaults.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract_sha256": {
+          "type": "string"
+        },
+        "errors": {
+          "description": "Findings whose *intrinsic* severity is error, regardless of `strict`.\nCounts only `findings` - a skipped file's severity is on the entry\nitself in `skipped`, not folded in here.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_scanned": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frameworks_detected": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Framework profiles detected, and in how many files.",
+          "type": "object"
+        },
+        "identity_source": {
+          "$ref": "#/$defs/IdentitySource",
+          "description": "Where each identity field came from, so an absent value is\ndistinguishable from a wrongly-guessed one."
+        },
+        "repo": {
+          "description": "`owner/name`, when known. The CLI cannot invent it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "description": "Payload shape. Bumped only on a breaking change.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "skipped": {
+          "description": "Files resolved for scanning that produced no findings because they\nwere not fully analysed. See [`SkippedFile`].",
+          "items": {
+            "$ref": "#/$defs/SkippedFile"
+          },
+          "type": "array"
+        },
+        "strict": {
+          "description": "Whether the run was told to treat warnings as gating. Severities below\nare reported as emitted; applying this is the server's decision.",
+          "type": "boolean"
+        },
+        "timestamp": {
+          "description": "RFC 3339, UTC.",
+          "type": "string"
+        },
+        "tool_version": {
+          "description": "The binary that produced this run.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Findings whose *intrinsic* severity is warning, regardless of `strict`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool_version",
+        "timestamp",
+        "identity_source",
+        "strict",
+        "contract_sha256",
+        "contract_drift",
+        "files_scanned",
+        "errors",
+        "warnings",
+        "skipped",
+        "frameworks_detected",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "Scope": {
+      "description": "Tally of scope decisions across a run.\n\nWithout this a green result is a claim with no evidence: a repository where\nevery governed function is framework-owned looks identical to one that\nfully complies.",
+      "properties": {
+        "functions_exempt_framework": {
+          "description": "Excluded because a framework owns the signature.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions_exempt_user": {
+          "description": "Excluded by the contract's `exempt_name_patterns`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions_in_scope": {
+          "description": "Checked against the contract. Includes `functions_report_only`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions_out_of_scope": {
+          "description": "Matched by no rule.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions_report_only": {
+          "description": "In scope, but a framework forbids auto-fixing them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions_total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "functions_total",
+        "functions_in_scope",
+        "functions_report_only",
+        "functions_exempt_framework",
+        "functions_exempt_user",
+        "functions_out_of_scope"
+      ],
+      "type": "object"
+    },
+    "SkipReason": {
+      "description": "Why a file contributed nothing to `findings`.\n\nTwo different concerns, kept distinct rather than folded into one\nhuman-readable string: a syntax error is a claim about the *code* - the\nfile exists and was read, but only a partial parse was possible, which may\nitself hide findings. An unreadable file is a claim about the *tool run* -\nkv-cli could not open it at all, which is not a matter of degree.",
+      "enum": [
+        "syntax_error",
+        "unreadable"
+      ],
+      "type": "string"
+    },
+    "SkippedFile": {
+      "description": "A file that was resolved for scanning but produced no findings because it\nwas not fully analysed. Every resolved file appears either represented in\n`findings` (implicitly, via `files_scanned`) or explicitly here - a file\ncan never simply vanish from the payload.",
+      "properties": {
+        "detail": {
+          "description": "Human-readable elaboration - not to be parsed. `reason` is what a\nserver should key on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/SkipReason"
+        },
+        "severity": {
+          "description": "Whether this counts toward the gate, on the same terms as a finding:\nintrinsic, not altered by `--strict`. A syntax error is a warning by\ndefault - it does not fail CI on day one, matching how KV003 was\nintroduced - and is promoted to gating under `--strict`. An unreadable\nfile is always an error: there is no lenient reading of \"the tool\ncould not check this file\".",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason",
+        "severity"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "type": "array"
+    },
+    "run": {
+      "$ref": "#/$defs/RunMeta"
+    }
+  },
+  "required": [
+    "run",
+    "findings"
+  ],
+  "title": "Payload",
+  "type": "object"
+}
