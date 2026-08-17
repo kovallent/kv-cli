@@ -19,11 +19,94 @@ make release          # optimized binary -> target/release/kv-cli
 | Command | Purpose |
 | --- | --- |
 | `kv-cli init` | Write a default `.kovallent.yaml` contract. `--force` overwrites. |
-| `kv-cli audit [PATHS]` | Scan for violations. `--format json`, `--strict`, `--config`. |
+| `kv-cli audit [PATHS]` | Scan for violations. `--format json`, `--strict`, `--config`, `--expect-contract`. |
 | `kv-cli fix [PATHS]` | Apply the standard fixes. `--dry-run`, `--no-backup`. |
 | `kv-cli frameworks` | Show the built-in profiles and what each contributes. |
+| `kv-cli schema` | Print the JSON payload schema this build emits. |
 
-Exit codes: `0` compliant, `1` findings, `2` tool error. `audit` is the CI gate.
+`audit` is the CI gate. Exit codes are a documented interface — each escalates
+to different people:
+
+| Code | Meaning | Escalates to |
+| --- | --- | --- |
+| `0` | compliant | — |
+| `1` | findings | the pull-request author |
+| `2` | tool error | whoever operates the gate |
+| `3` | contract drift | whoever owns the contract |
+
+## Contract distribution
+
+The contract stays local. `audit --format json` emits a **semantic fingerprint**
+of it under `run.contract_sha256`, which a server compares against what is
+deployed for the repository; drift is reported as its own outcome rather than as
+a code failure. This keeps `audit` working offline, on the free local tier, and
+in air-gapped deployments — none of which survive a mandatory fetch.
+
+The hash covers the parsed contract, not the file bytes, so reformatting or
+editing a comment is not drift while editing a rule is. `run.contract_path` is
+`null` when the run used built-in defaults.
+
+### Enforcing the pin today
+
+No service is required. The expected hash has to live somewhere the developer
+opening the pull request cannot edit — an Actions **organization variable** is
+exactly that:
+
+```yaml
+- name: Kovallent gate
+  run: kv-cli audit --strict --format json
+       --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}
+```
+
+On mismatch the run exits `3`, distinct from findings (`1`) and tool errors
+(`2`). Committing the expected hash to the repository instead is weaker —
+whoever weakens the contract can update the lock in the same commit.
+
+Known gap: anyone with write access can edit the workflow to drop the flag.
+Close it with `CODEOWNERS` on `.github/workflows/` plus branch protection, or an
+organization ruleset that requires the check.
+
+Rationale, rejected alternatives, and the staging plan:
+[ADR 0001](docs/adr/0001-contract-distribution.md).
+
+## The JSON payload
+
+`schema/findings.v1.json` is generated from the Rust types by `kv-cli schema`; a
+test asserts the committed document matches and that a real run validates
+against it, so the two cannot drift.
+
+`run` carries `schema_version` (bumped only on a breaking payload change,
+independent of `tool_version`), run identity (`repo`, `commit`, `branch`,
+`timestamp`), contract provenance, and a `scope` block.
+
+**Identity is never guessed.** `repo` and `commit` come from the CI environment
+(`GITHUB_REPOSITORY`, `CI_COMMIT_SHA`, …) or from `--repo` / `--commit` /
+`--branch`. `identity_source` records which — `"flag"`, `"env:GITHUB_SHA"`, or
+absent.
+
+**Severity is reported as emitted.** `errors` and `warnings` count intrinsic
+severities regardless of `--strict`; the flag is emitted so a consumer can apply
+the policy itself. Otherwise a strict run reports every finding as an error and
+the payload cannot say how many were warnings.
+
+**No file can vanish from the payload.** Every file `kv-cli` resolves for
+scanning is either represented in `findings`/`files_scanned` or named in
+`run.skipped[]` as `{path, reason, severity, detail}`, `reason` being
+`"syntax_error"` or `"unreadable"`. A syntax error is a warning — matching how
+KV003 was introduced, it does not fail CI by default and is promoted under
+`--strict`; an unreadable file is always an error, since there is no lenient
+reading of "the tool could not check this file".
+
+**The `scope` block is the evidence behind a green result.** Without it a
+repository where every governed function is framework-owned looks identical to
+one that fully complies:
+
+```
+functions: 15 in scope, 5 framework-exempt, 2 user-exempt, 2 out of scope
+```
+
+Framework ownership and the contract's `exempt_name_patterns` are counted
+separately — the first is ours, the second is the customer's choice.
 
 ## Diagnostics
 
@@ -159,7 +242,7 @@ useful when adding a rule that needs a node kind you haven't handled yet.
 ## Development
 
 ```
-make test     # unit tests (89)
+make test     # unit tests (121)
 make check    # fmt --check + clippy -D warnings + tests
 make demo     # audit samples/ (exits 1 by design)
 ```

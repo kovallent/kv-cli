@@ -1,9 +1,27 @@
 //! The `.kovallent.yaml` parameter contract: schema, defaults, and loading.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub const CONTRACT_FILE: &str = ".kovallent.yaml";
+
+/// Characters in a contract fingerprint. Changing this invalidates every
+/// stored fingerprint, so it is pinned here and referenced everywhere else.
+pub const FINGERPRINT_LEN: usize = 16;
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
 
 /// Root of the parameter contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,6 +469,24 @@ impl Default for Contract {
 }
 
 impl Contract {
+    /// Semantic identity: comments and key order do not affect it,
+    /// any change to an actual rule does.
+    ///
+    /// The hash covers the *parsed* contract round-tripped back through
+    /// serialization, not the file bytes. Reformatting, reordering mapping
+    /// keys, or editing a comment therefore produce the same fingerprint,
+    /// while editing a rule produces a different one. Because every field has
+    /// a concrete default, a partial contract file and a fully written one
+    /// that mean the same thing hash identically.
+    ///
+    /// Stable only within a schema version: adding a field to `Contract`
+    /// changes every fingerprint. Consumers must store the tool version
+    /// alongside the hash so a mass change after an upgrade is recognisable.
+    pub fn fingerprint(&self) -> String {
+        let canonical = serde_yaml::to_string(self).expect("Contract is Serialize");
+        sha256_hex(canonical.as_bytes())[..FINGERPRINT_LEN].to_string()
+    }
+
     /// Walks up from `start` looking for `.kovallent.yaml`.
     pub fn discover(start: &Path) -> Option<PathBuf> {
         let mut dir = Some(start);
@@ -709,6 +745,107 @@ mod tests {
     fn explicit_empty_list_disables_a_check() {
         let c: Contract = serde_yaml::from_str("version: 1\nparameters: []\n").unwrap();
         assert!(c.parameters.is_empty());
+    }
+
+    // --- contract fingerprint (exit criterion) --------------------------
+
+    fn fp(yaml: &str) -> String {
+        serde_yaml::from_str::<Contract>(yaml)
+            .expect("test contract parses")
+            .fingerprint()
+    }
+
+    const BASE: &str = "version: 1\nparameters:\n  - name: target_environment\n    annotation: str\n    default: '\"dev\"'\n    severity: error\n";
+
+    #[test]
+    fn fingerprint_is_stable_and_well_formed() {
+        let a = fp(BASE);
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic across repeated computation.
+        assert_eq!(a, fp(BASE));
+    }
+
+    /// Exit criterion, negative half: cosmetic edits are not drift.
+    #[test]
+    fn comments_do_not_change_the_fingerprint() {
+        let commented = "# deployed by platform-eng\nversion: 1\nparameters:\n  # the environment every job must accept\n  - name: target_environment\n    annotation: str\n    default: '\"dev\"'\n    severity: error\n";
+        assert_eq!(fp(BASE), fp(commented));
+    }
+
+    #[test]
+    fn reformatting_does_not_change_the_fingerprint() {
+        // Different quoting, flow style, and blank lines; same rules.
+        let reformatted = "version: 1\n\nparameters: [{name: target_environment, annotation: \"str\", default: '\"dev\"', severity: error}]\n";
+        assert_eq!(fp(BASE), fp(reformatted));
+    }
+
+    #[test]
+    fn reordering_mapping_keys_does_not_change_the_fingerprint() {
+        let reordered = "parameters:\n  - severity: error\n    default: '\"dev\"'\n    annotation: str\n    name: target_environment\nversion: 1\n";
+        assert_eq!(fp(BASE), fp(reordered));
+    }
+
+    /// A partial file and a fully written one that mean the same thing hash
+    /// the same - which would not be true of raw bytes.
+    #[test]
+    fn partial_and_fully_written_contracts_agree() {
+        let minimal = "version: 1\n";
+        let spelled_out = "version: 1\nframeworks:\n  enable: [auto]\n  disable: []\nsecrets:\n  enabled: true\n  min_value_length: 4\n";
+        assert_eq!(fp(minimal), fp(spelled_out));
+        assert_eq!(fp(minimal), Contract::default().fingerprint());
+    }
+
+    /// Exit criterion, positive half: any real rule change moves the hash.
+    #[test]
+    fn editing_a_rule_changes_the_fingerprint() {
+        let base = fp(BASE);
+        // Changed default value.
+        assert_ne!(base, fp(&BASE.replace("'\"dev\"'", "'\"prod\"'")));
+        // Changed severity.
+        assert_ne!(
+            base,
+            fp(&BASE.replace("severity: error", "severity: warning"))
+        );
+        // Added a parameter.
+        assert_ne!(
+            base,
+            fp(&format!(
+                "{BASE}  - name: dry_run\n    default: \"False\"\n"
+            ))
+        );
+        // Changed a scan glob.
+        assert_ne!(
+            base,
+            fp(&format!("{BASE}scan:\n  include: ['src/**/*.py']\n"))
+        );
+        // Disabled a framework.
+        assert_ne!(
+            base,
+            fp(&format!("{BASE}frameworks:\n  disable: [databricks]\n"))
+        );
+        // Turned a check off.
+        assert_ne!(
+            base,
+            fp(&format!("{BASE}infrastructure:\n  enabled: false\n"))
+        );
+    }
+
+    /// Removing a rule must not collide with the contract that still has it.
+    #[test]
+    fn removing_a_rule_changes_the_fingerprint() {
+        let with = fp(&format!(
+            "{BASE}secrets:\n  key_patterns: ['*password*', '*token*']\n"
+        ));
+        let without = fp(&format!("{BASE}secrets:\n  key_patterns: ['*password*']\n"));
+        assert_ne!(with, without);
+    }
+
+    #[test]
+    fn fingerprint_length_is_pinned() {
+        // The algorithm is the irreversible part: changing it invalidates every
+        // stored fingerprint, so the length is asserted, not assumed.
+        assert_eq!(Contract::default().fingerprint().len(), FINGERPRINT_LEN);
     }
 
     #[test]

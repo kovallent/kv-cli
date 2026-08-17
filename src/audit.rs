@@ -1,10 +1,11 @@
 //! The compliance engine: file discovery, contract checks, secret detection.
 
-use crate::config::{Contract, Severity};
+use crate::config::{self, Contract, Severity, FINGERPRINT_LEN};
 use crate::frameworks::{self, FrameworkProfile};
 use crate::python::{self, Analysis, Binding, FunctionDef};
 use crate::yamlscan;
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ pub const CODE_MISSING_PARAM: &str = "KV001";
 pub const CODE_HARDCODED_SECRET: &str = "KV002";
 pub const CODE_HARDCODED_INFRA: &str = "KV003";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FindingKind {
     MissingParameter {
@@ -31,13 +32,28 @@ pub enum FindingKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Finding {
-    pub file: PathBuf,
+    /// Stable identity across runs. Excludes the line number on purpose - see
+    /// [`finding_fingerprint`].
+    pub fingerprint: String,
+    /// Repository-relative, forward-slashed. Normalized before hashing so the
+    /// same file yields the same identity however the scan was invoked.
+    pub path: String,
     pub line: usize,
     pub code: &'static str,
+    /// Intrinsic severity, as emitted. `--strict` is a gating policy applied
+    /// by the consumer, not folded into this value or into the counts.
     #[serde(serialize_with = "ser_severity")]
+    #[schemars(with = "String")]
     pub severity: Severity,
+    /// The thing the finding is about, as data: the governed function name for
+    /// KV001, the assignment target or key for KV002 and KV003. Empty when a
+    /// value-pattern rule matched free-floating text with no binding.
+    pub symbol: String,
+    /// What about it: the required parameter for KV001, the detector name for
+    /// KV002 and KV003.
+    pub subject: String,
     pub message: String,
     pub detail: Option<String>,
     /// Framework profile that contributed the rule, when one did.
@@ -47,8 +63,107 @@ pub struct Finding {
     pub kind: FindingKind,
 }
 
-fn ser_severity<S: serde::Serializer>(s: &Severity, ser: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn ser_severity<S: serde::Serializer>(s: &Severity, ser: S) -> Result<S::Ok, S::Error> {
     ser.serialize_str(if s.is_error() { "error" } else { "warning" })
+}
+
+/// Why a function is, or is not, under the parameter contract.
+///
+/// `owns_signature` used to be consulted as a predicate and the answer thrown
+/// away, so an exempt function was indistinguishable from one that complied.
+/// Naming the decision is what lets a run carry evidence rather than a bare
+/// green result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeDecision {
+    /// Under the contract.
+    Governed,
+    /// Under the contract, but `fix` must not rewrite it.
+    GovernedReportOnly,
+    /// A framework owns the signature. **Our** exemption.
+    ExemptFramework,
+    /// Matched the contract's `exempt_name_patterns`. **The customer's**
+    /// exemption - counted separately because it means something different.
+    ExemptUser,
+    /// No rule selects it.
+    OutOfScope,
+}
+
+/// Tally of scope decisions across a run.
+///
+/// Without this a green result is a claim with no evidence: a repository where
+/// every governed function is framework-owned looks identical to one that
+/// fully complies.
+#[derive(Debug, Clone, Copy, Default, Serialize, JsonSchema)]
+pub struct Scope {
+    pub functions_total: usize,
+    /// Checked against the contract. Includes `functions_report_only`.
+    pub functions_in_scope: usize,
+    /// In scope, but a framework forbids auto-fixing them.
+    pub functions_report_only: usize,
+    /// Excluded because a framework owns the signature.
+    pub functions_exempt_framework: usize,
+    /// Excluded by the contract's `exempt_name_patterns`.
+    pub functions_exempt_user: usize,
+    /// Matched by no rule.
+    pub functions_out_of_scope: usize,
+}
+
+impl Scope {
+    pub fn add(&mut self, other: Scope) {
+        self.functions_total += other.functions_total;
+        self.functions_in_scope += other.functions_in_scope;
+        self.functions_report_only += other.functions_report_only;
+        self.functions_exempt_framework += other.functions_exempt_framework;
+        self.functions_exempt_user += other.functions_exempt_user;
+        self.functions_out_of_scope += other.functions_out_of_scope;
+    }
+}
+
+/// Stable identity for a finding across runs.
+///
+/// The line number is excluded deliberately. Adding an import at the top of a
+/// file shifts every line in it; if the line number were part of the identity,
+/// that single edit would retire every finding in the file and create an equal
+/// number of new ones.
+///
+/// Consequence, accepted: two findings of the same code on the same symbol and
+/// subject within one file collapse to one fingerprint. For KV001 that cannot
+/// happen - a parameter is either declared or not. For KV002 it can, if the
+/// same key is assigned a secret twice in one file. An occurrence index would
+/// fix it and reintroduce order sensitivity, so it is not pre-solved.
+pub fn finding_fingerprint(path: &str, code: &str, symbol: &str, subject: &str) -> String {
+    let material = format!("{path}\0{code}\0{symbol}\0{subject}");
+    config::sha256_hex(material.as_bytes())[..FINGERPRINT_LEN].to_string()
+}
+
+/// Repository-relative, forward-slashed form of `file`.
+///
+/// `resolve_targets` preserves the caller's form, so `kv-cli audit .` and
+/// `kv-cli audit jobs` otherwise yield different strings for the same file -
+/// and a fingerprint built on that is not stable across invocations, let alone
+/// between a laptop and CI.
+pub fn normalize_path(base: &Path, file: &Path) -> String {
+    // `Path::new("jobs").parent()` is `Some("")`, so a contract discovered one
+    // level up hands us an empty base. Empty means the current directory.
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    let abs_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let abs_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+
+    match abs_file.strip_prefix(&abs_base) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/"),
+        // Outside the base there is no repository-relative form. Keep the
+        // absolute path rather than inventing one - joining components by hand
+        // would render the root as a second leading slash.
+        Err(_) => abs_file.to_string_lossy().replace('\\', "/"),
+    }
 }
 
 /// A framework profile with its regexes compiled.
@@ -239,8 +354,8 @@ impl Engine {
     }
 
     /// Audit a YAML config file for credentials and infrastructure literals.
-    pub fn audit_yaml(&self, path: &Path, source: &str) -> Vec<Finding> {
-        let ctx = self.yaml_context(path);
+    pub fn audit_yaml(&self, path: &str, source: &str) -> Vec<Finding> {
+        let ctx = self.yaml_context(Path::new(path));
         let mut out = Vec::new();
         let secrets = &self.contract.secrets;
         let infra = &self.contract.infrastructure;
@@ -265,7 +380,15 @@ impl Engine {
                     |c| &c.contract.secrets.key_patterns,
                 ) {
                     out.push(Finding {
-                        file: path.to_path_buf(),
+                        fingerprint: finding_fingerprint(
+                            path,
+                            CODE_HARDCODED_SECRET,
+                            &scalar.key,
+                            "key_pattern",
+                        ),
+                        path: path.to_string(),
+                        symbol: scalar.key.clone(),
+                        subject: "key_pattern".to_string(),
                         line: scalar.line,
                         code: CODE_HARDCODED_SECRET,
                         severity: Severity::Error,
@@ -334,10 +457,18 @@ impl FileContext<'_> {
 
     /// Is this function governed by the parameter contract?
     pub fn governs(&self, f: &FunctionDef) -> bool {
+        matches!(
+            self.classify(f),
+            ScopeDecision::Governed | ScopeDecision::GovernedReportOnly
+        )
+    }
+
+    /// Why this function is, or is not, under the contract.
+    pub fn classify(&self, f: &FunctionDef) -> ScopeDecision {
         // A framework that owns the signature wins over every user rule: it
         // calls the function, so we cannot change how it is called.
         if self.owning_framework(f).is_some() {
-            return false;
+            return ScopeDecision::ExemptFramework;
         }
         let rules = &self.engine.contract.applies_to;
         if rules
@@ -345,29 +476,52 @@ impl FileContext<'_> {
             .iter()
             .any(|p| python::wildcard_match(p, &f.name))
         {
-            return false;
+            return ScopeDecision::ExemptUser;
         }
-        if rules.all_functions {
-            return true;
-        }
-        if rules
-            .name_patterns
-            .iter()
-            .any(|p| python::wildcard_match(p, &f.name))
-        {
-            return true;
-        }
-        let by_user_decorator = f.decorators.iter().any(|d| {
-            rules.decorators.iter().any(|p| {
-                python::wildcard_match(p, d)
-                    // Also match on the final segment so `task` matches
-                    // `kovallent.task`.
-                    || d.rsplit('.')
-                        .next()
-                        .is_some_and(|last| python::wildcard_match(p, last))
+
+        let selected = rules.all_functions
+            || rules
+                .name_patterns
+                .iter()
+                .any(|p| python::wildcard_match(p, &f.name))
+            || f.decorators.iter().any(|d| {
+                rules.decorators.iter().any(|p| {
+                    python::wildcard_match(p, d)
+                        // Also match on the final segment so `task` matches
+                        // `kovallent.task`.
+                        || d.rsplit('.')
+                            .next()
+                            .is_some_and(|last| python::wildcard_match(p, last))
+                })
             })
-        });
-        by_user_decorator || self.governing_framework(f).is_some()
+            || self.governing_framework(f).is_some();
+
+        if !selected {
+            return ScopeDecision::OutOfScope;
+        }
+        if self.no_auto_fix_framework(f).is_some() {
+            return ScopeDecision::GovernedReportOnly;
+        }
+        ScopeDecision::Governed
+    }
+
+    /// Tally scope decisions for one parsed file.
+    pub fn scope(&self, a: &Analysis) -> Scope {
+        let mut s = Scope::default();
+        for f in &a.functions {
+            s.functions_total += 1;
+            match self.classify(f) {
+                ScopeDecision::Governed => s.functions_in_scope += 1,
+                ScopeDecision::GovernedReportOnly => {
+                    s.functions_in_scope += 1;
+                    s.functions_report_only += 1;
+                }
+                ScopeDecision::ExemptFramework => s.functions_exempt_framework += 1,
+                ScopeDecision::ExemptUser => s.functions_exempt_user += 1,
+                ScopeDecision::OutOfScope => s.functions_out_of_scope += 1,
+            }
+        }
+        s
     }
 
     /// A governing framework that forbids auto-fixing this function, if any.
@@ -490,7 +644,7 @@ impl FileContext<'_> {
     }
 
     /// Audit a parsed Python file.
-    pub fn audit(&self, path: &Path, source: &str, a: &Analysis) -> Vec<Finding> {
+    pub fn audit(&self, path: &str, source: &str, a: &Analysis) -> Vec<Finding> {
         let mut findings = Vec::new();
         self.check_parameters(path, a, &mut findings);
         if self.engine.contract.secrets.enabled {
@@ -503,7 +657,7 @@ impl FileContext<'_> {
         findings
     }
 
-    fn check_parameters(&self, path: &Path, a: &Analysis, out: &mut Vec<Finding>) {
+    fn check_parameters(&self, path: &str, a: &Analysis, out: &mut Vec<Finding>) {
         for f in &a.functions {
             if !self.governs(f) {
                 continue;
@@ -514,7 +668,15 @@ impl FileContext<'_> {
                     continue;
                 }
                 out.push(Finding {
-                    file: path.to_path_buf(),
+                    fingerprint: finding_fingerprint(
+                        path,
+                        CODE_MISSING_PARAM,
+                        &f.name,
+                        &required.name,
+                    ),
+                    path: path.to_string(),
+                    symbol: f.name.clone(),
+                    subject: required.name.clone(),
                     line: f.line,
                     code: CODE_MISSING_PARAM,
                     severity: required.severity,
@@ -536,7 +698,7 @@ impl FileContext<'_> {
         }
     }
 
-    fn check_secrets(&self, path: &Path, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
+    fn check_secrets(&self, path: &str, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
         let cfg = &self.engine.contract.secrets;
 
         // Rule 1: a suspiciously-named target bound to a string literal.
@@ -549,7 +711,15 @@ impl FileContext<'_> {
                 )
                 .flatten();
             out.push(Finding {
-                file: path.to_path_buf(),
+                fingerprint: finding_fingerprint(
+                    path,
+                    CODE_HARDCODED_SECRET,
+                    &b.key,
+                    "key_pattern",
+                ),
+                path: path.to_string(),
+                symbol: b.key.clone(),
+                subject: "key_pattern".to_string(),
                 line: b.line,
                 code: CODE_HARDCODED_SECRET,
                 severity: Severity::Error,
@@ -592,7 +762,10 @@ impl FileContext<'_> {
                     continue;
                 }
                 out.push(Finding {
-                    file: path.to_path_buf(),
+                    fingerprint: finding_fingerprint(path, CODE_HARDCODED_SECRET, "", name),
+                    path: path.to_string(),
+                    symbol: String::new(),
+                    subject: name.clone(),
                     line,
                     code: CODE_HARDCODED_SECRET,
                     severity: Severity::Error,
@@ -608,7 +781,7 @@ impl FileContext<'_> {
         }
     }
 
-    fn check_infra(&self, path: &Path, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
+    fn check_infra(&self, path: &str, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
         let cfg = &self.engine.contract.infrastructure;
 
         for b in self.flagged_infra(source, a) {
@@ -620,7 +793,10 @@ impl FileContext<'_> {
                 )
                 .flatten();
             out.push(Finding {
-                file: path.to_path_buf(),
+                fingerprint: finding_fingerprint(path, CODE_HARDCODED_INFRA, &b.key, "key_pattern"),
+                path: path.to_string(),
+                symbol: b.key.clone(),
+                subject: "key_pattern".to_string(),
                 line: b.line,
                 code: CODE_HARDCODED_INFRA,
                 severity: cfg.severity,
@@ -661,7 +837,10 @@ impl FileContext<'_> {
                     continue;
                 }
                 out.push(Finding {
-                    file: path.to_path_buf(),
+                    fingerprint: finding_fingerprint(path, CODE_HARDCODED_INFRA, "", name),
+                    path: path.to_string(),
+                    symbol: String::new(),
+                    subject: name.clone(),
                     line,
                     code: CODE_HARDCODED_INFRA,
                     severity: cfg.severity,
@@ -724,7 +903,6 @@ fn relative_slash(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn engine() -> Engine {
         Engine::new(Contract::default()).unwrap()
@@ -733,7 +911,7 @@ mod tests {
     fn run(src: &str) -> Vec<Finding> {
         let e = engine();
         let a = python::analyze(src);
-        e.context(&a).audit(&PathBuf::from("t.py"), src, &a)
+        e.context(&a).audit("t.py", src, &a)
     }
 
     #[test]
@@ -818,6 +996,126 @@ mod tests {
     #[test]
     fn fstring_with_substitution_is_not_hardcoded() {
         assert!(run("token = f\"{prefix}-{suffix}-value\"\n").is_empty());
+    }
+
+    // --- finding fingerprints -------------------------------------------
+
+    /// The one finding in `src` whose subject is `subject`.
+    fn pick(src: &str, subject: &str) -> Finding {
+        let matching: Vec<Finding> = run(src)
+            .into_iter()
+            .filter(|f| f.subject == subject)
+            .collect();
+        assert_eq!(matching.len(), 1, "expected exactly one {subject} finding");
+        matching.into_iter().next().unwrap()
+    }
+
+    /// The fixture the golden value below is pinned to. Changing it changes
+    /// the expected hash.
+    const GOLDEN_SRC: &str = "def deploy_service(name):\n    return name\n";
+    const GOLDEN_PATH: &str = "jobs/raw_ingest.py";
+
+    /// **Intentionally brittle.** This asserts a literal fingerprint so that any
+    /// change to the hashing algorithm, the separator, or the field order shows
+    /// up as a visible diff and has to be a deliberate act. Stored fingerprints
+    /// in the server become unverifiable if this value moves silently, so if
+    /// this test fails, the question is not "what is the new value" but "was
+    /// this change intended, and what happens to recorded history".
+    #[test]
+    fn golden_fingerprint() {
+        let fp = finding_fingerprint(
+            GOLDEN_PATH,
+            CODE_MISSING_PARAM,
+            "deploy_service",
+            "target_environment",
+        );
+        // Verified against an independent SHA-256 of the documented material
+        // string: path \0 code \0 symbol \0 subject, truncated to 16 chars.
+        assert_eq!(fp, "4364552d1995beaf");
+        assert_eq!(fp.len(), FINGERPRINT_LEN);
+    }
+
+    /// Adding an import shifts every line in the file. If the line number were
+    /// part of the identity, that single edit would retire every finding in the
+    /// file and create an equal number of new ones.
+    #[test]
+    fn fingerprint_survives_a_line_shift() {
+        let before = pick(GOLDEN_SRC, "target_environment");
+        let shifted = format!("{}{GOLDEN_SRC}", "\n".repeat(10));
+        let after = pick(&shifted, "target_environment");
+
+        assert_ne!(before.line, after.line, "the fixture should have moved");
+        assert_eq!(before.fingerprint, after.fingerprint);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_the_symbol_is_renamed() {
+        let before = pick(GOLDEN_SRC, "target_environment");
+        let after = pick(
+            &GOLDEN_SRC.replace("deploy_service", "deploy_gateway"),
+            "target_environment",
+        );
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_eq!(after.symbol, "deploy_gateway");
+    }
+
+    #[test]
+    fn fingerprint_changes_when_the_subject_changes() {
+        // Same function, different required parameter.
+        let a = finding_fingerprint("a.py", CODE_MISSING_PARAM, "deploy_service", "dry_run");
+        let b = finding_fingerprint(
+            "a.py",
+            CODE_MISSING_PARAM,
+            "deploy_service",
+            "target_environment",
+        );
+        assert_ne!(a, b);
+    }
+
+    /// The same file reached through different invocation forms must produce
+    /// one identity: `kv-cli audit .` and `kv-cli audit jobs` otherwise yield
+    /// different path strings for the same file.
+    #[test]
+    fn fingerprint_is_invariant_across_invocation_forms() {
+        let root = std::env::temp_dir().join(format!("kvcli-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("jobs")).unwrap();
+        let file = root.join("jobs").join("raw_ingest.py");
+        std::fs::write(&file, GOLDEN_SRC).unwrap();
+
+        // `audit .` from the root, `audit jobs`, and an absolute path all
+        // resolve against the directory holding the contract.
+        let via_dot = normalize_path(&root, &root.join("./jobs/raw_ingest.py"));
+        let via_subdir = normalize_path(&root, &root.join("jobs").join("raw_ingest.py"));
+        let via_abs = normalize_path(&root, &file.canonicalize().unwrap());
+
+        // A bare relative subdir makes `Contract::discover` return a contract
+        // whose parent is the empty path; that must still mean "here".
+        let via_bare = normalize_path(Path::new(""), Path::new("Cargo.toml"));
+        assert_eq!(via_bare, "Cargo.toml");
+
+        assert_eq!(via_dot, "jobs/raw_ingest.py");
+        assert_eq!(via_dot, via_subdir);
+        assert_eq!(via_dot, via_abs);
+
+        let fp = |p: &str| finding_fingerprint(p, CODE_MISSING_PARAM, "deploy_service", "x");
+        assert_eq!(fp(&via_dot), fp(&via_subdir));
+        assert_eq!(fp(&via_dot), fp(&via_abs));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn symbol_and_subject_are_structured_not_parsed_from_the_message() {
+        let f = pick(GOLDEN_SRC, "target_environment");
+        assert_eq!(f.symbol, "deploy_service");
+
+        let f = pick("DB_PASSWORD = \"s3cr3tvalue\"\n", "key_pattern");
+        assert_eq!(f.symbol, "DB_PASSWORD");
+
+        // A value-pattern hit has no binding, so no symbol.
+        let f = pick("key = \"AKIAIOSFODNN7EXAMPLE\"\n", "aws_access_key_id");
+        assert_eq!(f.symbol, "");
     }
 
     // --- framework profiles ---------------------------------------------
@@ -961,7 +1259,7 @@ mod tests {
         let e = Engine::new(c).unwrap();
         let src = "from airflow.decorators import task\n\n@task\ndef extract_orders(bucket):\n    return bucket\n";
         let a = python::analyze(src);
-        let f = e.context(&a).audit(&PathBuf::from("t.py"), src, &a);
+        let f = e.context(&a).audit("t.py", src, &a);
         assert!(f.iter().any(|x| x.code == CODE_MISSING_PARAM));
         assert_eq!(f[0].framework, Some("airflow"));
     }
@@ -1004,7 +1302,7 @@ mod tests {
         // With the profile off, nothing owns the signature, so KV001 applies.
         assert!(e
             .context(&a)
-            .audit(&PathBuf::from("t.py"), src, &a)
+            .audit("t.py", src, &a)
             .iter()
             .any(|f| f.code == CODE_MISSING_PARAM));
     }
@@ -1012,7 +1310,7 @@ mod tests {
     // --- YAML config scanning -------------------------------------------
 
     fn yaml(name: &str, src: &str) -> Vec<Finding> {
-        engine().audit_yaml(&PathBuf::from(name), src)
+        engine().audit_yaml(name, src)
     }
 
     #[test]

@@ -253,7 +253,7 @@ fn collect_secret_edits(
     }
 
     // Value-pattern hits are free-floating text with no binding to rewrite.
-    for f in ctx.audit(&report.file.clone(), source, a) {
+    for f in ctx.audit(&display(&report.file), source, a) {
         if let crate::audit::FindingKind::HardcodedSecret { key: None, .. } = &f.kind {
             report.skipped.push(format!(
                 "{}:{} credential-shaped literal has no assignment target - remove it by hand",
@@ -318,7 +318,7 @@ mod tests {
         let e = engine();
         let a = python::analyze(src);
         e.context(&a)
-            .audit(Path::new("t.py"), src, &a)
+            .audit("t.py", src, &a)
             .iter()
             .all(|f| !f.severity.is_error())
     }

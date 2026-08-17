@@ -5,7 +5,168 @@ versioning follows [Semantic Versioning](https://semver.org/). Pre-1.0, minor
 versions may carry breaking changes.
 
 > `0.1.0` and `0.2.0` were development milestones, not published releases —
-> there are no tags to check out. `0.3.0` is the first version intended to ship.
+> there are no tags to check out. `0.3.0` is the first version intended to ship;
+> `0.4.0` is in progress and will bundle several changes before release.
+
+---
+
+## [0.4.0] — Unreleased
+
+Contract distribution: pinned and verified. The contract stays local, the CLI
+emits its hash, and the server compares that hash against what is deployed for
+the repository — preserving offline operation, the free local tier, and
+air-gapped deployment, none of which survive a mandatory fetch.
+
+### Added
+
+- **Contract fingerprinting.** `Contract::fingerprint()` hashes the *semantic*
+  content of the contract — the parsed struct round-tripped through
+  serialization — not the file bytes. Comments, reformatting and mapping-key
+  order do not affect it; any change to a rule does. A partial contract file and
+  a fully written one that mean the same thing hash identically, which would not
+  be true of raw bytes.
+
+  This depends on every field having a concrete default, which only became true
+  with the partial-contract fix in 0.3.0; the two changes are coupled.
+
+- **Run provenance in JSON output.** `run.contract_sha256`, and
+  `run.contract_path` — `null` when the run used built-in defaults. A run
+  against defaults is a materially different claim from a run against a deployed
+  contract, and the server cannot infer which happened from the hash alone.
+  `run.version` is recorded because the fingerprint is stable only within a
+  schema version, so a mass drift alert after an upgrade must be
+  distinguishable from real drift.
+
+- The contract fingerprint is shown in the `audit` text header.
+
+- [**ADR 0001 — Contract distribution: pinned and verified**](docs/adr/0001-contract-distribution.md),
+  recording the decision, the rejected alternatives (mandatory fetch;
+  raw-byte hashing), and the consequences.
+
+- **`--expect-contract <SHA>`** on `audit`. Compares the local contract's
+  fingerprint against a value the pull-request author cannot edit — an Actions
+  organization variable today, a server-issued hash at Phase 3. The flag's
+  argument changes source; nothing else changes.
+
+- **Exit code `3` — contract drift.** Drift is neither a code failure nor a tool
+  malfunction, so neither `1` nor `2` fits: CI must be able to distinguish *this
+  developer's code is non-compliant* from *this repository's contract was
+  weakened*, because they escalate to different people. Drift outranks findings,
+  since findings computed against the wrong contract are not trustworthy. All
+  four exit codes are now documented together in `--help` and the README.
+  A malformed or empty `--expect-contract` is exit `2`, never a pass — an unset
+  CI variable expands to an empty string.
+
+- `run.contract_expected` and `run.contract_drift` in the JSON payload.
+
+- **`run.skipped[]` and `run.frameworks_detected{}`.** `print_json` previously
+  received neither — a file with a syntax error is audited on tree-sitter's
+  partial parse, which may yield no findings at all, so it was invisible in
+  JSON: not in `findings`, not counted as an error, and still counted in
+  `files_scanned` as though fully analysed. `audit` is the CI gate and CI
+  consumes JSON, so the exact scenario 0.2.0 fixed - "files with syntax errors
+  no longer audit clean" - still held in the human-facing text output but not
+  in the machine-facing one. A permissions error landed in the same silent
+  bucket.
+
+  Each entry is `{path, reason, severity, detail}` rather than a formatted
+  string — `reason` is `"syntax_error"` or `"unreadable"`, a value a server can
+  key on without parsing prose back apart. The two reasons carry different
+  intrinsic severities: a syntax error is a **warning**, consistent with how
+  KV003 was introduced (does not fail CI on day one; promoted under `--strict`,
+  on the same terms as a finding); an unreadable file is always an **error** —
+  there is no lenient reading of "the tool could not check this file", so it
+  gates with or without `--strict`.
+
+  `tests/cli.rs` runs the compiled binary end to end: a syntax-error fixture
+  exits `0` by default and `1` under `--strict`; an unreadable file (POSIX
+  permissions) exits `1` unconditionally; a run carrying a `skipped` entry
+  still validates against the frozen schema.
+
+- **Stable finding identity.** Every finding carries a `fingerprint`:
+  `sha256(path \0 code \0 symbol \0 subject)` truncated to 16 characters. The
+  line number is excluded deliberately — adding an import shifts every line in a
+  file, and including it would retire every finding there and create an equal
+  number of new ones.
+
+- **`symbol` and `subject` as structured fields on `Finding`.** The governed
+  function and required parameter (KV001), or the assignment target and detector
+  (KV002/KV003), were previously recoverable only by parsing the human-readable
+  `message`. They are now data; `message` stays free to change. This is what
+  makes per-finding suppression and cross-repository grouping possible without
+  string matching.
+
+- **Paths are normalized before hashing.** Repository-relative and
+  forward-slashed, resolved against the directory holding the discovered
+  contract (or the invocation root). `kv-cli audit .`, `audit jobs`,
+  `audit ./jobs/x.py` and an absolute path now yield one identity.
+
+- **`schema_version`, independent of `tool_version`.** Both are emitted. The
+  tool version moves every release and says nothing about whether a consumer
+  still parses; the schema version bumps only on a breaking payload change.
+  `run.version` is renamed `run.tool_version`.
+
+- **Run identity**: `repo`, `commit`, `branch`, `timestamp` (RFC 3339 UTC), and
+  the `strict` flag, alongside the contract provenance. The CLI cannot invent
+  repo and commit, so they are read from the CI environment (GitHub, GitLab,
+  Buildkite) or supplied via `--repo`, `--commit`, `--branch`. `identity_source`
+  records where each value came from — `"flag"`, `"env:GITHUB_SHA"`, or absent —
+  so a missing value is distinguishable from a wrongly-guessed one.
+
+- **The `scope` block.** Real instrumentation rather than plumbing:
+  `functions_total`, `functions_in_scope`, `functions_report_only`,
+  `functions_exempt_framework`, `functions_exempt_user`,
+  `functions_out_of_scope`. `owns_signature` was previously consulted as a
+  predicate and the answer discarded, so an exempt function was
+  indistinguishable from a compliant one — a repository where every governed
+  function is framework-owned looked identical to one that fully complies.
+  Framework ownership and the customer's `exempt_name_patterns` are counted
+  **separately**: the first is our exemption, the second is theirs.
+
+- **`schema/findings.v1.json`**, generated from the Rust types by
+  `kv-cli schema`. A test regenerates it and asserts byte equality with the
+  committed document, and a second validates a real audit run against it, so
+  the document cannot drift from the code.
+
+- Dependencies: `sha2`, `schemars`; `jsonschema` (dev only, default features
+  off).
+
+### Changed
+
+- **Severity is reported as emitted, not as counted.** Under `--strict`,
+  `errors` previously counted every finding and `warnings` was therefore zero,
+  so the payload could not say how many findings were intrinsically warnings.
+  Counts are now intrinsic and `strict` is emitted alongside; applying the
+  policy is the consumer's decision. Exit codes are unchanged.
+- **`Finding.file` is now `Finding.path`**, a normalized repository-relative
+  string rather than the path as invoked. Text output groups on it too, so
+  reports read the same however the scan was started.
+- **JSON output is restructured**: run metadata moved from the top level into a
+  `run` object, alongside the new `contract_sha256` and `contract_path` fields.
+  `findings` remains top level. Breaking for any consumer of the 0.3.0 shape.
+- Unit tests: 92 → 121, plus 5 end-to-end tests against the compiled
+  binary in `tests/cli.rs` (new).
+
+### Upgrading from 0.3.0
+
+- **`--format json` consumers must be updated.** Run metadata moved from the
+  top level into `run`; `tool`/`version` became `tool_version` (with a new
+  `schema_version`); `Finding.file` became `Finding.path`. Validate against
+  `schema/findings.v1.json`.
+- **`errors` and `warnings` no longer reflect `--strict`.** A consumer that
+  read `errors` as "things that gate" must now apply `strict` itself, or read
+  the exit code.
+- **A file can now gate the run without appearing in `findings`.** A consumer
+  that determined pass/fail purely from `findings.length == 0` was already
+  wrong before this release (it ignored the exit code); it is now visibly
+  wrong, since a repository with only a skipped file reports zero findings and
+  a non-zero exit under `--strict`. Read `run.skipped` too.
+- **Exit code `3` is new.** Any CI step treating "non-zero" as a single failure
+  mode will now conflate drift with findings. Handle `3` explicitly.
+- **Contract drift is asserted, not adjudicated.** The CLI reports which
+  contract it used and whether it matches what it was told to expect. The
+  authoritative value lives outside the repository; the third check-run
+  conclusion arrives with the server at Phase 3.
 
 ---
 
@@ -193,16 +354,17 @@ Initial prototype.
 
 ## Current state
 
-92 unit tests. `make check` (fmt, `clippy -D warnings`, tests) passes clean.
+121 unit tests. `make check` (fmt, `clippy -D warnings`, tests) passes clean.
 
 | Module | Lines | Tests |
 | --- | --- | --- |
-| `audit.rs` | 1056 | 33 |
-| `config.rs` | 721 | 5 |
+| `audit.rs` | 1354 | 39 |
+| `config.rs` | 858 | 13 |
 | `python.rs` | 718 | 16 |
-| `main.rs` | 565 | — |
+| `main.rs` | 872 | — |
 | `fix.rs` | 537 | 23 |
 | `frameworks.rs` | 314 | 6 |
+| `payload.rs` | 453 | 10 |
 | `yamlscan.rs` | 242 | 9 |
 
 ### Known limits
@@ -215,3 +377,11 @@ Initial prototype.
   framework-scoped, and are the most likely source of first-run noise.
 - dbt SQL models are not parsed; dbt coverage is Python models plus YAML
   credentials.
+- The contract fingerprint is truncated to 64 bits — sized for change
+  detection, not for resisting a prepared collision. See ADR 0001.
+- Stage-one enforcement has a known hole: anyone with write access can edit the
+  workflow to drop `--expect-contract`. Mitigated by `CODEOWNERS` plus branch
+  protection, or an organization ruleset — configuration, not code. Recorded in
+  ADR 0001 rather than left implied.
+- The third check-run conclusion (compliant / findings / drift) is Phase 3 work;
+  this repository contains no server component.
