@@ -254,7 +254,7 @@ the framework's own detectors.
 
 ## 💬 Community & Feedback
 
-Have a question, feature request, or idea for a new `kv-cli` rule? 
-- 💡 [Propose a Feature](https://github.com/kovallent/kv-cli/discussions/new?category=ideas)
+Have a question, feature request, or idea for a new `kv-cli` rule?
+- 💡 [Propose a Feature](https://github.com/kovallent/kv-cli/discussions/new?category=ideas-feature-requests)
 - ❓ [Ask a Question](https://github.com/kovallent/kv-cli/discussions/new?category=q-a)
 - 🌐 [Join the Kovallent Enterprise Waitlist](https://www.kovallent.com)
