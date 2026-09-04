@@ -1,6 +1,6 @@
 # 0002 — Tenancy: a repository belongs to exactly one workspace
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-04
 - **Deciders:** platform
 - **Supersedes:** none
