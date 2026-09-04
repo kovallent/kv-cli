@@ -5,7 +5,7 @@
 Sub-200ms local AST guardrails for Apache Airflow, PySpark, dbt, Databricks, Snowpark, Flink, and Polars pipelines.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/kovallent/kv-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
