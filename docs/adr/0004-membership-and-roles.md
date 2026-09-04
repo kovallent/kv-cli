@@ -1,6 +1,6 @@
 # 0004 — Membership and roles
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-04
 - **Deciders:** platform
 - **Supersedes:** none
