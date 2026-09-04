@@ -5,12 +5,11 @@ on:
     tags:
       - 'v*'
 
-# Grant explicit permission to create releases and upload assets
 permissions:
   contents: write
 
 jobs:
-  build-release:
+  build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -19,16 +18,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact_name: kv-cli-linux-amd64
+          # Graviton / ARM CI runners, and a prerequisite for ARM Linux
+          # wheels or Homebrew on ARM Linux later.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact_name: kv-cli-macos-arm64
+          # macos-13 was GitHub's last Intel image and is retired. All
+          # current macOS runners are arm64, so Intel is cross-compiled —
+          # both Apple targets ship in the same Xcode toolchain.
           - target: x86_64-apple-darwin
-            os: macos-13
-            artifact_name: kv-cli-macos-x86_64
+            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact_name: kv-cli-windows-amd64.exe
 
     steps:
       - name: Checkout Code
@@ -39,22 +42,55 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # tree-sitter's grammar is C, so a cross build needs a cross cc,
+      # not just the Rust target.
+      - name: Install cross linker (Linux aarch64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+          } >> "$GITHUB_ENV"
+
       - name: Build Binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename & Package Binary
+      - name: Package Binary
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release/
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv kv-cli.exe ${{ matrix.artifact_name }}
-          else
-            mv kv-cli ${{ matrix.artifact_name }}
-          fi
+          mkdir -p dist
+          bin=kv-cli
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=kv-cli.exe; fi
+          tar -czf "dist/kv-cli-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" "$bin"
 
-      - name: Upload Binary to GitHub Release
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kv-cli-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  # One release job instead of five racing to create the same release —
+  # and the only place SHA256SUMS can be computed over the full set.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kv-cli-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate Checksums
+        run: cd dist && sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
