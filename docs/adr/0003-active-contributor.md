@@ -1,6 +1,6 @@
 # 0003 — Definition of an active contributor
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-04
 - **Deciders:** platform
 - **Supersedes:** none
