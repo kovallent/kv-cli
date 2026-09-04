@@ -37,6 +37,16 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Verify tag matches Cargo.toml
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
