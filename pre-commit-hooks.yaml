@@ -1,0 +1,6 @@
+- id: kv-cli
+  name: kv-cli contract audit
+  description: Audit Python pipelines for contract breaches, hardcoded secrets, and pinned infrastructure.
+  entry: kv-cli audit
+  language: rust
+  types_or: [python, yaml]
