@@ -126,7 +126,7 @@ Add `kv-cli` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.4.0
+    rev: v0.4.1
     hooks:
       - id: kv-cli
 ```
