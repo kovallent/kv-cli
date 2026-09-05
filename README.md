@@ -41,6 +41,7 @@ Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1`
 
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
+./kv-cli init                           # created wrote ./.kovallent.yaml
 ./kv-cli audit --strict samples/        # FAIL 13 errors, 6 warnings — by design
 ./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 ./kv-cli audit samples/compliant.py     # PASS — must always be clean
@@ -104,7 +105,7 @@ There is currently **no PyPI or Homebrew distribution**. `pip install kv-cli` wi
 
 | Command | Purpose |
 | --- | --- |
-| `kv-cli init` | Write a default `.kovallent.yaml` contract. `--force` overwrites. |
+| `kv-cli init` | Write a default `.kovallent.yaml` contract and report what it enables — required parameters, secret detector counts, framework profiles. `--force` overwrites. Start here. |
 | `kv-cli audit [PATHS]` | Scan for violations. `--format json`, `--strict`, `--config`, `--expect-contract`. |
 | `kv-cli fix [PATHS]` | Apply standard fixes. `--dry-run`, `--no-backup`. |
 | `kv-cli frameworks` | Show the built-in profiles and what each contributes. |
