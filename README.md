@@ -8,11 +8,12 @@
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
 <p align="center">
-  <img src="docs/media/kv-cli-demo.svg" alt="kv-cli audit --strict on deploy.py reports DB_PASSWORD assigned a hardcoded literal at line 11 (KV002, value redacted) and deploy_service missing the contract parameter target_environment at line 20 (KV001), failing with 13 errors and 6 warnings. kv-cli fix adds target_environment to deploy_service, rewrites DB_PASSWORD to read os.environ[DB_PASSWORD], flags a hardcoded default on line 90 for manual review, and applies 18 changes across 1 file. After that one line is threaded by hand, audit --strict reports PASS, 2 files are compliant." width="800">
+  <img src="docs/media/kv-cli-demo.svg" alt="kv-cli init writes ./.kovallent.yaml, reporting required parameters target_environment and dry_run, 9 secret name patterns and 7 value patterns, and six framework profiles. kv-cli audit --strict then reports DB_PASSWORD assigned a hardcoded literal at line 11 (KV002, value redacted) and deploy_service missing target_environment at line 20 (KV001), failing with 13 errors and 6 warnings. kv-cli fix adds the parameter, rewrites DB_PASSWORD to read os.environ[DB_PASSWORD], flags a hardcoded default on line 90 for manual review, and applies 18 changes across 1 file. After that one line is threaded by hand, audit --strict reports PASS, 2 files are compliant." width="800">
 </p>
 
-That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — fail, fix, pass. Four things are worth noticing:
+That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — init, fail, fix, pass. Five things are worth noticing:
 
+- **`init` writes the contract and says what it enabled** — two required parameters, 16 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
 - **`deploy_service` is missing `target_environment`.** The function runs fine and passes tests; in production it silently takes the dev default. No linter has a rule for this.
 - **The secret value is redacted in the output** — `value "s3…" (<redacted>, 20 chars)`. A tool that reports credentials in CI logs has moved the leak, not closed it.
 - **`fix` rewrites it rather than describing it**: `DB_PASSWORD` now reads `os.environ["DB_PASSWORD"]`, with `import os` inserted above the existing imports. 18 changes land automatically; the hardcoded *default* on line 90 is deliberately left as a `manual:` item, because `os.environ[...]` in a default binds once at import time rather than per call. Thread that one line yourself and the re-run reports `PASS`.
