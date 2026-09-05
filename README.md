@@ -1,13 +1,62 @@
 # kv-cli
 
-**The shift-left control plane for data engineering.**
-
-Sub-200ms local AST guardrails for Apache Airflow, PySpark, dbt, Databricks, Snowpark, Flink, and Polars pipelines.
+**Sub-200ms local contract guardrails for data pipelines.** Airflow, dbt, PySpark, Databricks, Snowpark, Flink, Polars.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
+
+<p align="center">
+  <img src="docs/media/kv-cli-demo.svg" alt="kv-cli audit --strict on deploy.py reports DB_PASSWORD assigned a hardcoded literal at line 11 (KV002, value redacted) and deploy_service missing the contract parameter target_environment at line 20 (KV001), failing with 13 errors and 6 warnings. kv-cli fix adds target_environment to deploy_service, rewrites DB_PASSWORD to read os.environ[DB_PASSWORD], flags a hardcoded default on line 90 for manual review, and applies 18 changes across 1 file. After that one line is threaded by hand, audit --strict reports PASS, 2 files are compliant." width="800">
+</p>
+
+That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — fail, fix, pass. Four things are worth noticing:
+
+- **`deploy_service` is missing `target_environment`.** The function runs fine and passes tests; in production it silently takes the dev default. No linter has a rule for this.
+- **The secret value is redacted in the output** — `value "s3…" (<redacted>, 20 chars)`. A tool that reports credentials in CI logs has moved the leak, not closed it.
+- **`fix` rewrites it rather than describing it**: `DB_PASSWORD` now reads `os.environ["DB_PASSWORD"]`, with `import os` inserted above the existing imports. 18 changes land automatically; the hardcoded *default* on line 90 is deliberately left as a `manual:` item, because `os.environ[...]` in a default binds once at import time rather than per call. Thread that one line yourself and the re-run reports `PASS`.
+- **The run states its own scope.** `10 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope` is the denominator behind the result — without it, a repository where every function is framework-owned looks identical to one that complies.
+
+---
+
+## Run it on your own code
+
+No account, no clone, no config. The analysis path makes no network call.
+
+```bash
+# 1. Get the binary — no toolchain, ~2MB, no runtime dependencies
+#    (pick your platform's archive from the Releases page)
+curl -sSL https://github.com/kovallent/kv-cli/releases/latest/download/kv-cli-x86_64-unknown-linux-gnu.tar.gz | tar xz
+
+# 2. Point it at a pipeline repository
+./kv-cli audit ~/your-pipeline-repo
+```
+
+Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1` if there are findings.
+
+### Or clone and run the bundled samples
+
+`samples/` ships pipelines that trip every rule, so you can read real output before trusting it on your own code:
+
+```bash
+git clone https://github.com/kovallent/kv-cli && cd kv-cli
+./kv-cli audit --strict samples/        # FAIL 13 errors, 6 warnings — by design
+./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
+./kv-cli audit samples/compliant.py     # PASS — must always be clean
+```
+
+`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors.
+
+> If you build from source instead of downloading the binary, budget a few minutes for the first compile — `cargo` builds the tree-sitter grammar and needs a C compiler. `make demo` builds and then audits `samples/` in one step.
+
+### It found nothing. Is it working?
+
+Three common causes, all of them by design:
+
+1. **Your models are SQL.** Analysis is Python only. A hardcoded relation in a `.sql` file is not seen.
+2. **No contract file, so defaults applied.** Run `kv-cli init` and enable the rules you want.
+3. **The framework owns your signatures.** Check the scope line in the output — if `in scope` is low relative to the total, that is the exemption working, not a miss. See [Framework support](#framework-support).
 
 ---
 
@@ -30,6 +79,8 @@ chmod +x kv-cli && sudo mv kv-cli /usr/local/bin/
 kv-cli --version
 ```
 
+Each release ships `SHA256SUMS` for verification.
+
 **With Cargo:**
 
 ```bash
@@ -49,37 +100,6 @@ There is currently **no PyPI or Homebrew distribution**. `pip install kv-cli` wi
 
 ---
 
-## See it work
-
-The repository ships sample pipelines that trip every rule, so you can see real output before pointing the tool at your own code:
-
-```bash
-kv-cli audit samples/                 # exits 1 — by design
-kv-cli audit samples/compliant.py     # exits 0
-```
-
-`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors.
-
-Then try it on your own repository:
-
-```bash
-cd ~/your-pipeline-repo
-kv-cli init          # writes a commented .kovallent.yaml
-kv-cli audit .
-```
-
-`init` is optional — without a contract file the built-in defaults apply, so the tool is useful before it is configured.
-
-### It found nothing. Is it working?
-
-Three common causes, all of them by design:
-
-1. **Your models are SQL.** Analysis is Python only. A hardcoded relation in a `.sql` file is not seen.
-2. **No contract file, so defaults applied.** Run `kv-cli init` and enable the rules you want.
-3. **The framework owns your signatures.** Check the scope line in the output — if `in scope` is low relative to the total, that is the exemption working, not a miss. See [Framework support](#framework-support) below.
-
----
-
 ## Commands
 
 | Command | Purpose |
@@ -89,18 +109,6 @@ Three common causes, all of them by design:
 | `kv-cli fix [PATHS]` | Apply standard fixes. `--dry-run`, `--no-backup`. |
 | `kv-cli frameworks` | Show the built-in profiles and what each contributes. |
 | `kv-cli schema` | Print the JSON payload schema this build emits. |
-
----
-
-## Stack compatibility
-
-* **Python:** 3.9, 3.10, 3.11, 3.12+
-* **dbt:** `def model(dbt, session)` model signatures; `profiles.yml` credential scanning.
-* **Apache Airflow:** `@dag`, `@task_group`, `@setup`, `@teardown`, `@task` governance; Fernet keys; `conn_id`, pool, queue.
-* **PySpark / Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
-* **Snowpark:** `@sproc`, `@udf`; session config account, warehouse, role.
-* **Flink:** `@udf`, `@udtf`, `@udaf`; broker and JDBC endpoints via `pyflink`.
-* **Polars:** `storage_options` credentials and object-store path identifiers.
 
 ---
 
@@ -145,46 +153,6 @@ repos:
 ```
 
 A hook is advisory by construction — `--no-verify` skips it, and a fresh clone installs none. It is where a finding is cheapest to fix, not where compliance is guaranteed. That is what the CI gate is for.
-
----
-
-## Contract distribution and verification
-
-The contract stays local. `audit --format json` emits a semantic fingerprint of it under `run.contract_sha256`, which a server compares against what is deployed for the repository; drift is reported as its own outcome rather than as a code failure. This keeps `audit` working offline, on the free local tier, and in air-gapped deployments — none of which survive a mandatory fetch.
-
-The hash covers the parsed contract, not the file bytes, so reformatting or editing a comment is not drift while editing a rule is. `run.contract_path` is `null` when the run used built-in defaults.
-
-### Enforcing the pin today
-
-No service is required. The expected hash has to live somewhere the developer opening the pull request cannot edit — an Actions organization variable is exactly that:
-
-```yaml
-- name: Kovallent gate
-  run: kv-cli audit --strict --format json --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}
-```
-
-On mismatch the run exits `3`, distinct from findings (`1`) and tool errors (`2`).
-
-Committing the expected hash to the repository instead is weaker — whoever weakens the contract can update the lock in the same commit.
-
-*Known gap:* anyone with write access can edit the workflow to drop the flag. Close it with `CODEOWNERS` on `.github/workflows/` plus branch protection, or an organization ruleset that requires the check. See [ADR 0001](docs/) for rationale, rejected alternatives, and staging plans.
-
----
-
-## The JSON payload schema
-
-`schema/findings.v1.json` is generated from the Rust types by `kv-cli schema`; a test asserts the committed document matches and that a real run validates against it, so the two cannot drift.
-
-* **Version and identity.** `run` carries `schema_version` (bumped only on a breaking payload change, independent of `tool_version`), run identity (`repo`, `commit`, `branch`, `timestamp`), contract provenance, and a scope block. Identity is never guessed: `repo` and `commit` come from the CI environment (`GITHUB_REPOSITORY`, `CI_COMMIT_SHA`, …) or from `--repo` / `--commit` / `--branch`, and `identity_source` records which — `"flag"`, `"env:GITHUB_SHA"`, or absent.
-* **Severity reporting.** Severity is reported as emitted. `errors` and `warnings` count intrinsic severities regardless of `--strict`; the flag is emitted so a consumer can apply the policy itself. Otherwise a strict run reports every finding as an error and the payload cannot say how many were warnings.
-* **Completeness.** No file can vanish from the payload. Every file `kv-cli` resolves for scanning is either represented in `findings`/`files_scanned` or named in `run.skipped[]` as `{path, reason, severity, detail}`, reason being `"syntax_error"` or `"unreadable"`. A syntax error is a warning — matching how `KV003` was introduced, it does not fail CI by default and is promoted under `--strict`. An unreadable file is always an error, since there is no lenient reading of "the tool could not check this file."
-* **Scope block.** The scope block is the evidence behind a green result. Without it, a repository where every governed function is framework-owned looks identical to one that fully complies:
-
-```text
-functions: 15 in scope, 5 framework-exempt, 2 user-exempt, 2 out of scope
-```
-
-Framework ownership and the contract's `exempt_name_patterns` are counted separately — the first is ours, the second is the customer's choice.
 
 ---
 
@@ -239,6 +207,18 @@ frameworks:
 
 ---
 
+## Stack compatibility
+
+* **Python:** 3.9, 3.10, 3.11, 3.12+
+* **dbt:** `def model(dbt, session)` model signatures; `profiles.yml` credential scanning.
+* **Apache Airflow:** `@dag`, `@task_group`, `@setup`, `@teardown`, `@task` governance; Fernet keys; `conn_id`, pool, queue.
+* **PySpark / Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
+* **Snowpark:** `@sproc`, `@udf`; session config account, warehouse, role.
+* **Flink:** `@udf`, `@udtf`, `@udaf`; broker and JDBC endpoints via `pyflink`.
+* **Polars:** `storage_options` credentials and object-store path identifiers.
+
+---
+
 ## Contract configuration (`.kovallent.yaml`)
 
 `.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), and the secret detectors. Run `kv-cli init` for a fully commented template.
@@ -256,6 +236,46 @@ rules:
     ignore_paths:
       - "tests/fixtures/*"
 ```
+
+---
+
+## Contract distribution and verification
+
+The contract stays local. `audit --format json` emits a semantic fingerprint of it under `run.contract_sha256`, which a server compares against what is deployed for the repository; drift is reported as its own outcome rather than as a code failure. This keeps `audit` working offline, on the free local tier, and in air-gapped deployments — none of which survive a mandatory fetch.
+
+The hash covers the parsed contract, not the file bytes, so reformatting or editing a comment is not drift while editing a rule is. `run.contract_path` is `null` when the run used built-in defaults.
+
+### Enforcing the pin today
+
+No service is required. The expected hash has to live somewhere the developer opening the pull request cannot edit — an Actions organization variable is exactly that:
+
+```yaml
+- name: Kovallent gate
+  run: kv-cli audit --strict --format json --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}
+```
+
+On mismatch the run exits `3`, distinct from findings (`1`) and tool errors (`2`).
+
+Committing the expected hash to the repository instead is weaker — whoever weakens the contract can update the lock in the same commit.
+
+*Known gap:* anyone with write access can edit the workflow to drop the flag. Close it with `CODEOWNERS` on `.github/workflows/` plus branch protection, or an organization ruleset that requires the check. See [ADR 0001](docs/adr/) for rationale, rejected alternatives, and staging plans.
+
+---
+
+## The JSON payload schema
+
+`schema/findings.v1.json` is generated from the Rust types by `kv-cli schema`; a test asserts the committed document matches and that a real run validates against it, so the two cannot drift.
+
+* **Version and identity.** `run` carries `schema_version` (bumped only on a breaking payload change, independent of `tool_version`), run identity (`repo`, `commit`, `branch`, `timestamp`), contract provenance, and a scope block. Identity is never guessed: `repo` and `commit` come from the CI environment (`GITHUB_REPOSITORY`, `CI_COMMIT_SHA`, …) or from `--repo` / `--commit` / `--branch`, and `identity_source` records which — `"flag"`, `"env:GITHUB_SHA"`, or absent.
+* **Severity reporting.** Severity is reported as emitted. `errors` and `warnings` count intrinsic severities regardless of `--strict`; the flag is emitted so a consumer can apply the policy itself. Otherwise a strict run reports every finding as an error and the payload cannot say how many were warnings.
+* **Completeness.** No file can vanish from the payload. Every file `kv-cli` resolves for scanning is either represented in `findings`/`files_scanned` or named in `run.skipped[]` as `{path, reason, severity, detail}`, reason being `"syntax_error"` or `"unreadable"`. A syntax error is a warning — matching how `KV003` was introduced, it does not fail CI by default and is promoted under `--strict`. An unreadable file is always an error, since there is no lenient reading of "the tool could not check this file."
+* **Scope block.** The scope block is the evidence behind a green result. Without it, a repository where every governed function is framework-owned looks identical to one that fully complies:
+
+```text
+functions: 10 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope
+```
+
+Framework ownership and the contract's `exempt_name_patterns` are counted separately — the first is ours, the second is the customer's choice.
 
 ---
 
@@ -296,7 +316,7 @@ YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a pa
 ```bash
 make test     # unit tests (121)
 make check    # fmt --check + clippy -D warnings + tests
-make demo     # audit samples/ (exits 1 by design)
+make demo     # build, then audit samples/ (exits 1 by design)
 ```
 
 `samples/compliant.py` must always audit clean. `cargo run --example dump <file.py>` prints the parse tree with field names — useful when adding a rule that needs a node kind you have not handled yet.
