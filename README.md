@@ -186,8 +186,8 @@ Config files are where environment-specific values belong, so `KV003` never appl
 
 A literal is a credential when either rule says so:
 
-1. **Its shape** — a value pattern (AWS, GitHub, Stripe, Google, JWT, PEM, a URL with a password, …) matches it, under any name and anywhere in the file, comments and notebook outputs included.
-2. **Its name** — it is assigned to a name matching `secrets.key_patterns` (`*password*`, `*token*`, …), unless the name only *refers to* a credential (`secrets.exempt_key_patterns`: `secret_name`, `token_url`, `credentials_path`, …) or the value is a placeholder (`allow_values`, `placeholder_patterns`: `changeme`, `your-api-key-here`, `<token>`), a reference (`${VAR}`, `{{ var }}`, an f-string substitution) or shorter than `min_value_length`.
+1. **Its shape** — a value pattern (AWS, GitHub, Stripe, Google, JWT, PEM, a URL with a password, …) matches it, under any name and anywhere in the file, comments and notebook outputs included — and across an implicit concatenation, so `"ghp_abc" "def"` is read as the one token it spells.
+2. **Its name** — it is assigned to, or compared against (`if password == "..."`), a name matching `secrets.key_patterns` (`*password*`, `*token*`, …), unless the name only *refers to* a credential (`secrets.exempt_key_patterns`: `secret_name`, `token_url`, `credentials_path`, …) or the value is a placeholder (`allow_values`, `placeholder_patterns`: `changeme`, `your-api-key-here`, `<token>`), a reference (`${VAR}`, `{{ var }}`, an f-string substitution) or shorter than `min_value_length`.
 
 Exemptions and placeholders apply to the name rule only, so a real token is reported whatever it is called. A pattern that matches everything (`"*"`) is rejected: to turn a rule off, say so (`key_patterns: []`).
 

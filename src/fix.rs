@@ -630,6 +630,18 @@ mod tests {
         }
     }
 
+    /// Rewriting the literal keeps the comparison's meaning and moves the
+    /// value out of the source.
+    #[test]
+    fn comparison_literal_is_rewritten() {
+        let out = fixed("import os\nif password == \"abcd1234efgh\":\n    pass\n");
+        assert_eq!(
+            out,
+            "import os\nif password == os.environ[\"PASSWORD\"]:\n    pass\n"
+        );
+        assert!(audit_clean(&out));
+    }
+
     #[test]
     fn env_var_naming() {
         assert_eq!(env_var_name("", "db.password"), "DB_PASSWORD");

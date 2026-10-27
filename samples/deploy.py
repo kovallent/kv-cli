@@ -60,7 +60,7 @@ def run_report(target_environment: str = "dev", dry_run: bool = False):
     banner = f"report for {target_environment}"
     placeholder_token = "changeme"
     legacy_token = "abcd1234efgh"  # kovallent:allow-secret
-    if placeholder_token == "abcd1234efgh":
+    if placeholder_token == "changeme":
         pass
     return api_key, banner, legacy_token
 

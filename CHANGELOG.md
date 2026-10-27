@@ -11,6 +11,27 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed — KV002 recall
+
+Measured on the labelled corpus (now 1,339 cases, with a comparison form
+added to the matrix): recall 97.9% → 99.8%, precision unchanged at 100%. The
+one remaining miss is the latin-1 source file.
+
+- **A literal compared against a credential is reported.** `if password ==
+  "..."` and `"..." != self.token` are judged by the key-name rule like an
+  assignment; `fix` rewrites the literal to `os.environ[...]`, which keeps the
+  comparison's meaning. Only a plain two-operand `==` / `!=` counts. KV003
+  does not apply: `if warehouse == "PROD_WH":` branches on the environment
+  rather than pinning to it. `samples/deploy.py` compared a token against a
+  real-looking literal under "these must NOT be reported"; it now compares
+  against a placeholder, which is still not reported.
+- **Value patterns read the joined text of a concatenation,** wherever it
+  appears - assigned, passed as an argument, parenthesized - so a token split
+  as `"ghp_abc" "def"` is caught under any name or none. A concatenation with
+  an interpolated part is computed and skipped.
+- No contract change, so no fingerprint moves. Existing findings and their
+  fingerprints are unchanged.
+
 ### Changed — KV002 precision
 
 Measured on the labelled corpus: precision 47.9% → 100%, recall 99.6% →
@@ -34,9 +55,10 @@ real test.
   "geme"` is the placeholder it spells.
 - A pattern of only `*` in either new list is rejected (exit `2`): it would
   disable the rule while the contract still looked configured.
-- The recall cost is 8 corpus cases, all one shape: a token split across
-  concatenation under an exempt name (`tokenizer = "ghp_..." "..."`). Those
-  were only ever caught because the name contained "token".
+- The recall cost was 8 corpus cases, all one shape: a token split across
+  concatenation under an exempt name (`tokenizer = "ghp_..." "..."`), only
+  ever caught because the name contained "token". The concatenation pass under
+  "KV002 recall" above recovers them.
 
 **Fingerprints (ADR 0001).** Adding fields changes every contract's
 fingerprint once, including contracts that never mention them - an

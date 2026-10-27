@@ -57,6 +57,9 @@ pub enum BindingSource {
     /// `NAME += "..."` - detected, but never rewritten: replacing the literal
     /// would append the whole environment value to whatever came before.
     AugmentedAssignment,
+    /// `password == "..."` or `"..." != self.token` - a literal the code
+    /// checks a credential against is as hardcoded as one it assigns.
+    Comparison,
 }
 
 /// A string literal bound to a name. Tuple targets are paired element-wise,
@@ -140,6 +143,9 @@ pub struct Analysis {
     /// Byte ranges of every `#` comment, in source order. Ignore markers only
     /// count inside one - a marker in a string literal is data, not intent.
     pub comments: Vec<Range<usize>>,
+    /// Every implicit concatenation (`"ghp_abc" "def"`), wherever it appears.
+    /// Its joined text is a value no raw-text match can see.
+    pub concatenations: Vec<StringLiteral>,
     line_starts: Vec<usize>,
     source_len: usize,
 }
@@ -194,6 +200,7 @@ pub fn analyze(source: &str) -> Analysis {
         imports: Imports::default(),
         has_error: false,
         comments: Vec::new(),
+        concatenations: Vec::new(),
         line_starts: line_starts(source),
         source_len: source.len(),
     };
@@ -219,6 +226,7 @@ pub fn analyze(source: &str) -> Analysis {
         functions: Vec::new(),
         bindings: Vec::new(),
         comments: Vec::new(),
+        concatenations: Vec::new(),
     };
     let root = tree.root_node();
     walk(root, &mut ctx);
@@ -228,6 +236,7 @@ pub fn analyze(source: &str) -> Analysis {
         mut functions,
         mut bindings,
         mut comments,
+        concatenations,
         ..
     } = ctx;
     functions.sort_by_key(|f| f.start);
@@ -237,6 +246,7 @@ pub fn analyze(source: &str) -> Analysis {
     analysis.functions = functions;
     analysis.bindings = bindings;
     analysis.comments = comments;
+    analysis.concatenations = concatenations;
     analysis
 }
 
@@ -328,6 +338,7 @@ struct Ctx<'a> {
     functions: Vec<FunctionDef>,
     bindings: Vec<Binding>,
     comments: Vec<Range<usize>>,
+    concatenations: Vec<StringLiteral>,
 }
 
 impl Ctx<'_> {
@@ -388,6 +399,12 @@ fn visit(node: Node, ctx: &mut Ctx) {
             ctx,
         ),
         "call" => collect_env_fallback(node, ctx),
+        "comparison_operator" => collect_comparison(node, ctx),
+        "concatenated_string" => {
+            if let Some(literal) = literal_of(node, ctx) {
+                ctx.concatenations.push(literal);
+            }
+        }
         "pair" => bind(
             node.child_by_field_name("key"),
             node.child_by_field_name("value"),
@@ -509,6 +526,31 @@ fn collect_env_fallback(node: Node, ctx: &mut Ctx) {
                 .and_then(|a| a.child_by_field_name("value"))
         });
     bind(Some(var), fallback, BindingSource::EnvFallback, ctx);
+}
+
+/// `password == "literal"` or `"literal" != self.token`: whichever side is the
+/// literal binds to the other. Only a plain two-operand `==` / `!=` - a
+/// chained comparison (`a == b == "x"`) is left alone rather than guessed at.
+fn collect_comparison(node: Node, ctx: &mut Ctx) {
+    let operands = named_children(node);
+    let mut cursor = node.walk();
+    let operators: Vec<&str> = node
+        .children(&mut cursor)
+        .filter(|c| !c.is_named())
+        .map(|c| c.kind())
+        .collect();
+    let [left, right] = operands.as_slice() else {
+        return;
+    };
+    if !matches!(operators.as_slice(), ["=="] | ["!="]) {
+        return;
+    }
+    let (name, value) = if literal_of(*right, ctx).is_some() {
+        (*left, *right)
+    } else {
+        (*right, *left)
+    };
+    bind(Some(name), Some(value), BindingSource::Comparison, ctx);
 }
 
 fn bind(name: Option<Node>, value: Option<Node>, source: BindingSource, ctx: &mut Ctx) {
@@ -842,8 +884,38 @@ mod tests {
     }
 
     #[test]
-    fn comparison_is_not_a_binding() {
-        assert!(keys("if password == \"abcd1234\":\n    pass\n").is_empty());
+    fn comparisons_bind_whichever_side_is_the_literal() {
+        let a = analyze("if password == \"v1\":\n    pass\nif \"v2\" != self.token:\n    pass\n");
+        let got: Vec<_> = a
+            .bindings
+            .iter()
+            .map(|b| (b.key.as_str(), b.source))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("password", BindingSource::Comparison),
+                ("self.token", BindingSource::Comparison),
+            ]
+        );
+        // Ordering, membership and chains are not equality checks on a value.
+        assert!(analyze("if password < \"v\":\n    pass\n")
+            .bindings
+            .is_empty());
+        assert!(analyze("if password in (\"a\", \"b\"):\n    pass\n")
+            .bindings
+            .is_empty());
+        assert!(analyze("f(a == password == \"v\")\n").bindings.is_empty());
+    }
+
+    #[test]
+    fn concatenations_are_collected_wherever_they_appear() {
+        let a = analyze("call(\"ghp_abc\" \"def\")\nx = 1\n");
+        assert_eq!(a.concatenations.len(), 1);
+        assert_eq!(
+            a.concatenations[0].text("call(\"ghp_abc\" \"def\")"),
+            "ghp_abcdef"
+        );
     }
 
     /// PEP 701: same-type quotes nested inside an f-string (Python 3.12+).

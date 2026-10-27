@@ -277,6 +277,12 @@ const FORMS: &[Form] = &[
         template: "{name} = \"{head}\" \"{tail}\"",
     },
     Form {
+        id: "py-compare",
+        file: "compare.py",
+        header: &[],
+        template: "if {name} == \"{value}\": pass",
+    },
+    Form {
         id: "yaml",
         file: "config.yml",
         header: &[],
@@ -344,7 +350,10 @@ fn materialize_matrix(root: &Path, cases: &mut Vec<Case>) {
                 other => panic!("names.tsv: {name}: label must be secret|not, got {other:?}"),
             };
             for v in &values {
-                let (value_id, value, class) = (&v[0], &v[1], v[2].as_str());
+                let (value_id, class) = (&v[0], v[2].as_str());
+                // Expand before splitting: `{head}`/`{tail}` must split the
+                // fake token, not the placeholder that names it.
+                let value = &expand(&v[1]);
                 i += 1;
                 let mid = value.len() / 2;
                 let line = form

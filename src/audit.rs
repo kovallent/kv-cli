@@ -4,7 +4,7 @@ use crate::config::{self, Contract, Severity, FINGERPRINT_LEN};
 use crate::configscan::{self, ConfigKind};
 use crate::frameworks::{self, FrameworkProfile};
 use crate::notebook;
-use crate::python::{self, Analysis, Binding, FunctionDef};
+use crate::python::{self, Analysis, Binding, BindingSource, FunctionDef};
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -812,6 +812,9 @@ impl FileContext<'_> {
         a.bindings
             .iter()
             .filter(|b| !secrets.contains(&b.value.span.start))
+            // `if warehouse == "PROD_WH":` branches on the environment - the
+            // opposite of pinning to it.
+            .filter(|b| b.source != BindingSource::Comparison)
             .filter(|b| {
                 self.binding_passes_filters(
                     source,
@@ -870,6 +873,7 @@ impl FileContext<'_> {
         self.check_parameters(path, a, &mut findings);
         if self.engine.contract.secrets.enabled {
             self.check_secrets(path, source, a, &mut findings, &mut covered);
+            self.check_concatenations(path, source, a, &mut findings, &mut covered);
         }
         if self.engine.contract.infrastructure.enabled {
             self.check_infra(path, source, a, &mut findings, &mut covered);
@@ -967,18 +971,7 @@ impl FileContext<'_> {
         }
 
         // Rule 2: high-confidence credential shapes anywhere in the file.
-        let framework_values = self.active.iter().flat_map(|c| {
-            c.secret_values
-                .iter()
-                .map(move |v| (Some(c.profile.name), v))
-        });
-        for (framework, (name, re)) in self
-            .engine
-            .secret_values
-            .iter()
-            .map(|v| (None, v))
-            .chain(framework_values)
-        {
+        for (framework, (name, re)) in self.secret_value_patterns() {
             for mat in re.find_iter(source) {
                 let line = a.line_of(mat.start());
                 if self.line_ignored(source, a, line, &cfg.ignore_marker) {
@@ -1008,6 +1001,74 @@ impl FileContext<'_> {
                     },
                 });
             }
+        }
+    }
+
+    /// The contract's credential shapes, then each active framework's, with
+    /// the framework that contributed each.
+    fn secret_value_patterns(&self) -> Vec<(Option<&'static str>, &(String, Regex))> {
+        let framework_values = self.active.iter().flat_map(|c| {
+            c.secret_values
+                .iter()
+                .map(move |v| (Some(c.profile.name), v))
+        });
+        self.engine
+            .secret_values
+            .iter()
+            .map(|v| (None, v))
+            .chain(framework_values)
+            .collect()
+    }
+
+    /// Rule 2 over the joined text of each implicit concatenation:
+    /// `"ghp_abc" "def"` spells one token that no raw-text match can see,
+    /// under any name or none. Runs after rules 1 and 2, so a literal they
+    /// already reported - whole or in part - is not reported again.
+    fn check_concatenations(
+        &self,
+        path: &str,
+        source: &str,
+        a: &Analysis,
+        out: &mut Vec<Finding>,
+        covered: &mut Covered,
+    ) {
+        let marker = &self.engine.contract.secrets.ignore_marker;
+        let patterns = self.secret_value_patterns();
+        // An interpolated part is computed: the joined text is not the value.
+        for lit in a.concatenations.iter().filter(|l| !l.has_interpolation) {
+            let line = a.line_of(lit.span.start);
+            if self.line_ignored(source, a, line, marker) {
+                continue;
+            }
+            let text = lit.text(source);
+            let Some((framework, (name, mat))) = patterns
+                .iter()
+                .find_map(|(fw, (name, re))| re.find(&text).map(|m| (*fw, (name, m))))
+            else {
+                continue;
+            };
+            if !covered.insert(lit.span.clone()) {
+                continue;
+            }
+            out.push(Finding {
+                fingerprint: finding_fingerprint(path, CODE_HARDCODED_SECRET, "", name),
+                path: path.to_string(),
+                symbol: String::new(),
+                subject: name.clone(),
+                line,
+                code: CODE_HARDCODED_SECRET,
+                severity: Severity::Error,
+                message: format!("hardcoded credential detected ({name})"),
+                detail: Some(format!(
+                    "matched {} across a string concatenation",
+                    redact(mat.as_str())
+                )),
+                framework,
+                kind: FindingKind::HardcodedSecret {
+                    detector: name.clone(),
+                    key: None,
+                },
+            });
         }
     }
 
@@ -1255,10 +1316,56 @@ mod tests {
         assert!(run("TOKEN = \"\"\n").is_empty());
     }
 
+    /// A credential the code checks against is in the source as surely as
+    /// one it assigns.
     #[test]
-    fn ignores_comparisons_and_marked_lines() {
-        assert!(run("if password == \"abcd1234efgh\":\n    pass\n").is_empty());
+    fn comparisons_against_a_credential_literal_are_reported() {
+        let f = run("if password == \"abcd1234efgh\":\n    pass\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            (f[0].code, f[0].symbol.as_str()),
+            (CODE_HARDCODED_SECRET, "password")
+        );
+        assert_eq!(
+            run("if \"abcd1234efgh\" != self.api_key:\n    pass\n").len(),
+            1
+        );
+        // Placeholders, exempt names and markers behave as for assignments.
+        assert!(run("if password == \"changeme\":\n    pass\n").is_empty());
+        assert!(run("if token_type == \"Bearer\":\n    pass\n").is_empty());
+        assert!(
+            run("if password == \"abcd1234efgh\":  # kovallent:allow-secret\n    pass\n")
+                .is_empty()
+        );
+        // Branching on an infrastructure value is not pinning it.
+        assert!(run("if warehouse == \"PROD_WH\":\n    pass\n").is_empty());
+    }
+
+    #[test]
+    fn ignores_marked_lines() {
         assert!(run("TOKEN = \"abcd1234efgh\"  # kovallent:allow-secret\n").is_empty());
+    }
+
+    /// A token split across a concatenation is one token, under any name -
+    /// or none, as an argument.
+    #[test]
+    fn value_patterns_see_through_concatenation() {
+        let token = "\"ghp_0123456789abcdef01\" \"23456789abcdef01234\"";
+        for src in [
+            format!("tokenizer = {token}\n"),
+            format!("call({token})\n"),
+            format!("x = ({token})\n"),
+        ] {
+            let f = run(&src);
+            assert_eq!(f.len(), 1, "{src}: {f:#?}");
+            assert_eq!(f[0].subject, "github_token");
+            assert!(!f[0].detail.as_deref().unwrap().contains("0123456789"));
+        }
+        // A secret name already reports the whole literal once.
+        assert_eq!(run(&format!("API_TOKEN = {token}\n")).len(), 1);
+        // An interpolated part makes the joined text something else.
+        assert!(run("x = \"ghp_0123456789abcdef01\" f\"{rest}\"\n").is_empty());
+        assert!(run(&format!("x = {token}  # kovallent:allow-secret\n")).is_empty());
     }
 
     #[test]
