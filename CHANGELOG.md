@@ -11,6 +11,52 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.5.0] — 2026-10-27
+
+Zero-trust hardening of the scanner, the gate and `fix`. Credentials are now
+found in notebooks and config files, in every syntactic form measured by a
+labelled corpus of 2,433 cases (100% precision and recall on it), with name
+exemptions that cut false positives at the source. Several defaults changed
+and every contract's fingerprint moves once: read "Upgrading" first.
+
+### Upgrading from 0.4.x
+
+- **Re-pin `--expect-contract`.** New contract fields change every
+  fingerprint once, including contracts that never mention them (ADR 0001).
+  The new value is at `run.contract_sha256`. Until re-pinned, runs exit `3`.
+- **Unknown contract keys are rejected (exit `2`).** A misspelled key used to
+  fall back to its default silently. The README's own example contract used
+  keys that never existed; if you copied it, the error names the field.
+- **A run that scans no files exits `2`.** A wrong path or mistyped
+  `scan.include` used to report `PASS 0 files`. Check your CI paths.
+- **Your contract now applies where it was silently missed:** from a
+  subdirectory (`cd jobs && kv-cli audit`), and to files named on the command
+  line. Runs that were quietly using the built-in defaults now use your rules,
+  so findings can change.
+- **`scan.exclude` applies to files named on the command line,** as pre-commit
+  names them. Exclusions that held in CI now hold on commit too.
+- **Expect new findings:** credentials in notebooks and config files (with
+  the default `scan.include`), comparisons (`if password == "..."`),
+  `getenv` fallbacks, subscript targets, tokens split across concatenation,
+  camelCase names, YAML anchors and flow maps, and five new token shapes.
+  **Expect fewer:** names that only refer to a credential (`secret_name`,
+  `token_url`, `tokenizer`, …) and placeholder values no longer report.
+- **Contracts written by an earlier `init`** list `scan.include` and
+  `secrets.value_patterns` in full, so they do not gain the new file types or
+  token shapes until updated - compare with a fresh `kv-cli init --path
+  /tmp/kv`. The name exemptions and placeholders apply to them at once.
+- **pre-commit: update to `rev: v0.5.0`.** `v0.4.1` cannot load the hook (its
+  hooks file lacked the leading dot). The hook now also passes notebooks and
+  config files to kv-cli, not just Python and YAML.
+- **Source must be UTF-8.** Unchanged behaviour, now documented: other
+  encodings are reported as unreadable, which gates.
+- **The JSON payload is unchanged** (`schema_version` 1). Existing findings
+  keep their fingerprints.
+
 ### Added — samples
 
 - `samples/credentials.py`: every form a hardcoded credential takes
@@ -197,12 +243,25 @@ are unchanged.
 
 ### Fixed — file discovery
 
+- **The pre-commit hook passed only Python and YAML.** It now selects files
+  with a `files` pattern mirroring the default `scan.include` - notebooks,
+  `.env*`, TOML, INI/`.cfg`, JSON too. Not `types_or`: pre-commit tags a
+  generic `.cfg` such as `airflow.cfg` only as `text`.
+- **`scan.exclude` did not apply to files named on the command line.**
+  Pre-commit names every staged file, so a fixture excluded in CI was audited
+  on every commit - which also made the README's advice (exclude JSON
+  fixtures, since JSON has no comments) untrue under pre-commit. Named files
+  still need no `scan.include` match, but `scan.exclude` now holds; if every
+  named file is excluded the run passes with a note, since that is the
+  contract's decision rather than a misconfiguration.
 - **Run from a subdirectory, the project's contract was never found.**
   `Contract::discover` walked up with `Path::parent`, and the parent of `.` is
   the empty path, so `cd jobs && kv-cli audit` stopped at `jobs/` and silently
   applied the built-in defaults. A relative start is now walked with `..`; the
   reported `contract_path` stays relative (`../.kovallent.yaml`), and is
-  unchanged when the contract is in the working directory.
+  unchanged when the contract is in the working directory. A file named at the
+  top level (`kv-cli audit app.py`, whose parent is the empty path) is covered
+  too - a case the first version of this fix broke before release.
 - **Symlinked files were silently skipped.** A link to a *file* is now followed
   when its target resolves inside the project (the contract's directory, or
   the scanned path without one). A target outside it is never read - a link
@@ -657,18 +716,23 @@ Initial prototype.
 
 ## Current state
 
-121 unit tests. `make check` (fmt, `clippy -D warnings`, tests) passes clean.
+As of 0.5.0: 188 unit tests, 28 end-to-end tests against the compiled binary,
+and the labelled corpus (2,433 cases plus 2 expected skips, 0 known
+deviations). `make check` (fmt, `clippy -D warnings`, tests) passes clean;
+`make corpus` prints precision and recall.
 
 | Module | Lines | Tests |
 | --- | --- | --- |
-| `audit.rs` | 1354 | 39 |
-| `config.rs` | 858 | 13 |
-| `python.rs` | 718 | 16 |
-| `main.rs` | 872 | — |
-| `fix.rs` | 537 | 23 |
-| `frameworks.rs` | 314 | 6 |
+| `audit.rs` | 2199 | 67 |
+| `config.rs` | 1158 | 18 |
+| `python.rs` | 1115 | 25 |
+| `main.rs` | 1278 | 7 |
+| `fix.rs` | 674 | 30 |
+| `configscan.rs` | 423 | 8 |
+| `yamlscan.rs` | 404 | 13 |
 | `payload.rs` | 453 | 10 |
-| `yamlscan.rs` | 242 | 9 |
+| `frameworks.rs` | 314 | 6 |
+| `notebook.rs` | 189 | 4 |
 
 ### Known limits
 

@@ -709,6 +709,82 @@ fn the_contract_is_found_from_a_subdirectory() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Regression: a file named at the top level (`kv-cli audit app.py`, which
+/// is how pre-commit names files) starts discovery from the empty path, and
+/// the subdirectory fix made that find no contract at all - so the project's
+/// rules, exclusions and drift pin were silently replaced by the defaults.
+#[test]
+fn the_contract_applies_to_files_named_at_the_top_level() {
+    let dir = tempdir("named-root");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\napplies_to:\n  name_patterns: [\"etl_*\"]\n",
+    );
+    write(&dir, "load.py", "def etl_load(x):\n    pass\n");
+    let out = Command::new(bin())
+        .args(["audit", "load.py", "--format", "json"])
+        .current_dir(&dir)
+        .output()
+        .expect("kv-cli runs");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        payload["run"]["contract_path"], "./.kovallent.yaml",
+        "{payload:#}"
+    );
+    assert_eq!(out.status.code(), Some(1), "the project's rule applies");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Pre-commit names every staged file. `scan.exclude` must hold for named
+/// files as it does for a directory scan, or a fixture excluded in CI fails
+/// every commit. A commit staging only excluded files passes.
+#[test]
+fn scan_exclude_applies_to_named_files() {
+    let dir = tempdir("named-exclude");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nscan:\n  exclude: [\"tests/fixtures/**\"]\n",
+    );
+    std::fs::create_dir_all(dir.join("tests/fixtures")).unwrap();
+    write(
+        &dir.join("tests/fixtures"),
+        "sample.json",
+        "{\"api_key\": \"s3cr3t-production-pw\"}\n",
+    );
+    write(&dir, "app.py", "x = 1\n");
+
+    let run = |args: &[&str]| {
+        let out = Command::new(bin())
+            .args(args)
+            .arg("--no-color")
+            .current_dir(&dir)
+            .output()
+            .expect("kv-cli runs");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let (code, stdout) = run(&["audit", "app.py", "tests/fixtures/sample.json"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains("1 named file excluded by scan.exclude"),
+        "{stdout}"
+    );
+
+    let (code, stdout) = run(&["audit", "tests/fixtures/sample.json"]);
+    assert_eq!(code, Some(0), "only an excluded file was named: {stdout}");
+
+    // `scan.include` is still not required of a named file.
+    write(&dir, "notes.txt", "API_TOKEN = \"s3cr3t-production-pw\"\n");
+    let (code, _) = run(&["audit", "notes.txt"]);
+    assert_eq!(code, Some(1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Regression: `dedup()` only removed adjacent duplicates, so a file named
 /// twice was audited and counted twice.
 #[test]

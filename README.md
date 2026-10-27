@@ -3,7 +3,7 @@
 **Sub-200ms local contract guardrails for data pipelines.** Airflow, dbt, PySpark, Databricks, Snowpark, Flink, Polars.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/kovallent/kv-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
@@ -142,7 +142,7 @@ Add `kv-cli` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.4.1
+    rev: v0.5.0
     hooks:
       - id: kv-cli
 ```

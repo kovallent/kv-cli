@@ -384,7 +384,12 @@ fn project_root(contract_path: Option<&Path>, paths: &[PathBuf]) -> PathBuf {
 /// The same file can arrive twice - named twice, or reached through a symlink
 /// as well as its real path - and would otherwise be audited and counted
 /// twice. Identity is the canonical path; the real path is kept over a link
-/// to it. A file named explicitly is always included, link or not.
+/// to it.
+///
+/// A file named explicitly needs no `scan.include` match - naming it is the
+/// selection - but `scan.exclude` still applies: it is the contract saying
+/// "never audit this", and pre-commit names every staged file, so a fixture
+/// excluded in CI would otherwise be audited on every commit.
 fn resolve_targets(
     engine: &Engine,
     paths: &[PathBuf],
@@ -400,8 +405,13 @@ fn resolve_targets(
         .unwrap_or_else(|_| project.to_path_buf());
     let mut found = Vec::new();
     let mut not_followed = 0;
+    let mut named_excluded = 0;
     for p in paths {
         if p.is_file() {
+            if engine.is_excluded(&audit::normalize_path(&project, p)) {
+                named_excluded += 1;
+                continue;
+            }
             found.push(p.clone());
         } else if p.is_dir() {
             let c = engine.collect_files(p, &project)?;
@@ -431,6 +441,7 @@ fn resolve_targets(
     Ok(audit::Collected {
         files,
         symlinks_not_followed: not_followed,
+        named_excluded,
     })
 }
 
@@ -533,6 +544,8 @@ struct RunReport<'a> {
     identity: &'a IdentityFlags<'a>,
     /// Symlinks the walk did not follow; see `audit::Collected`.
     symlinks_not_followed: usize,
+    /// Named files skipped because `scan.exclude` covers them.
+    named_excluded: usize,
 }
 
 fn cmd_audit(
@@ -552,12 +565,15 @@ fn cmd_audit(
     let audit::Collected {
         files,
         symlinks_not_followed,
+        named_excluded,
     } = resolve_targets(&engine, paths, &base)?;
     // A run that checked nothing is unverifiable, and an unverifiable run
     // never passes: "PASS 0 files are compliant" is what a wrong path or a
     // mistyped include glob looked like. Exit 2 sends it to whoever operates
-    // the gate, which is who misconfigured it.
-    if files.is_empty() {
+    // the gate, which is who misconfigured it. The exception is files named
+    // outright and excluded by the contract - a commit that stages only a
+    // fixture - which is the contract's own decision, not a misconfiguration.
+    if files.is_empty() && named_excluded == 0 {
         return Err(no_files_error(paths, &engine.contract.scan.include));
     }
 
@@ -617,6 +633,7 @@ fn cmd_audit(
         scope,
         identity,
         symlinks_not_followed,
+        named_excluded,
     };
 
     match format {
@@ -802,6 +819,14 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             "  {} frameworks: {}",
             "\u{b7}".dimmed(),
             list.join(", ").cyan()
+        );
+    }
+    if r.named_excluded > 0 {
+        println!(
+            "  {} {} named file{} excluded by scan.exclude",
+            "\u{b7}".dimmed(),
+            r.named_excluded,
+            if r.named_excluded == 1 { "" } else { "s" }
         );
     }
     if r.symlinks_not_followed > 0 {

@@ -1,6 +1,10 @@
 - id: kv-cli
   name: kv-cli contract audit
-  description: Audit Python pipelines for contract breaches, hardcoded secrets, and pinned infrastructure.
+  description: Audit Python pipelines, notebooks and config files for contract breaches, hardcoded secrets, and pinned infrastructure.
   entry: kv-cli audit
   language: rust
-  types_or: [python, yaml]
+  # Mirrors the default `scan.include`. A `files` pattern rather than
+  # `types_or`: pre-commit tags a generic `.cfg` (e.g. airflow.cfg) only as
+  # `text`, so no list of types can select it.
+  types: [text]
+  files: '(\.(py|ipynb|ya?ml|toml|ini|cfg|json|env)|(^|/)\.env(\.[^/]*)?)$'

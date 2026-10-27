@@ -182,6 +182,8 @@ pub fn normalize_path(base: &Path, file: &Path) -> String {
 pub struct Collected {
     pub files: Vec<PathBuf>,
     pub symlinks_not_followed: usize,
+    /// Files named on the command line that `scan.exclude` covers.
+    pub named_excluded: usize,
 }
 
 /// A framework profile with its regexes compiled.
@@ -360,7 +362,9 @@ impl Engine {
         Ok(())
     }
 
-    fn is_excluded(&self, rel: &str) -> bool {
+    /// True when `rel`, a `/`-separated path relative to the project, is
+    /// matched by `scan.exclude`.
+    pub fn is_excluded(&self, rel: &str) -> bool {
         self.contract
             .scan
             .exclude

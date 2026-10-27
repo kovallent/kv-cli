@@ -604,6 +604,13 @@ impl Contract {
     /// never found and the built-in defaults applied instead. The returned path
     /// stays relative, so nothing machine-specific reaches the payload.
     pub fn discover(start: &Path) -> Option<PathBuf> {
+        // `Path::new("app.py").parent()` is the empty path: a file named at
+        // the top level - as pre-commit names them - starts the walk here.
+        let start = if start.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            start
+        };
         if start.is_absolute() {
             return start
                 .ancestors()
