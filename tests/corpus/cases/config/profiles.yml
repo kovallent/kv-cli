@@ -1,0 +1,10 @@
+acme:
+  target: prod
+  outputs:
+    prod:
+      type: snowflake
+      account: acme-prod
+      password: Xk9vR2mQw7pLz4Ty  # expect: KV002
+      private_key_passphrase: Xk9vR2mQw7pLz4Ty  # expect: KV002
+    dev:
+      password: "{{ env_var('DBT_PASSWORD') }}"

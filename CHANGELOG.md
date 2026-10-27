@@ -13,6 +13,17 @@ versions may carry breaking changes.
 
 ### Added
 
+- **A labelled corpus** (`tests/corpus/`, `make corpus`): 1,243 cases stating
+  what kv-cli *should* report - hand-written files across every supported file
+  type, plus 16 labelled key names x 6 labelled values x 12 syntactic forms.
+  Disagreements are recorded in `baseline.tsv`; the test fails when they change
+  in either direction. First baseline: 99.6% recall, 47.9% precision. Every
+  false positive is in the key-name rule - names that contain a pattern word
+  without holding a secret (`tokenizer`, `secret_arn`, `token_url`), common
+  placeholders (`your-api-key-here`), `${...}` references in Python, and
+  placeholders split across implicit concatenation. The two misses are a
+  hardcoded password in a comparison and a latin-1 source file.
+
 - **Notebooks and config files are scanned for credentials by default.**
   `scan.include` now covers `.ipynb`, `.env` / `.env.*` / `*.env`, `.toml`,
   `.ini`, `.cfg` and `.json` alongside Python and YAML. A directory holding

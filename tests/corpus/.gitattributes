@@ -1,0 +1,3 @@
+# Case files must stay byte-for-byte as written: BOM, CRLF and latin-1
+# cases test exactly those bytes.
+* -text

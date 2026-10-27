@@ -1,0 +1,10 @@
+{
+  "database": {
+    "user": "svc",
+    "password": "Xk9vR2mQw7pLz4Ty"
+  },
+  "api_key": "@@STRIPE_LIVE_KEY@@",
+  "tokens": ["@@GITHUB_TOKEN@@"],
+  "token_endpoint": "https://auth.example.com/token",
+  "secret_ref": "${VAULT_SECRET}"
+}

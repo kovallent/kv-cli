@@ -1,0 +1,14 @@
+# Values, labelled by class. See `truth` in tests/corpus.rs for the rule:
+#   token        a credential shape - a finding under any name
+#   opaque       a real-looking literal - a finding under a secret name
+#   descriptive  a name, path or URL - a finding only under a secret name
+#                (a literal in a password field is a password)
+#   placeholder  never a finding
+#   templated    a reference resolved elsewhere - never a finding
+# id<TAB>value<TAB>class
+opaque	Xk9vR2mQw7pLz4Ty	opaque
+descriptive	prod/warehouse/primary	descriptive
+placeholder-known	changeme	placeholder
+placeholder-common	your-api-key-here	placeholder
+templated	${VAULT_VALUE}	templated
+token	@@GITHUB_TOKEN@@	token
