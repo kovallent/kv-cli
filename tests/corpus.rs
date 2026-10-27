@@ -7,7 +7,8 @@
 //! - `tests/corpus/cases/**` - hand-written files. A line that should be
 //!   reported carries `expect: KV00n` in a comment; every other line should
 //!   not be. JSON and notebooks have no comments, so `<file>.expect` lists
-//!   `LINE CODE` pairs instead.
+//!   `LINE CODE` pairs instead. A file that should land in the payload's
+//!   `skipped` list says `expect-skip: <reason>`; any other skip fails.
 //! - `tests/corpus/matrix/{names,values}.tsv` - labelled key names and values,
 //!   expanded across every syntactic form in [`FORMS`]. A case should be
 //!   reported when its value is a credential shape, or when a secret name holds
@@ -156,8 +157,18 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Copy `cases/` into `root`, expanding placeholders, and collect the labels.
-fn materialize_cases(root: &Path, cases: &mut Vec<Case>) {
+/// `expect-skip: unreadable` anywhere in a file.
+fn expected_skip(text: &str) -> Option<String> {
+    let at = text.find("expect-skip:")?;
+    text[at + "expect-skip:".len()..]
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+}
+
+/// Copy `cases/` into `root`, expanding placeholders, and collect the labels
+/// and the expected `(path, reason)` skips.
+fn materialize_cases(root: &Path, cases: &mut Vec<Case>, skips: &mut BTreeSet<(String, String)>) {
     let src_root = Path::new(CORPUS).join("cases");
     let mut files = Vec::new();
     walk(&src_root, &mut files);
@@ -181,6 +192,9 @@ fn materialize_cases(root: &Path, cases: &mut Vec<Case>) {
         let dest = root.join(&rel_str);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::write(&dest, content).unwrap();
+        if let Some(reason) = expected_skip(&text) {
+            skips.insert((rel_str.clone(), reason));
+        }
 
         let mut labelled: Vec<(usize, &'static str)> = Vec::new();
         let sidecar = src.with_file_name(format!(
@@ -390,8 +404,14 @@ fn materialize_matrix(root: &Path, cases: &mut Vec<Case>) {
 
 // --- running and comparing -------------------------------------------------
 
-/// `(path, line, code)` of every finding kv-cli reports for `root`.
-fn findings(root: &Path) -> BTreeSet<(String, usize, String)> {
+/// `(path, line, code)` of every finding kv-cli reports for `root`, and the
+/// `(path, reason)` of every file it skipped.
+type Outcome = (
+    BTreeSet<(String, usize, String)>,
+    BTreeSet<(String, String)>,
+);
+
+fn findings(root: &Path) -> Outcome {
     let out = Command::new(env!("CARGO_BIN_EXE_kv-cli"))
         .args([
             "audit",
@@ -410,7 +430,7 @@ fn findings(root: &Path) -> BTreeSet<(String, usize, String)> {
             String::from_utf8_lossy(&out.stderr)
         )
     });
-    payload["findings"]
+    let findings = payload["findings"]
         .as_array()
         .unwrap()
         .iter()
@@ -421,7 +441,19 @@ fn findings(root: &Path) -> BTreeSet<(String, usize, String)> {
                 f["code"].as_str().unwrap().to_string(),
             )
         })
-        .collect()
+        .collect();
+    let skipped = payload["run"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["path"].as_str().unwrap().to_string(),
+                s["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    (findings, skipped)
 }
 
 #[derive(Default)]
@@ -487,10 +519,18 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
     std::fs::write(root.join(".kovallent.yaml"), "version: 1\n").unwrap();
 
     let mut cases = Vec::new();
-    materialize_cases(&root, &mut cases);
+    let mut expected_skips = BTreeSet::new();
+    materialize_cases(&root, &mut cases, &mut expected_skips);
     materialize_matrix(&root, &mut cases);
-    let mut reported = findings(&root);
+    let (mut reported, skipped) = findings(&root);
     let _ = std::fs::remove_dir_all(&root);
+
+    // Skips are few and binary, so they are asserted outright rather than
+    // ratcheted: a file kv-cli could not analyse is never a known deviation.
+    assert_eq!(
+        skipped, expected_skips,
+        "skipped files differ from the `expect-skip:` labels"
+    );
 
     let mut ids = BTreeSet::new();
     for c in &cases {
@@ -531,7 +571,11 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
         a.fn_ += t.fn_;
         a
     });
-    println!("\ncorpus: {} labelled cases", cases.len());
+    println!(
+        "\ncorpus: {} labelled cases, {} expected skips",
+        cases.len(),
+        expected_skips.len()
+    );
     println!(
         "{:<26} {:>5} {:>5} {:>5} {:>10} {:>8}",
         "group", "TP", "FP", "FN", "precision", "recall"

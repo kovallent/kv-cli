@@ -180,6 +180,8 @@ A hook is advisory by construction — `--no-verify` skips it, and a fresh clone
 | Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | |
 | Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | |
 
+Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
+
 Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
 
 ### How KV002 decides

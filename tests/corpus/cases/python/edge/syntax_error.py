@@ -1,3 +1,4 @@
+# Audited on a partial parse. expect-skip: syntax_error
 def broken(:
     pass
 

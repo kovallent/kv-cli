@@ -445,7 +445,23 @@ fn no_files_error(paths: &[PathBuf], include: &[String]) -> String {
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
-    read_source_raw(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    read_source_raw(path).map_err(|e| format!("cannot read {}: {}", path.display(), read_error(&e)))
+}
+
+/// Why a file could not be read, phrased for whoever has to fix it.
+///
+/// Source must be UTF-8. Python accepts other encodings through a PEP 263
+/// coding line, but kv-cli does not decode them: a file it cannot read as
+/// written is reported as unreadable - which always gates - rather than
+/// guessed at, since a wrong guess could hide exactly what the scan is for.
+fn read_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        "not valid UTF-8 - kv-cli reads UTF-8 source only; re-encode the file \
+         (e.g. `iconv -f latin1 -t utf-8`)"
+            .to_string()
+    } else {
+        e.to_string()
+    }
 }
 
 /// The bare I/O result, for callers that already have a normalized path to
@@ -635,7 +651,7 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
         Ok(src) => src,
         Err(e) => {
             return FileOutcome {
-                skipped: Some(SkippedFile::unreadable(rel, e.to_string())),
+                skipped: Some(SkippedFile::unreadable(rel, read_error(&e))),
                 ..Default::default()
             }
         }
@@ -919,10 +935,14 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             };
         if r.gating > 0 {
             println!("{} {summary}{gate_note}", "FAIL".red().bold());
-            println!(
-                "{}",
-                "run `kv-cli fix` to apply the standard fixes".dimmed()
-            );
+            // `fix` acts on findings; it cannot help a run that failed only
+            // because a file could not be read.
+            if !findings.is_empty() {
+                println!(
+                    "{}",
+                    "run `kv-cli fix` to apply the standard fixes".dimmed()
+                );
+            }
         } else {
             println!("{} {summary}{gate_note}", "PASS".green().bold());
         }

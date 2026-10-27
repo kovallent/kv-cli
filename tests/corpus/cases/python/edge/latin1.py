@@ -1,3 +1,4 @@
 # -*- coding: latin-1 -*-
 # café
-DB_PASSWORD = "Xk9vR2mQw7pLz4Ty"  # expect: KV002
+# Policy: source must be UTF-8. expect-skip: unreadable
+DB_PASSWORD = "Xk9vR2mQw7pLz4Ty"

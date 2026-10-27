@@ -118,6 +118,35 @@ fn unreadable_file_always_gates() {
     assert_eq!(skipped[0]["severity"], "error");
 }
 
+/// Policy: source must be UTF-8. A latin-1 file - valid Python with a PEP 263
+/// coding line - is reported as unreadable, which gates, and the detail says
+/// how to fix it rather than echoing an I/O error.
+#[test]
+fn non_utf8_source_is_unreadable_and_says_so() {
+    let dir = tempdir("latin1");
+    std::fs::write(
+        dir.join("legacy.py"),
+        b"# -*- coding: latin-1 -*-\n# caf\xe9\nDB_PASSWORD = \"s3cr3t-prod-pw\"\n",
+    )
+    .unwrap();
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(code, Some(1), "an unreadable file gates: {payload:#}");
+    let skip = &payload["run"]["skipped"][0];
+    assert_eq!(skip["reason"], "unreadable");
+    assert_eq!(skip["severity"], "error");
+    let detail = skip["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("UTF-8") && detail.contains("re-encode"),
+        "{detail}"
+    );
+
+    // `fix` cannot re-encode a file, so the text output does not suggest it.
+    let (_, stdout) = text_audit(&dir, &["audit", "."]);
+    assert!(stdout.contains("1 skipped"), "{stdout}");
+    assert!(!stdout.contains("kv-cli fix"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The two skip reasons are not interchangeable prose - `reason` is what a
 /// server keys on, so a compliant repository with one of each must be able to
 /// tell them apart without parsing `detail`.

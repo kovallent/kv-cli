@@ -11,6 +11,18 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed — encodings
+
+- **Source must be UTF-8, by policy.** A file in another encoding - valid
+  Python with a PEP 263 coding line, say - is reported as `unreadable`, which
+  always gates, rather than decoded on a guess. The detail now says so and how
+  to fix it (`not valid UTF-8 - ... re-encode the file`) instead of echoing the
+  raw I/O error; `fix` reports the same. The corpus labels this outcome with
+  `expect-skip: unreadable`, and now asserts the payload's `skipped` list
+  exactly.
+- A run that fails only on skipped files no longer suggests `kv-cli fix`,
+  which acts on findings and cannot re-encode or repair a file.
+
 ### Changed — KV002 recall
 
 Measured on the labelled corpus (now 1,339 cases, with a comparison form
