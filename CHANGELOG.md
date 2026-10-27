@@ -11,6 +11,25 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Added — samples
+
+- `samples/credentials.py`: every form a hardcoded credential takes
+  (subscript, `os.environ` assignment, `getenv` fallback, camelCase name, a
+  token split across a concatenation, a comparison) beside names that are not
+  credentials (`secret_name`, `secretArn`, `token_url`, `credentials_path`,
+  `tokenizer`), a placeholder and a reference.
+- `samples/configs/`: `.env.production`, `airflow.cfg` (Airflow profile by
+  file name), Streamlit-style `secrets.toml`, camelCase `settings.json`, and a
+  `.env.example` that must stay clean. Named `.env.production` because this
+  repository's `.gitignore` excludes `.env`.
+- `samples/notebooks/exploration.ipynb`: a credential in a code cell and a
+  token printed into a saved output.
+- `audit --strict samples/` is now 31 errors, 17 warnings across 16 files.
+  The README's stated counts - that line and `deploy.py`'s 13/6 - are checked
+  against real output by a test, under the contract a fresh `init` writes.
+  New samples reuse the fakes already in `samples/`, so no new token-shaped
+  string is committed.
+
 ### Changed — camelCase names
 
 - **Names are matched in `snake_case` as well as lowercased.** Patterns are

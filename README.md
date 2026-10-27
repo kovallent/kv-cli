@@ -43,12 +43,14 @@ Typical run: **about 10ms on the bundled samples, about 0.3s on a 500-file repos
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
 ./kv-cli init                           # created wrote ./.kovallent.yaml
-./kv-cli audit --strict samples/        # FAIL 17 errors, 17 warnings — by design
+./kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
 ./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 ./kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
 
-`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors.
+`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors. `samples/credentials.py` shows every form a hardcoded credential takes — subscripts, `getenv` fallbacks, comparisons, a token split across a concatenation, camelCase names — next to names that are *not* credentials (`secret_name`, `token_url`, `tokenizer`). `samples/configs/` covers `.env`, `airflow.cfg`, `secrets.toml` and camelCase JSON, with a `.env.example` that must stay clean; `samples/notebooks/` has a notebook whose saved output printed a token.
+
+The counts above are pinned by a test against the real output, so they cannot drift from what the tool reports.
 
 > If you build from source instead of downloading the binary, budget a few minutes for the first compile — `cargo` builds the tree-sitter grammar and needs a C compiler. `make demo` builds and then audits `samples/` in one step.
 

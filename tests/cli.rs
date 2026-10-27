@@ -762,6 +762,73 @@ fn strict_labels_warnings_as_warnings_and_reports_the_gate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The README states what the bundled samples produce. Those numbers drifted
+/// once already (it said 13/6 for a run that gave 17/17), so they are checked
+/// against the real output, under the contract the README's walkthrough
+/// creates: a fresh `kv-cli init`.
+#[test]
+fn the_readme_sample_counts_are_true() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let contract_dir = tempdir("readme-counts");
+    let init = Command::new(bin())
+        .args(["init", "--path"])
+        .arg(&contract_dir)
+        .output()
+        .expect("kv-cli runs");
+    assert!(init.status.success());
+    let contract = contract_dir.join(".kovallent.yaml");
+
+    let audit = |target: &str| -> serde_json::Value {
+        let out = Command::new(bin())
+            .args(["audit", "--strict", target, "--format", "json", "--config"])
+            .arg(&contract)
+            .current_dir(repo)
+            .output()
+            .expect("kv-cli runs");
+        serde_json::from_slice(&out.stdout).expect("JSON payload")
+    };
+    let counts = |p: &serde_json::Value| {
+        (
+            p["run"]["errors"].as_u64().unwrap(),
+            p["run"]["warnings"].as_u64().unwrap(),
+        )
+    };
+
+    // `./kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings`
+    let readme = std::fs::read_to_string(repo.join("README.md")).unwrap();
+    let line = readme
+        .lines()
+        .find(|l| l.contains("audit --strict samples/ ") && l.contains("FAIL"))
+        .expect("README states the samples/ result");
+    let nums: Vec<u64> = line
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let stated = (nums[0], nums[1]);
+    let samples = audit("samples/");
+    assert_eq!(counts(&samples), stated, "README line: {line}");
+
+    // The walkthrough's `deploy.py` (13 errors, 6 warnings; also in the demo).
+    assert_eq!(counts(&audit("samples/deploy.py")), (13, 6));
+
+    // Files that must stay clean.
+    let flagged: Vec<&str> = samples["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    for clean in ["samples/compliant.py", "samples/configs/.env.example"] {
+        assert!(
+            !flagged.iter().any(|p| p.ends_with(clean)),
+            "{clean} must audit clean"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&contract_dir);
+}
+
 /// The payload must validate against the frozen schema even when it carries
 /// `skipped` entries - the freeze in `src/payload.rs` covers a clean run;
 /// this covers the shape this file exists to fix.
