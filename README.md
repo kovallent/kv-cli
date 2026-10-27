@@ -13,7 +13,7 @@
 
 That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — init, fail, fix, pass. Five things are worth noticing:
 
-- **`init` writes the contract and says what it enabled** — two required parameters, 16 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
+- **`init` writes the contract and says what it enabled** — two required parameters, 21 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
 - **`deploy_service` is missing `target_environment`.** The function runs fine and passes tests; in production it silently takes the dev default. No linter has a rule for this.
 - **The secret value is redacted in the output** — `value "s3…" (<redacted>, 20 chars)`. A tool that reports credentials in CI logs has moved the leak, not closed it.
 - **`fix` rewrites it rather than describing it**: `DB_PASSWORD` now reads `os.environ["DB_PASSWORD"]`, with `import os` inserted above the existing imports. 18 changes land automatically; the hardcoded *default* on line 90 is deliberately left as a `manual:` item, because `os.environ[...]` in a default binds once at import time rather than per call. Thread that one line yourself and the re-run reports `PASS`.
@@ -34,7 +34,7 @@ curl -sSL https://github.com/kovallent/kv-cli/releases/latest/download/kv-cli-x8
 ./kv-cli audit ~/your-pipeline-repo
 ```
 
-Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1` if there are findings.
+Typical run: **about 10ms on the bundled samples, about 0.3s on a 500-file repository** (8 cores; files are scanned in parallel). Exit `0` if compliant, `1` if there are findings.
 
 ### Or clone and run the bundled samples
 
@@ -43,7 +43,7 @@ Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1`
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
 ./kv-cli init                           # created wrote ./.kovallent.yaml
-./kv-cli audit --strict samples/        # FAIL 13 errors, 6 warnings — by design
+./kv-cli audit --strict samples/        # FAIL 17 errors, 17 warnings — by design
 ./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 ./kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
@@ -56,9 +56,11 @@ git clone https://github.com/kovallent/kv-cli && cd kv-cli
 
 Three common causes, all of them by design:
 
-1. **Your models are SQL.** Analysis is Python only. A hardcoded relation in a `.sql` file is not seen.
+1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only. A hardcoded relation in a `.sql` file is not seen.
 2. **No contract file, so defaults applied.** Run `kv-cli init` and enable the rules you want.
 3. **The framework owns your signatures.** Check the scope line in the output — if `in scope` is low relative to the total, that is the exemption working, not a miss. See [Framework support](#framework-support).
+
+If no file matched at all, that is not a pass: the run exits `2` with `no files to audit` and names the globs it tried.
 
 ---
 
@@ -125,7 +127,9 @@ There is currently **no PyPI or Homebrew distribution**. `pip install kv-cli` wi
 | **2** | Tool error | Whoever operates the gate |
 | **3** | Contract drift | Whoever owns the contract |
 
-Resolution is first-match-wins in the order 2, 3, 1, 0. An unverifiable run never passes, and drift outranks findings — findings computed against the wrong contract are not a meaningful result.
+Resolution is first-match-wins in the order 2, 3, 1, 0. An unverifiable run never passes, and drift outranks findings — findings computed against the wrong contract are not a meaningful result. A run that resolves **no files to scan** is exit `2`: a wrong path or a mistyped `scan.include` glob would otherwise report `PASS 0 files are compliant`.
+
+After a successful run, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. Because it is on stderr it shows in CI logs but never in stdout, and it is never printed alongside `--format json` or `schema` output or after a run that exits non-zero. It makes no network call.
 
 ---
 
@@ -166,11 +170,21 @@ A hook is advisory by construction — `--no-verify` skips it, and a fresh clone
 
 ### Auto-fixing behaviour
 
-`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`.
+`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`; an existing backup is never overwritten, so it always holds the source as it was before the first `fix`. When a credential is moved out of the source, `fix` lists the backups that still hold it in plaintext — add `*.kvbak` to `.gitignore` and delete them after review — and reminds you to rotate it: a value that was ever committed is in git history whatever the file says now.
+
+### Where each rule applies
+
+| Files | KV001 | KV002 | KV003 |
+| --- | --- | --- | --- |
+| Python (`.py`) | ✓ | ✓ | ✓ |
+| Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | |
+| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | |
+
+Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
 
 ### Suppressions
 
-Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`.
+Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`. The marker counts only inside a comment — in a string literal it is data, not intent. JSON has no comments; exclude a fixture file with `scan.exclude` instead.
 
 ---
 
@@ -203,9 +217,9 @@ frameworks:
   disable: [databricks]  # never apply, even when detected
 ```
 
-### dbt YAML
+### dbt YAML and other config files
 
-`profiles.yml`, `dbt_project.yml` and any other scanned YAML are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}` and `${VAR}` are recognised as correct and never flagged. `KV003` is deliberately not applied to YAML: a per-target config file is exactly where environment-specific values belong.
+`profiles.yml`, `dbt_project.yml` and every other scanned config file are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}`, `${VAR}` and INI `%(name)s` interpolation are recognised as correct and never flagged. A framework's own config file activates its profile: `profiles.yml` brings in dbt's credential keys, `airflow.cfg` brings in Airflow's (`fernet_key`, …). `KV003` is deliberately not applied: a per-target config file is exactly where environment-specific values belong.
 
 ---
 
@@ -225,19 +239,26 @@ frameworks:
 
 `.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), and the secret detectors. Run `kv-cli init` for a fully commented template.
 
+Any key you leave out keeps its default, so a contract can be as small as the rules you change. Unknown keys are rejected (exit `2`): a misspelled key would otherwise silently fall back to its default.
+
 ```yaml
-version: "1"
-rules:
-  KV001:
-    enabled: true
+version: 1
+parameters:
+  - name: target_environment
+    annotation: str
+    default: '"dev"'
     severity: error
-    strict_parameters: true
-  KV002:
-    enabled: true
-    severity: critical
-    ignore_paths:
-      - "tests/fixtures/*"
+applies_to:
+  decorators: ["my_org.task"]
+scan:
+  exclude:
+    - "**/.venv/**"
+    - "tests/fixtures/**"
+infrastructure:
+  severity: error
 ```
+
+**Upgrading.** A contract written by an earlier `kv-cli init` spells out `scan.include` and `secrets.value_patterns` in full, so it keeps exactly the rules — and the fingerprint — it was written with: it will not pick up new file types or detectors on its own. To adopt them, compare it with a fresh template (`kv-cli init --path /tmp/kv`), copy what you want, and update the pinned fingerprint. A contract that omits those keys uses the new defaults immediately, and its fingerprint changes with the upgrade.
 
 ---
 
@@ -294,7 +315,7 @@ Signatures come from the tree too, so multi-line parameter lists, `async def`, `
 1. A parameter default (`def f(password="...")`) is reported but never auto-fixed: `os.environ[...]` in a default is evaluated once at import time, not per call, so the rewrite would change behaviour. `fix` prints it as a `manual:` item.
 2. A file with syntax errors is audited on tree-sitter's partial parse and flagged in the output, but `fix` refuses to rewrite it.
 
-YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a parser: `serde_yaml` would give the structure but not line numbers, and a finding without a line number is not actionable. It tracks block scalars so prose inside a `|` block is not mistaken for mapping keys.
+Config files are handled by line scanners rather than parsers — `src/yamlscan.rs` for YAML, `src/configscan.rs` for `.env`, INI, TOML and JSON — because the parsers give structure but not line numbers, and a finding without a line number is not actionable. The YAML scanner tracks block scalars so prose inside a `|` block is not mistaken for mapping keys; the JSON scanner tokenizes strings so a match never begins inside one. Notebooks (`src/notebook.rs`) join their code cells into one Python source — an import in the first cell still informs the fifth — and map each finding back to the line in the `.ipynb` file.
 
 ---
 
@@ -307,7 +328,7 @@ YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a pa
 | Data-stack aware (Airflow, dbt, Spark, Snowpark) | no | no | no | **yes** |
 | Enforces a **required-parameter contract** | no | no | no | **yes** |
 | Runs locally with nothing transmitted | yes | yes | usually not | **yes** |
-| Typical runtime | instant | instant | minutes | **<200ms on the 47-file sample repo** |
+| Typical runtime | instant | instant | minutes | **~10ms on the bundled samples; ~0.3s on 500 files** |
 
 `detect-secrets` finds high-entropy strings; `KV002` finds a literal assigned to a name your contract forbids, which also catches `password = "dev"`. Neither has any concept of "this function must accept `target_environment`."
 

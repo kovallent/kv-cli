@@ -25,6 +25,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Root of the parameter contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Contract {
     #[serde(default = "default_version")]
     pub version: u32,
@@ -50,6 +51,7 @@ pub struct Contract {
 
 /// Which built-in framework profiles apply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrameworkConfig {
     /// `auto` detects each framework from a file's imports (and, for dbt, its
     /// model signature). Naming frameworks explicitly applies them everywhere.
@@ -82,6 +84,7 @@ impl FrameworkConfig {
 /// KV003: hardcoded warehouses, catalogs, buckets, cluster IDs and endpoints.
 /// Report-only - `kv-cli fix` never rewrites these.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InfraConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -198,6 +201,7 @@ fn default_version() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     #[serde(default = "default_include")]
     pub include: Vec<String>,
@@ -208,10 +212,22 @@ pub struct ScanConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            include: ["**/*.py", "**/*.yml", "**/*.yaml"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            include: [
+                "**/*.py",
+                "**/*.ipynb",
+                "**/*.yml",
+                "**/*.yaml",
+                "**/.env",
+                "**/.env.*",
+                "**/*.env",
+                "**/*.toml",
+                "**/*.ini",
+                "**/*.cfg",
+                "**/*.json",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             exclude: [
                 "**/.venv/**",
                 "**/venv/**",
@@ -235,6 +251,7 @@ impl Default for ScanConfig {
 
 /// A parameter that in-scope functions are required to accept.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequiredParameter {
     pub name: String,
     /// Type annotation rendered by `kv-cli fix`, e.g. `str`.
@@ -270,6 +287,7 @@ impl Severity {
 /// Selects the functions the contract governs. A function is in scope if it
 /// matches *any* rule (or if `all_functions` is set).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppliesTo {
     /// Wildcard patterns matched against the function name.
     #[serde(default = "default_name_patterns")]
@@ -303,6 +321,7 @@ impl Default for AppliesTo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -331,6 +350,7 @@ fn default_min_len() -> usize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValuePattern {
     pub name: String,
     pub regex: String,
@@ -383,6 +403,27 @@ impl Default for SecretsConfig {
                     name: "url_basic_auth".into(),
                     regex: r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s:@]+@".into(),
                 },
+                ValuePattern {
+                    name: "github_fine_grained_token".into(),
+                    regex: r"\bgithub_pat_[A-Za-z0-9_]{22,}".into(),
+                },
+                ValuePattern {
+                    name: "openai_project_key".into(),
+                    regex: r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}".into(),
+                },
+                ValuePattern {
+                    name: "google_api_key".into(),
+                    regex: r"\bAIza[0-9A-Za-z_-]{35}".into(),
+                },
+                ValuePattern {
+                    name: "stripe_live_key".into(),
+                    regex: r"\b(?:sk|rk)_live_[0-9A-Za-z]{24,}".into(),
+                },
+                ValuePattern {
+                    name: "jwt".into(),
+                    regex: r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+                        .into(),
+                },
             ],
             allow_values: [
                 "",
@@ -410,6 +451,7 @@ impl Default for SecretsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixConfig {
     /// Insert missing contract parameters into function signatures.
     #[serde(default = "yes")]
@@ -488,23 +530,61 @@ impl Contract {
     }
 
     /// Walks up from `start` looking for `.kovallent.yaml`.
+    ///
+    /// A relative start is walked with `..` rather than `Path::parent`: the
+    /// parent of `.` is the empty path, so the walk used to stop at the working
+    /// directory - run from `jobs/`, the project's contract one level up was
+    /// never found and the built-in defaults applied instead. The returned path
+    /// stays relative, so nothing machine-specific reaches the payload.
     pub fn discover(start: &Path) -> Option<PathBuf> {
-        let mut dir = Some(start);
-        while let Some(d) = dir {
-            let candidate = d.join(CONTRACT_FILE);
+        if start.is_absolute() {
+            return start
+                .ancestors()
+                .map(|d| d.join(CONTRACT_FILE))
+                .find(|c| c.is_file());
+        }
+        let mut dir = start.to_path_buf();
+        // Tracks where `dir` really is, to know when the root is reached.
+        let mut real = start.canonicalize().ok()?;
+        loop {
+            let candidate = dir.join(CONTRACT_FILE);
             if candidate.is_file() {
                 return Some(candidate);
             }
-            dir = d.parent();
+            real = real.parent()?.to_path_buf();
+            dir = if dir.as_os_str().is_empty() || dir == Path::new(".") {
+                PathBuf::from("..")
+            } else {
+                dir.join("..")
+            };
         }
-        None
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let contract: Contract = serde_yaml::from_str(&raw)
-            .map_err(|e| format!("invalid contract at {}: {e}", path.display()))?;
+        Self::from_yaml(&raw).map_err(|e| format!("invalid contract at {}: {e}", path.display()))
+    }
+
+    /// Parse contract text. Unknown keys are rejected rather than ignored: a
+    /// misspelled key would otherwise fall back to its default, silently
+    /// weakening the contract while it still looks configured - and without
+    /// changing the fingerprint, since unknown keys are never hashed.
+    ///
+    /// The version is checked first, so a contract written for a newer schema
+    /// is reported as an unsupported version rather than as a list of fields
+    /// this build has never heard of.
+    pub fn from_yaml(raw: &str) -> Result<Self, String> {
+        let version = serde_yaml::from_str::<serde_yaml::Value>(raw)
+            .map_err(|e| e.to_string())?
+            .get("version")
+            .and_then(serde_yaml::Value::as_u64);
+        if let Some(v) = version.filter(|v| *v != 1) {
+            return Err(format!(
+                "unsupported contract version {v} (this build understands version 1)"
+            ));
+        }
+        let contract: Contract = serde_yaml::from_str(raw).map_err(|e| e.to_string())?;
         if contract.version != 1 {
             return Err(format!(
                 "unsupported contract version {} (this build understands version 1)",
@@ -522,12 +602,22 @@ version: 1
 
 # Which files participate in the audit.
 scan:
-  # Python files get the full audit. YAML files (dbt profiles.yml,
-  # dbt_project.yml, CI config) are scanned for credentials only.
+  # Python files get the full audit. Notebooks and config files - YAML
+  # (dbt profiles.yml, CI config), .env, TOML, INI/.cfg, JSON - are scanned
+  # for credentials only. `.env.example`-style templates get value patterns
+  # only, since placeholders are their purpose.
   include:
     - "**/*.py"
+    - "**/*.ipynb"
     - "**/*.yml"
     - "**/*.yaml"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.env"
+    - "**/*.toml"
+    - "**/*.ini"
+    - "**/*.cfg"
+    - "**/*.json"
   exclude:
     - "**/.venv/**"
     - "**/venv/**"
@@ -604,6 +694,16 @@ secrets:
       regex: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----'
     - name: url_basic_auth
       regex: '[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s:@]+@'
+    - name: github_fine_grained_token
+      regex: '\bgithub_pat_[A-Za-z0-9_]{22,}'
+    - name: openai_project_key
+      regex: '\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}'
+    - name: google_api_key
+      regex: '\bAIza[0-9A-Za-z_-]{35}'
+    - name: stripe_live_key
+      regex: '\b(?:sk|rk)_live_[0-9A-Za-z]{24,}'
+    - name: jwt
+      regex: '\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
   # Literals that are obviously placeholders (compared case-insensitively).
   allow_values:
     - ""
@@ -627,7 +727,8 @@ secrets:
 # Built-in framework profiles. Each one contributes signatures the framework
 # owns (never given contract parameters), credential shapes, and infrastructure
 # identifiers - all scoped to files where the framework is actually used.
-# Available: dbt, polars, flink, databricks, snowpark. Run `kv-cli frameworks`.
+# Available: dbt, polars, flink, databricks, snowpark, airflow.
+# Run `kv-cli frameworks`.
 frameworks:
   # "auto" detects each framework per file from its imports. Naming frameworks
   # explicitly applies them to every scanned file instead.
@@ -747,6 +848,47 @@ mod tests {
         assert!(c.parameters.is_empty());
     }
 
+    // --- unknown keys ----------------------------------------------------
+
+    /// Regression: `name_pattern` (singular) used to be ignored, leaving the
+    /// defaults in force and the user's rule silently unapplied.
+    #[test]
+    fn misspelled_key_is_rejected_not_ignored() {
+        let err = Contract::from_yaml("version: 1\napplies_to:\n  name_pattern: [\"etl_*\"]\n")
+            .unwrap_err();
+        assert!(err.contains("name_pattern"), "{err}");
+        // The error names what was meant.
+        assert!(err.contains("name_patterns"), "{err}");
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_at_every_level() {
+        for yaml in [
+            "version: 1\nparamaters: []\n",
+            "version: 1\nsecrets:\n  enable: false\n",
+            "version: 1\nparameters:\n  - name: env\n    defualt: '\"dev\"'\n",
+            "version: 1\nsecrets:\n  value_patterns:\n    - name: x\n      regexp: 'y'\n",
+            "version: 1\nframeworks:\n  enabled: [auto]\n",
+            "version: 1\nfix:\n  backup: .bak\n",
+        ] {
+            assert!(Contract::from_yaml(yaml).is_err(), "accepted: {yaml}");
+        }
+    }
+
+    /// A newer schema is an unsupported version, not a pile of unknown keys.
+    #[test]
+    fn newer_version_is_reported_as_such() {
+        let err = Contract::from_yaml("version: 2\nsome_new_section: {}\n").unwrap_err();
+        assert!(err.contains("unsupported contract version 2"), "{err}");
+    }
+
+    #[test]
+    fn the_init_template_has_no_unknown_keys() {
+        let c = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
+        // ...and means exactly the built-in defaults.
+        assert_eq!(c.fingerprint(), Contract::default().fingerprint());
+    }
+
     // --- contract fingerprint (exit criterion) --------------------------
 
     fn fp(yaml: &str) -> String {
@@ -846,6 +988,48 @@ mod tests {
         // The algorithm is the irreversible part: changing it invalidates every
         // stored fingerprint, so the length is asserted, not assumed.
         assert_eq!(Contract::default().fingerprint().len(), FINGERPRINT_LEN);
+    }
+
+    /// Each new detector, against a real-shaped key and a near miss.
+    #[test]
+    fn added_value_patterns_match_real_shapes_only() {
+        let patterns = Contract::default().secrets.value_patterns;
+        let re = |name: &str| {
+            let p = patterns.iter().find(|p| p.name == name).unwrap();
+            regex::Regex::new(&p.regex).unwrap()
+        };
+        for (name, hit, miss) in [
+            (
+                "github_fine_grained_token",
+                "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz",
+                "github_pat_short",
+            ),
+            (
+                "openai_project_key",
+                "sk-proj-AbCdEf0123456789_xyz-ABCDEFGH",
+                "sk-proj-short",
+            ),
+            (
+                "google_api_key",
+                "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+                "AIzaSyShort",
+            ),
+            (
+                "stripe_live_key",
+                "sk_live_0123456789abcdefghijklmn",
+                "sk_test_0123456789abcdefghijklmn",
+            ),
+            (
+                "jwt",
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+                "eyJhbGciOiJIUzI1NiJ9.notapayload.sig",
+            ),
+        ] {
+            assert!(re(name).is_match(hit), "{name} should match {hit}");
+            assert!(!re(name).is_match(miss), "{name} should not match {miss}");
+        }
+        // The legacy OpenAI detector never matched project keys.
+        assert!(!re("openai_api_key").is_match("sk-proj-AbCdEf0123456789_xyz-ABCDEFGH"));
     }
 
     #[test]

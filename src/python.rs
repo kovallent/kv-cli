@@ -33,6 +33,19 @@ pub enum BindingSource {
     /// `def f(name="...")` - detected, but never rewritten: an `os.environ`
     /// default would be evaluated at definition time, not per call.
     ParameterDefault,
+    /// `cfg["name"] = "..."` - keyed by the subscript string.
+    Subscript,
+    /// `os.environ["NAME"] = "..."` - detected, but never rewritten: replacing
+    /// the value with `os.environ["NAME"]` would read the variable it is
+    /// meant to set.
+    EnvironAssignment,
+    /// `os.getenv("NAME", "...")` / `os.environ.get("NAME", "...")` - the
+    /// fallback is bound to `NAME`. Detected, but never rewritten: dropping
+    /// the fallback changes what the lookup returns when the variable is unset.
+    EnvFallback,
+    /// `NAME += "..."` - detected, but never rewritten: replacing the literal
+    /// would append the whole environment value to whatever came before.
+    AugmentedAssignment,
 }
 
 /// A string literal bound to a name. Tuple targets are paired element-wise,
@@ -52,7 +65,9 @@ pub enum ParamKind {
     Star,
     /// `**kwargs`
     DoubleStar,
-    /// Bare `*` and `/` separators.
+    /// Bare `*`: every parameter after it is keyword-only.
+    KeywordSeparator,
+    /// Bare `/` separator, or anything else that names no parameter.
     Marker,
 }
 
@@ -81,9 +96,9 @@ pub struct FunctionDef {
 
 impl FunctionDef {
     pub fn has_param(&self, name: &str) -> bool {
-        self.params
-            .iter()
-            .any(|p| p.kind != ParamKind::Marker && p.name == name)
+        self.params.iter().any(|p| {
+            !matches!(p.kind, ParamKind::Marker | ParamKind::KeywordSeparator) && p.name == name
+        })
     }
 }
 
@@ -111,6 +126,9 @@ pub struct Analysis {
     /// True when tree-sitter recovered from a syntax error. Findings are still
     /// reported, but the file is never rewritten.
     pub has_error: bool,
+    /// Byte ranges of every `#` comment, in source order. Ignore markers only
+    /// count inside one - a marker in a string literal is data, not intent.
+    pub comments: Vec<Range<usize>>,
     line_starts: Vec<usize>,
     source_len: usize,
 }
@@ -133,6 +151,18 @@ impl Analysis {
             .unwrap_or(self.source_len);
         start..end.max(start)
     }
+
+    /// True when a comment on `line` contains `marker`.
+    pub fn comment_on_line_contains(&self, source: &str, line: usize, marker: &str) -> bool {
+        let span = self.line_span(line);
+        // Comments are sorted and never span lines: find the first one that
+        // ends after the line starts, then walk while they start on it.
+        let first = self.comments.partition_point(|c| c.end <= span.start);
+        self.comments[first..]
+            .iter()
+            .take_while(|c| c.start < span.end)
+            .any(|c| source[c.clone()].contains(marker))
+    }
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -152,6 +182,7 @@ pub fn analyze(source: &str) -> Analysis {
         bindings: Vec::new(),
         imports: Imports::default(),
         has_error: false,
+        comments: Vec::new(),
         line_starts: line_starts(source),
         source_len: source.len(),
     };
@@ -173,18 +204,28 @@ pub fn analyze(source: &str) -> Analysis {
     analysis.has_error = tree.root_node().has_error();
     let mut ctx = Ctx {
         source,
-        line_starts: line_starts(source),
+        line_starts: &analysis.line_starts,
         functions: Vec::new(),
         bindings: Vec::new(),
+        comments: Vec::new(),
     };
     let root = tree.root_node();
     walk(root, &mut ctx);
-    analysis.imports = scan_imports(root, &ctx);
+    let imports = scan_imports(root, &ctx);
 
-    ctx.functions.sort_by_key(|f| f.start);
-    ctx.bindings.sort_by_key(|b| b.value.span.start);
-    analysis.functions = ctx.functions;
-    analysis.bindings = ctx.bindings;
+    let Ctx {
+        mut functions,
+        mut bindings,
+        mut comments,
+        ..
+    } = ctx;
+    functions.sort_by_key(|f| f.start);
+    bindings.sort_by_key(|b| b.value.span.start);
+    comments.sort_by_key(|c| c.start);
+    analysis.imports = imports;
+    analysis.functions = functions;
+    analysis.bindings = bindings;
+    analysis.comments = comments;
     analysis
 }
 
@@ -272,9 +313,10 @@ fn binds_os(node: Node, ctx: &Ctx) -> bool {
 
 struct Ctx<'a> {
     source: &'a str,
-    line_starts: Vec<usize>,
+    line_starts: &'a [usize],
     functions: Vec<FunctionDef>,
     bindings: Vec<Binding>,
+    comments: Vec<Range<usize>>,
 }
 
 impl Ctx<'_> {
@@ -295,14 +337,46 @@ impl Ctx<'_> {
     }
 }
 
-fn walk(node: Node, ctx: &mut Ctx) {
+/// Visit every node in pre-order.
+///
+/// Iterative on purpose. Tree depth is controlled by whoever wrote the file -
+/// a chained `a + b + ...` nests one level per operand - and a recursive walk
+/// overflowed the stack on such input, aborting the whole run instead of
+/// reporting on it.
+fn walk(root: Node, ctx: &mut Ctx) {
+    let mut cursor = root.walk();
+    loop {
+        visit(cursor.node(), ctx);
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
+fn visit(node: Node, ctx: &mut Ctx) {
     match node.kind() {
+        "comment" => ctx.comments.push(node.byte_range()),
         "function_definition" => {
             if let Some(f) = function_def(node, ctx) {
                 ctx.functions.push(f);
             }
         }
         "assignment" => collect_assignment(node, ctx),
+        "augmented_assignment" => bind(
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+            BindingSource::AugmentedAssignment,
+            ctx,
+        ),
+        "call" => collect_env_fallback(node, ctx),
         "pair" => bind(
             node.child_by_field_name("key"),
             node.child_by_field_name("value"),
@@ -328,11 +402,6 @@ fn walk(node: Node, ctx: &mut Ctx) {
             ctx,
         ),
         _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk(child, ctx);
     }
 }
 
@@ -368,26 +437,77 @@ fn collect_assignment(node: Node, ctx: &mut Ctx) {
         let values = named_children(right);
         if targets.len() == values.len() {
             for (t, v) in targets.iter().zip(values.iter()) {
-                bind(Some(*t), Some(*v), BindingSource::Assignment, ctx);
+                bind(Some(*t), Some(*v), assignment_source(*t, ctx), ctx);
             }
         }
         return;
     }
 
-    bind(Some(left), Some(right), BindingSource::Assignment, ctx);
+    bind(Some(left), Some(right), assignment_source(left, ctx), ctx);
+}
+
+/// How an assignment target binds: plainly, through a subscript, or into
+/// the process environment.
+fn assignment_source(target: Node, ctx: &Ctx) -> BindingSource {
+    if target.kind() != "subscript" {
+        return BindingSource::Assignment;
+    }
+    let container: String = target
+        .child_by_field_name("value")
+        .map(|v| ctx.text(v).split_whitespace().collect())
+        .unwrap_or_default();
+    if container == "os.environ" || container == "environ" {
+        BindingSource::EnvironAssignment
+    } else {
+        BindingSource::Subscript
+    }
+}
+
+/// `os.getenv("NAME", "fallback")` and `os.environ.get("NAME", "fallback")`,
+/// positional or `default=`. The fallback is a value written into the source
+/// under the variable's name - exactly what the lookup was meant to replace -
+/// so it is bound to `NAME` and judged by the same key rules.
+fn collect_env_fallback(node: Node, ctx: &mut Ctx) {
+    let Some(function) = node.child_by_field_name("function") else {
+        return;
+    };
+    let name: String = ctx.text(function).split_whitespace().collect();
+    if !matches!(
+        name.as_str(),
+        "os.getenv" | "getenv" | "os.environ.get" | "environ.get"
+    ) {
+        return;
+    }
+    let Some(args) = node.child_by_field_name("arguments") else {
+        return;
+    };
+    let args = named_children(args);
+    let Some(var) = args.first().copied().filter(|a| a.kind() == "string") else {
+        return;
+    };
+    let fallback = args
+        .get(1)
+        .copied()
+        .filter(|a| a.kind() != "keyword_argument")
+        .or_else(|| {
+            args.iter()
+                .find(|a| {
+                    a.kind() == "keyword_argument"
+                        && a.child_by_field_name("name").map(|n| ctx.text(n)) == Some("default")
+                })
+                .and_then(|a| a.child_by_field_name("value"))
+        });
+    bind(Some(var), fallback, BindingSource::EnvFallback, ctx);
 }
 
 fn bind(name: Option<Node>, value: Option<Node>, source: BindingSource, ctx: &mut Ctx) {
     let (Some(name), Some(value)) = (name, value) else {
         return;
     };
-    if value.kind() != "string" {
-        return;
-    }
-    let Some(key) = binding_name(name, ctx) else {
+    let Some(literal) = literal_of(value, ctx) else {
         return;
     };
-    let Some(literal) = string_literal(value, ctx) else {
+    let Some(key) = binding_name(name, ctx) else {
         return;
     };
     let line = ctx.line_of(literal.span.start);
@@ -399,11 +519,51 @@ fn bind(name: Option<Node>, value: Option<Node>, source: BindingSource, ctx: &mu
     });
 }
 
+/// The string literal an expression is, looking through parentheses and
+/// implicit concatenation: `("s3cr3t" "-pw")` is as hardcoded as `"s3cr3t-pw"`.
+///
+/// A concatenation's `content` runs from the first part's body to the last
+/// part's, so it includes the quotes between parts. That is acceptable for
+/// what `content` is used for - length, placeholder and interpolation checks,
+/// and a redacted preview - and `span` (what `fix` replaces) is exact.
+fn literal_of(node: Node, ctx: &Ctx) -> Option<StringLiteral> {
+    let mut node = node;
+    while node.kind() == "parenthesized_expression" {
+        match named_children(node).as_slice() {
+            [inner] => node = *inner,
+            _ => return None,
+        }
+    }
+    match node.kind() {
+        "string" => string_literal(node, ctx),
+        "concatenated_string" => {
+            let parts: Vec<StringLiteral> = named_children(node)
+                .into_iter()
+                .filter(|p| p.kind() == "string")
+                .filter_map(|p| string_literal(p, ctx))
+                .collect();
+            let (first, last) = (parts.first()?, parts.last()?);
+            Some(StringLiteral {
+                span: node.byte_range(),
+                content: first.content.start..last.content.end,
+                has_interpolation: parts.iter().any(|p| p.has_interpolation),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn binding_name(node: Node, ctx: &Ctx) -> Option<String> {
     match node.kind() {
         // `attribute` covers `self.password` / `cfg.api_key`.
         "identifier" | "attribute" => Some(ctx.text(node).split_whitespace().collect()),
         "string" => string_literal(node, ctx).map(|l| ctx.source[l.content].to_string()),
+        // `cfg["api_key"]` and `os.environ["API_KEY"]` are keyed by the
+        // string; a computed index names nothing we can judge.
+        "subscript" => node
+            .child_by_field_name("subscript")
+            .filter(|s| s.kind() == "string")
+            .and_then(|s| binding_name(s, ctx)),
         _ => None,
     }
 }
@@ -460,6 +620,7 @@ fn parse_params(node: Node, ctx: &Ctx) -> Vec<Param> {
             }
             "list_splat_pattern" => (ParamKind::Star, child.named_child(0), false),
             "dictionary_splat_pattern" => (ParamKind::DoubleStar, child.named_child(0), false),
+            "keyword_separator" => (ParamKind::KeywordSeparator, None, false),
             _ => (ParamKind::Marker, None, false),
         };
         out.push(Param {
@@ -509,27 +670,37 @@ fn decorators_of(node: Node, ctx: &Ctx) -> Vec<String> {
 
 /// Shell-style wildcard match supporting `*`, `?` and `**`.
 pub fn wildcard_match(pattern: &str, text: &str) -> bool {
-    wc(pattern.as_bytes(), text.as_bytes())
-}
-
-fn wc(p: &[u8], t: &[u8]) -> bool {
-    if p.is_empty() {
-        return t.is_empty();
-    }
-    match p[0] {
-        b'*' => {
-            let mut rest = &p[1..];
-            while rest.first() == Some(&b'*') {
-                rest = &rest[1..];
+    // Greedy match with one backtrack point - the most recent `*` - which is
+    // complete for `*`/`?` globs and O(len(pattern) * len(text)) at worst.
+    // The recursive matcher it replaces backtracked across every `*` at once:
+    // a 200 KB dict key against `*sasl*password*` took 33 seconds, and the
+    // text is whatever a scanned file contains.
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti) = (0, 0);
+    // (pattern index just past the last `*`, text index that `*` matched to)
+    let mut resume: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        match p.get(pi) {
+            Some(b'*') => {
+                pi += 1;
+                resume = Some((pi, ti));
             }
-            if wc(rest, t) {
-                return true;
+            Some(&c) if c == b'?' || c == t[ti] => {
+                pi += 1;
+                ti += 1;
             }
-            (0..t.len()).any(|i| wc(rest, &t[i + 1..]))
+            _ => match resume {
+                // Let the last `*` absorb one more byte and retry.
+                Some((after_star, matched_to)) => {
+                    pi = after_star;
+                    ti = matched_to + 1;
+                    resume = Some((after_star, ti));
+                }
+                None => return false,
+            },
         }
-        b'?' => !t.is_empty() && wc(&p[1..], &t[1..]),
-        c => !t.is_empty() && t[0] == c && wc(&p[1..], &t[1..]),
     }
+    p[pi..].iter().all(|&c| c == b'*')
 }
 
 /// Match a path pattern against a `/`-separated relative path.
@@ -594,11 +765,13 @@ mod tests {
                 ParamKind::Normal,
                 ParamKind::Marker,
                 ParamKind::Normal,
-                ParamKind::Marker,
+                ParamKind::KeywordSeparator,
                 ParamKind::Normal,
                 ParamKind::Normal,
             ]
         );
+        // Neither separator is a parameter name.
+        assert!(!a.functions[0].has_param(""));
         // The lambda's own parameters must not leak into the signature.
         assert!(!a.functions[0].has_param("x"));
         assert!(a.functions[0].has_param("d"));
@@ -700,6 +873,145 @@ mod tests {
     fn syntax_errors_are_reported_not_fatal() {
         let a = analyze("def broken(:\n    pass\n");
         assert!(a.has_error);
+    }
+
+    /// The recursive matcher `wildcard_match` replaced, kept as an oracle.
+    fn reference_match(p: &[u8], t: &[u8]) -> bool {
+        if p.is_empty() {
+            return t.is_empty();
+        }
+        match p[0] {
+            b'*' => (0..=t.len()).any(|i| reference_match(&p[1..], &t[i..])),
+            b'?' => !t.is_empty() && reference_match(&p[1..], &t[1..]),
+            c => !t.is_empty() && t[0] == c && reference_match(&p[1..], &t[1..]),
+        }
+    }
+
+    /// Exhaustive-ish agreement with the old semantics over a small alphabet,
+    /// where backtracking cases are dense.
+    #[test]
+    fn wildcard_matcher_agrees_with_the_reference() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let alphabet = *b"ab*?";
+        for _ in 0..20_000 {
+            let p: Vec<u8> = (0..next(7)).map(|_| alphabet[next(4) as usize]).collect();
+            let t: Vec<u8> = (0..next(9)).map(|_| alphabet[next(2) as usize]).collect();
+            let (ps, ts) = (
+                std::str::from_utf8(&p).unwrap(),
+                std::str::from_utf8(&t).unwrap(),
+            );
+            assert_eq!(
+                wildcard_match(ps, ts),
+                reference_match(&p, &t),
+                "pattern {ps:?} text {ts:?}"
+            );
+        }
+    }
+
+    /// Regression: 33 seconds on this input with the recursive matcher.
+    #[test]
+    fn wildcard_matching_is_not_superlinear_on_hostile_text() {
+        let text = "sasl".repeat(50_000);
+        let start = std::time::Instant::now();
+        assert!(!wildcard_match("*sasl*password*", &text));
+        assert!(!wildcard_match("*a*a*a*a*a*b", &"a".repeat(100_000)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Regression: the recursive walk overflowed the stack on deep nesting
+    /// and aborted the process. Test threads have a small stack, so this
+    /// fails loudly if recursion ever comes back.
+    #[test]
+    fn deeply_nested_expressions_do_not_overflow_the_stack() {
+        let src = format!(
+            "x = {}\nDB_PASSWORD = \"s3cr3t-prod-pw\"\n",
+            vec!["1"; 100_000].join(" + ")
+        );
+        let a = analyze(&src);
+        assert!(a.bindings.iter().any(|b| b.key == "DB_PASSWORD"));
+    }
+
+    #[test]
+    fn binds_through_parentheses_and_implicit_concatenation() {
+        let src = "A = (\"s3cr3t\" \"-prod\")\nB = ((\"x1234\"))\n";
+        let a = analyze(src);
+        let a_bind = a.bindings.iter().find(|b| b.key == "A").unwrap();
+        // `fix` replaces the whole concatenation, not one part.
+        assert_eq!(&src[a_bind.value.span.clone()], "\"s3cr3t\" \"-prod\"");
+        assert!(a.bindings.iter().any(|b| b.key == "B"));
+        // An interpolated part makes the whole value computed.
+        let a = analyze("C = \"x\" f\"{y}\"\n");
+        assert!(a.bindings[0].value.has_interpolation);
+    }
+
+    #[test]
+    fn subscript_targets_bind_by_their_string_key() {
+        let a = analyze(
+            "cfg[\"db_password\"] = \"v1\"\nos.environ[\"API_KEY\"] = \"v2\"\ncfg[i] = \"v3\"\n",
+        );
+        let got: Vec<_> = a
+            .bindings
+            .iter()
+            .map(|b| (b.key.as_str(), b.source))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("db_password", BindingSource::Subscript),
+                ("API_KEY", BindingSource::EnvironAssignment),
+            ]
+        );
+    }
+
+    #[test]
+    fn env_lookup_fallbacks_bind_to_the_variable_name() {
+        for src in [
+            "p = os.getenv(\"DB_PASSWORD\", \"v\")\n",
+            "p = getenv(\"DB_PASSWORD\", \"v\")\n",
+            "p = os.environ.get(\"DB_PASSWORD\", \"v\")\n",
+            "p = os.environ.get(\"DB_PASSWORD\", default=\"v\")\n",
+        ] {
+            let a = analyze(src);
+            assert!(
+                a.bindings
+                    .iter()
+                    .any(|b| b.key == "DB_PASSWORD" && b.source == BindingSource::EnvFallback),
+                "{src}"
+            );
+        }
+        // No fallback, nothing bound to the variable.
+        let a = analyze("p = os.getenv(\"DB_PASSWORD\")\n");
+        assert!(a.bindings.is_empty());
+    }
+
+    #[test]
+    fn augmented_assignment_binds() {
+        let a = analyze("DB_PASSWORD = \"\"\nDB_PASSWORD += \"s3cr3t\"\n");
+        let b = a.bindings.iter().find(|b| b.line == 2).unwrap();
+        assert_eq!(
+            (b.key.as_str(), b.source),
+            ("DB_PASSWORD", BindingSource::AugmentedAssignment)
+        );
+    }
+
+    #[test]
+    fn comments_are_recorded_and_strings_are_not_comments() {
+        let src = "x = \"# not a comment\"  # real\ny = 1\n";
+        let a = analyze(src);
+        assert_eq!(a.comments.len(), 1);
+        assert!(a.comment_on_line_contains(src, 1, "real"));
+        assert!(!a.comment_on_line_contains(src, 1, "not a comment"));
+        assert!(!a.comment_on_line_contains(src, 2, "real"));
     }
 
     #[test]

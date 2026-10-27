@@ -53,9 +53,17 @@ pub fn fix_source(engine: &Engine, path: &Path, source: &str) -> FixReport {
         return report;
     }
 
+    // Inserted text follows the file's own convention, so a CRLF file does
+    // not come back with mixed line endings.
+    let nl = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
     let ctx = engine.context(&a);
     if engine.contract.fix.insert_missing_parameters {
-        collect_param_edits(engine, &ctx, source, &a, &mut edits, &mut report);
+        collect_param_edits(engine, &ctx, source, &a, nl, &mut edits, &mut report);
     }
     let mut needs_os_import = false;
     if engine.contract.fix.externalize_secrets {
@@ -71,7 +79,7 @@ pub fn fix_source(engine: &Engine, path: &Path, source: &str) -> FixReport {
         edits.push(Edit {
             start: at,
             end: at,
-            replacement: "import os\n".to_string(),
+            replacement: format!("import os{nl}"),
         });
     }
 
@@ -100,6 +108,7 @@ fn collect_param_edits(
     ctx: &FileContext,
     source: &str,
     a: &Analysis,
+    nl: &str,
     edits: &mut Vec<Edit>,
     report: &mut FixReport,
 ) {
@@ -127,15 +136,19 @@ fn collect_param_edits(
             continue;
         }
 
-        let has_star = f
+        // New parameters land at the end (or just before `**kwargs`), so they
+        // are keyword-only exactly when a `*args` or bare `*` precedes them.
+        // Only then may a required parameter follow a defaulted one. A `/`
+        // does not help: `def f(a=1, /, b)` is still a syntax error.
+        let keyword_only = f
             .params
             .iter()
-            .any(|p| matches!(p.kind, ParamKind::Star | ParamKind::Marker));
+            .any(|p| matches!(p.kind, ParamKind::Star | ParamKind::KeywordSeparator));
         let existing_has_default = f.params.iter().any(|p| p.has_default);
 
         let mut to_add = Vec::new();
         for p in missing {
-            if p.default.is_none() && existing_has_default && !has_star {
+            if p.default.is_none() && existing_has_default && !keyword_only {
                 report.skipped.push(format!(
                     "{}:{} `{}` needs required parameter `{}`, but inserting it after \
                      defaulted parameters would be a syntax error - add it by hand",
@@ -153,7 +166,7 @@ fn collect_param_edits(
         }
 
         let rendered: Vec<String> = to_add.iter().map(|p| render_param(p)).collect();
-        let (start, end, text) = insertion(source, a, f, &rendered);
+        let (start, end, text) = insertion(source, a, f, &rendered, nl);
         edits.push(Edit {
             start,
             end,
@@ -171,6 +184,7 @@ fn insertion(
     a: &Analysis,
     f: &FunctionDef,
     rendered: &[String],
+    nl: &str,
 ) -> (usize, usize, String) {
     let sig = &source[f.paren_open..=f.paren_close];
     let multiline = sig.contains('\n');
@@ -184,7 +198,7 @@ fn insertion(
             let indent = line_indent(source, a, k.span.start);
             let block = rendered
                 .iter()
-                .map(|r| format!("{indent}{r},\n"))
+                .map(|r| format!("{indent}{r},{nl}"))
                 .collect::<String>();
             let line_start = a.line_span(a.line_of(k.span.start)).start;
             return (line_start, line_start, block);
@@ -199,7 +213,7 @@ fn insertion(
                 let indent = line_indent(source, a, last.span.start);
                 let block = rendered
                     .iter()
-                    .map(|r| format!(",\n{indent}{r}"))
+                    .map(|r| format!(",{nl}{indent}{r}"))
                     .collect::<String>();
                 (last.span.end, last.span.end, block)
             } else {
@@ -232,10 +246,28 @@ fn collect_secret_edits(
     let mut rewrote = false;
 
     for b in ctx.flagged_secrets(source, a) {
-        if b.source == BindingSource::ParameterDefault {
+        let manual = match b.source {
+            BindingSource::ParameterDefault => Some(
+                "has a hardcoded default; move the lookup into the body so it is \
+                 read per call, not at import time",
+            ),
+            BindingSource::EnvironAssignment => Some(
+                "is set to a hardcoded value in the process environment; supply it \
+                 from outside the code instead",
+            ),
+            BindingSource::EnvFallback => Some(
+                "has a hardcoded fallback; remove it so a missing variable fails \
+                 loudly instead of using the literal",
+            ),
+            BindingSource::AugmentedAssignment => Some(
+                "is built up from a hardcoded literal; load the whole value from \
+                 the environment instead",
+            ),
+            _ => None,
+        };
+        if let Some(why) = manual {
             report.skipped.push(format!(
-                "{}:{} `{}` has a hardcoded default; move the lookup into the body \
-                 so it is read per call, not at import time",
+                "{}:{} `{}` {why}",
                 display(&report.file),
                 b.line,
                 b.key
@@ -292,8 +324,13 @@ fn imports_os(_source: &str, a: &Analysis) -> bool {
 
 /// Byte offset at which `import os\n` can be safely inserted: above the first
 /// existing import, or failing that just past the module prelude.
-fn import_insertion_offset(_source: &str, a: &Analysis) -> usize {
-    a.imports.first.unwrap_or(a.imports.after_prelude)
+///
+/// Never before a UTF-8 byte-order mark: Python accepts one only as the very
+/// first character, and an import placed ahead of it leaves U+FEFF mid-file -
+/// a syntax error.
+fn import_insertion_offset(source: &str, a: &Analysis) -> usize {
+    let bom = if source.starts_with('\u{feff}') { 3 } else { 0 };
+    a.imports.first.unwrap_or(a.imports.after_prelude).max(bom)
 }
 
 fn display(p: &Path) -> String {
@@ -369,6 +406,42 @@ mod tests {
             "def run_x(f=lambda a, b: a, target_environment: str = \"dev\", dry_run: bool = False):\n    pass\n"
         );
         assert!(audit_clean(&out));
+    }
+
+    /// An engine whose only contract parameter has no default, so `fix`
+    /// would insert it as required.
+    fn required_param_engine() -> Engine {
+        Engine::new(Contract {
+            parameters: vec![RequiredParameter {
+                name: "env".into(),
+                annotation: Some("str".into()),
+                default: None,
+                severity: crate::config::Severity::Error,
+            }],
+            ..Contract::default()
+        })
+        .unwrap()
+    }
+
+    /// Regression: a `/` separator used to count as making later parameters
+    /// keyword-only, so `fix` wrote `def run_x(a=1, /, b=2, env: str)` - a
+    /// syntax error.
+    #[test]
+    fn positional_only_marker_does_not_permit_a_required_param_after_defaults() {
+        let src = "def run_x(a=1, /, b=2):\n    pass\n";
+        let r = fix_source(&required_param_engine(), Path::new("t.py"), src);
+        assert!(!r.changed(), "{:?}", r.new_source);
+        assert!(r.skipped.iter().any(|s| s.contains("add it by hand")));
+    }
+
+    /// A bare `*` does make the insertion keyword-only, which is valid.
+    #[test]
+    fn keyword_only_marker_permits_a_required_param_after_defaults() {
+        let src = "def run_x(a=1, *, b=2):\n    pass\n";
+        let r = fix_source(&required_param_engine(), Path::new("t.py"), src);
+        let out = r.new_source.expect("signature is rewritten");
+        assert_eq!(out, "def run_x(a=1, *, b=2, env: str):\n    pass\n");
+        assert!(!python::analyze(&out).has_error);
     }
 
     #[test]
@@ -503,6 +576,58 @@ mod tests {
         let r = fix_source(&engine(), Path::new("t.py"), src);
         assert!(r.skipped.is_empty());
         assert!(!r.changed());
+    }
+
+    /// Regression: `import os` landed before the BOM, a syntax error.
+    #[test]
+    fn import_goes_after_a_byte_order_mark() {
+        let out = fixed("\u{feff}DB_PASSWORD = \"hunter2hunter2\"\n");
+        assert_eq!(
+            out,
+            "\u{feff}import os\nDB_PASSWORD = os.environ[\"DB_PASSWORD\"]\n"
+        );
+        assert!(!python::analyze(&out).has_error);
+    }
+
+    /// Regression: inserted lines used bare `\n` in CRLF files.
+    #[test]
+    fn crlf_files_keep_crlf_line_endings() {
+        let src =
+            "import sys\r\ndef deploy(\r\n    name,\r\n):\r\n    PASSWORD = \"abcd1234efgh\"\r\n";
+        let out = fixed(src);
+        assert_eq!(
+            out.matches('\n').count(),
+            out.matches("\r\n").count(),
+            "mixed line endings: {out:?}"
+        );
+        assert!(out.starts_with("import os\r\n"));
+        assert!(out.contains("    name,\r\n    target_environment: str = \"dev\",\r\n"));
+    }
+
+    #[test]
+    fn subscript_secret_is_rewritten() {
+        let out = fixed("import os\ncfg[\"db_password\"] = \"abcd1234efgh\"\n");
+        assert_eq!(
+            out,
+            "import os\ncfg[\"db_password\"] = os.environ[\"DB_PASSWORD\"]\n"
+        );
+    }
+
+    /// Rewriting either of these would change behaviour, not just move the
+    /// value: `os.environ["X"] = os.environ["X"]` reads what it means to set,
+    /// and dropping a fallback changes what an unset variable returns.
+    #[test]
+    fn environ_assignment_and_env_fallback_are_reported_not_rewritten() {
+        for src in [
+            "import os\nos.environ[\"API_TOKEN\"] = \"abcd1234efgh\"\n",
+            "import os\npw = os.getenv(\"DB_PASSWORD\", \"abcd1234efgh\")\n",
+            "import os\nTOKEN = os.environ[\"T\"]\nTOKEN += \"abcd1234efgh\"\n",
+        ] {
+            let r = fix_source(&engine(), Path::new("t.py"), src);
+            assert!(!r.changed(), "{src}");
+            assert_eq!(r.skipped.len(), 1, "{src}: {:?}", r.skipped);
+            assert!(!audit_clean(src), "audit must still report {src}");
+        }
     }
 
     #[test]

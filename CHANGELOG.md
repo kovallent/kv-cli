@@ -4,13 +4,204 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/). Pre-1.0, minor
 versions may carry breaking changes.
 
-> `0.1.0` and `0.2.0` were development milestones, not published releases —
-> there are no tags to check out. `0.3.0` is the first version intended to ship;
-> `0.4.0` is in progress and will bundle several changes before release.
+> `0.1.0` and `0.2.0` were development milestones, not published releases.
+> `0.3.0` is the first version intended to ship.
 
 ---
 
-## [0.4.0] — Unreleased
+## [Unreleased]
+
+### Added
+
+- **Notebooks and config files are scanned for credentials by default.**
+  `scan.include` now covers `.ipynb`, `.env` / `.env.*` / `*.env`, `.toml`,
+  `.ini`, `.cfg` and `.json` alongside Python and YAML. A directory holding
+  only these used to scan zero files.
+  - Config files get the key-name rule and value patterns, through line
+    scanners that keep line numbers (`src/configscan.rs`). JSON is tokenized,
+    so a match never begins inside a string. `${VAR}`, `{{ ... }}` and INI
+    `%(name)s` interpolation count as supplied at load time.
+  - `.env.example`-style templates get value patterns only: placeholders are
+    their purpose, but a real token pasted into one is still caught.
+  - Notebooks (`src/notebook.rs`): code cells are joined and get the full
+    Python credential analysis, mapped back to the `.ipynb` line, with the
+    cell number in the detail. Value patterns also read outputs, markdown and
+    metadata - a token printed into a saved output is committed too. A file
+    that is not a readable notebook is reported in `skipped`, and still gets
+    the value-pattern pass.
+  - `airflow.cfg` activates the Airflow profile, as `profiles.yml` does dbt.
+  - Credentials only - no KV001 or KV003 - for both. `fix` rewrites neither
+    and lists each finding as a `manual:` item.
+- **Five new default value patterns:** `github_fine_grained_token`
+  (`github_pat_...`), `openai_project_key` (`sk-proj-...` and friends - the
+  existing `openai_api_key` only matches the legacy format), `google_api_key`,
+  `stripe_live_key` and `jwt`.
+
+  **Fingerprints (ADR 0001).** Both additions change the default contract, so
+  the built-in defaults' fingerprint moves (`c7b4c1dd8fd9e840` →
+  `daacf9563acfeedb`), as does any contract that omits `scan.include` or
+  `secrets.value_patterns`. A contract written by an earlier `kv-cli init`
+  spells both out, keeps its fingerprint, and does not gain the new coverage
+  until updated - see "Upgrading" in the README. Existing findings and their
+  fingerprints are unchanged.
+
+- **No star prompt after a credential warning.** A `fix` run that just said
+  "rotate" exits `0`, but it is not the moment to ask for anything.
+- **A one-line GitHub star prompt after a successful run.** Printed dimmed to
+  stderr, and only when the run exits `0` and stdout is not machine output
+  (`--format json`, `schema`). It appears in CI logs, but never in stdout, so
+  parsed payloads are unaffected; exit codes and the JSON schema are
+  unchanged, and no network call is made.
+
+### Changed
+
+- **Files are audited in parallel.** Profiling put nearly all of a run inside
+  tree-sitter's parser, and files are independent, so `audit` now spreads them
+  across cores (`std::thread::scope`, no new dependency). Workers pull from a
+  shared index; outcomes are reassembled in input order, so output is
+  byte-identical to a sequential run. 500 files: 1.05s → 0.28s on 8 cores
+  (best of 5, warm).
+- Overlap checks between findings use an ordered span index instead of
+  rescanning every earlier finding: a 40k-credential generated file went from
+  2.2s to 0.75s.
+
+### Fixed — the gate
+
+- **`--strict` labelled every warning "error"** in text output while the
+  summary still counted it as a warning. Lines now show the intrinsic severity,
+  as the JSON always has; the summary reports what gates.
+
+- **A run that scanned no files reported `PASS`.** A wrong path or a mistyped
+  `scan.include` glob produced `PASS 0 files are compliant` and exit `0`. It is
+  now exit `2` with `no files to audit`, naming the paths and globs tried, and
+  no JSON payload - consistent with "an unverifiable run never passes" and with
+  ADR 0001's rule that a malformed input is exit `2`, never a pass. No new exit
+  code; `fix` with nothing to do is unchanged.
+- **`fix` left credentials looking solved.** After moving a credential into
+  `os.environ`, `fix` now says that it must be rotated - it may already be in
+  git history - and lists each backup still holding the plaintext, with the
+  `.gitignore` pattern that keeps backups out of commits. `fix` does not edit
+  `.gitignore` itself, and never echoes the credential.
+
+### Fixed — file discovery
+
+- **Run from a subdirectory, the project's contract was never found.**
+  `Contract::discover` walked up with `Path::parent`, and the parent of `.` is
+  the empty path, so `cd jobs && kv-cli audit` stopped at `jobs/` and silently
+  applied the built-in defaults. A relative start is now walked with `..`; the
+  reported `contract_path` stays relative (`../.kovallent.yaml`), and is
+  unchanged when the contract is in the working directory.
+- **Symlinked files were silently skipped.** A link to a *file* is now followed
+  when its target resolves inside the project (the contract's directory, or
+  the scanned path without one). A target outside it is never read - a link
+  stores a path, not content, and following one would let an untrusted change
+  point a CI runner's scanner at `~/.aws/credentials`. Linked directories are
+  not followed (no cycles). What is not followed is counted in the text output.
+- **The same file could be audited twice** - named twice (`dedup()` only
+  removed adjacent duplicates), or reached through a link and its real path.
+  Files are now identified by canonical path, keeping the real path.
+
+### Fixed — robustness
+
+- **Deeply nested input crashed the process.** The tree walk was recursive, so
+  a chained `1 + 1 + ...` of 100k terms overflowed the stack and aborted with
+  exit 134 and no output. The walk is now iterative.
+- **A long dict key could stall the gate for 33 seconds.** The wildcard matcher
+  backtracked across every `*`; a 200 KB key against `*sasl*password*` (flink)
+  hit it. Replaced with a single-backtrack-point matcher, checked against the
+  old implementation on 20,000 generated cases.
+- **`fix` broke files with a byte-order mark.** `import os` was inserted before
+  the BOM, leaving U+FEFF mid-file - a syntax error. It now goes after it.
+- **`fix` mixed line endings in CRLF files.** Inserted lines now use the
+  file's own line ending.
+- **`fix` said "nothing to fix" for a YAML credential `audit` fails on.** YAML
+  is still never rewritten, but each finding is now listed as a `manual:` item.
+
+### Fixed — credential scanning
+
+Each of these let a hardcoded credential pass unexamined. All of them only
+*add* findings: no existing finding changes, and no fingerprint moves (the
+bundled samples report identical findings and fingerprints before and after).
+
+- **Python forms the binder did not see:** implicit concatenation
+  (`"s3cr3t" "-pw"`), parenthesized literals, subscript targets
+  (`cfg["db_password"] = ...`), `os.environ["X"] = ...`, and fallbacks in
+  `os.getenv("X", "...")` / `os.environ.get("X", "...")`. The last two are
+  reported but never rewritten - doing so would change behaviour, not just move
+  the value - and `fix` lists them as `manual:` items.
+- **Ignore markers counted anywhere on the line,** including inside a string
+  literal in another statement. They now count only inside a comment, in both
+  Python and YAML.
+- **One finding per line hid a second credential** sharing a line with a
+  reported one, and any finding on a line (even KV001 on a `def`) hid a KV003
+  there. Deduplication is now by the matched text's byte span.
+- **YAML anchors and core tags hid the value:** `password: &pw s3cr3t` and
+  `password: !!str s3cr3t` were treated as templated. They decorate a literal,
+  so they are stripped and the literal judged. Application tags (`!ENV`,
+  `!vault`) and aliases (`*pw`) still count as supplied elsewhere.
+- **YAML flow mappings hid their keys:** `creds: {user: svc, password: x}` was
+  one scalar under `creds`. Pairs of a one-line flow mapping, nested ones
+  included, are now judged like block-style pairs.
+- **`NAME += "..."` was not a binding.** It is now reported - and listed by
+  `fix` as a `manual:` item, since rewriting the literal would append the whole
+  environment value to what came before.
+- **Value patterns never ran on YAML.** A `ghp_...` in a workflow's `env:`, a
+  sequence item, a flow mapping, or a PEM block under `|` passed. They now run
+  over the whole file, as they do for Python.
+
+### Fixed
+
+- **`fix` no longer writes a syntax error after a `/` separator.** With a
+  contract parameter that has no default, `def run_x(a=1, /, b=2)` was
+  rewritten to `def run_x(a=1, /, b=2, env: str)`. The bare `*` and the `/`
+  separator were one parameter kind, and both were taken to make the insertion
+  keyword-only; only `*args` and `*` do. The bare `*` is now its own
+  `ParamKind::KeywordSeparator`, and the `/` case is reported as a `manual:`
+  item like any other required-after-default insertion.
+
+- **A second `fix` run no longer destroys the original backup.** The `.kvbak`
+  was overwritten on every run, so after two runs it held the first run's
+  output and the original source was gone. An existing backup is now kept -
+  created with `create_new`, so the check and the write are one step - and
+  `fix` says so.
+
+- **Unknown contract keys are rejected (exit `2`) instead of ignored.** A
+  misspelling such as `applies_to: { name_pattern: [...] }` fell back to the
+  defaults and reported `PASS`, a silently weakened gate. Every contract
+  section now denies unknown fields, and the error names the expected keys.
+  The `version` is checked first, so a newer contract still reports
+  *unsupported contract version* rather than a list of unknown fields.
+
+  Fingerprints are unchanged (ADR 0001): the hash covers the serialized
+  `Contract`, which neither gained nor lost a field. Verified against the
+  pre-change build - `c7b4c1dd8fd9e840` for both the built-in defaults and the
+  `init` template. A contract that previously carried a stray key now fails to
+  load where it used to pass; that is the intended behaviour, consistent with
+  ADR 0001's rule that malformed input is exit `2`, never a pass.
+
+---
+
+## [0.4.1] — 2026-09-03
+
+### Added
+
+- A pre-commit hook definition, so the repository can be used directly as a
+  pre-commit `repo:`.
+
+### Known issue
+
+- The file was committed as `pre-commit-hooks.yaml`, without the leading dot
+  pre-commit requires, and renamed to `.pre-commit-hooks.yaml` only after this
+  tag. Pre-commit cannot load the hook at `rev: v0.4.1`; it needs a later
+  release.
+
+### Changed
+
+- README rewritten around a first-run walkthrough.
+
+---
+
+## [0.4.0] — 2026-08-17
 
 Contract distribution: pinned and verified. The contract stays local, the CLI
 emits its hash, and the server compares that hash against what is deployed for
