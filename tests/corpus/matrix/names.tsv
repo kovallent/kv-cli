@@ -18,3 +18,17 @@ credentials_path	not	path to a credentials file, not its content
 token_url	not	OAuth endpoint; contains "token"
 password_policy	not	policy name; contains "password"
 api_key_header	not	HTTP header name, e.g. X-API-Key
+dbPassword	secret	camelCase, as in JSON/YAML config
+apiKey	secret	camelCase
+secretKey	secret	camelCase
+accessToken	secret	camelCase
+clientSecret	secret	camelCase
+authToken	secret	camelCase
+privateKey	secret	camelCase
+maxTokens	not	camelCase LLM parameter
+secretName	not	camelCase secret-store lookup key
+secretArn	not	camelCase ARN
+credentialsPath	not	camelCase path
+tokenUrl	not	camelCase OAuth endpoint
+passwordPolicy	not	camelCase policy name
+apiKeyHeader	not	camelCase header name

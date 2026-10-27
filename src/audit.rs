@@ -633,27 +633,27 @@ impl FileContext<'_> {
         from_contract: fn(&Engine) -> &Vec<String>,
         exempt: fn(&Engine) -> &Vec<String>,
     ) -> Option<Option<&'static str>> {
-        let lower = key.to_ascii_lowercase();
+        // Judge the name in two spellings: lowercased as written, and as
+        // snake_case. Patterns are written in snake_case (`*private_key*`,
+        // `*_name`), so `privateKey` lowercased to `privatekey` slipped past a
+        // key rule and `secretName` past its exemption; matching either form
+        // keeps every match the lowercase form already had.
+        let forms = [key.to_ascii_lowercase(), snake_case(key)];
+        let hits = |p: &str| {
+            let p = p.to_ascii_lowercase();
+            forms.iter().any(|f| python::wildcard_match(&p, f))
+        };
         // An exempt name refers to the thing rather than holding it, and that
         // is true whichever pattern - the contract's or a framework's - would
         // otherwise have matched.
-        if exempt(self.engine)
-            .iter()
-            .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
-        {
+        if exempt(self.engine).iter().any(|p| hits(p)) {
             return None;
         }
-        if from_contract(self.engine)
-            .iter()
-            .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
-        {
+        if from_contract(self.engine).iter().any(|p| hits(p)) {
             return Some(None);
         }
         for f in &self.active {
-            if from_profile(f.profile)
-                .iter()
-                .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
-            {
+            if from_profile(f.profile).iter().any(|p| hits(p)) {
                 return Some(Some(f.profile.name));
             }
         }
@@ -1183,6 +1183,28 @@ impl Covered {
         self.0.insert(r.start, r.end);
         true
     }
+}
+
+/// A name in snake_case: `secretName` -> `secret_name`, `APIKey` ->
+/// `api_key`, `self.dbPassword` -> `self.db_password`. A capital starts a new
+/// word after a lowercase letter or digit, or at the end of an acronym
+/// (`APIKey`: the `K` that is followed by lowercase). Existing separators are
+/// kept, so `DB_PASSWORD` and `db-password` are unchanged apart from case.
+fn snake_case(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let mut out = String::with_capacity(key.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let ends_acronym =
+                prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_lowercase() || prev.is_ascii_digit() || ends_acronym {
+                out.push('_');
+            }
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// What a bound literal must clear before a key rule may report it.
@@ -1741,6 +1763,53 @@ mod tests {
         // `*private_key*` is a Snowpark secret key; `private_key_path` names a file.
         let src = "from snowflake.snowpark import Session\nprivate_key_path = \"/keys/rsa.p8\"\n";
         assert!(codes(src).iter().all(|c| *c != CODE_HARDCODED_SECRET));
+    }
+
+    #[test]
+    fn snake_case_spellings() {
+        for (key, want) in [
+            ("secretName", "secret_name"),
+            ("APIKey", "api_key"),
+            ("secretARN", "secret_arn"),
+            ("self.dbPassword", "self.db_password"),
+            ("DB_PASSWORD", "db_password"),
+            ("db-password", "db-password"),
+            ("oauth2Token", "oauth2_token"),
+            ("password", "password"),
+        ] {
+            assert_eq!(snake_case(key), want, "{key}");
+        }
+    }
+
+    /// Regression: names were only matched lowercased, so a camelCase
+    /// reference name missed its snake_case exemption and a camelCase secret
+    /// name missed a snake_case key pattern.
+    #[test]
+    fn camel_case_names_match_snake_case_patterns() {
+        for name in [
+            "secretName",
+            "tokenUrl",
+            "credentialsPath",
+            "apiKeyHeader",
+            "secretARN",
+        ] {
+            assert!(
+                config("c.json", &format!("{{\"{name}\": \"Xk9vR2mQw7pLz4Ty\"}}")).is_empty(),
+                "{name}"
+            );
+        }
+        for name in ["privateKey", "dbPassword", "APIKey", "clientSecret"] {
+            assert_eq!(
+                run(&format!("{name} = \"Xk9vR2mQw7pLz4Ty\"\n")).len(),
+                1,
+                "{name}"
+            );
+        }
+        // The finding names the key as written.
+        assert_eq!(
+            run("privateKey = \"Xk9vR2mQw7pLz4Ty\"\n")[0].symbol,
+            "privateKey"
+        );
     }
 
     #[test]

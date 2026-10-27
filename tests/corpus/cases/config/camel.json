@@ -1,0 +1,10 @@
+{
+  "secretName": "prod/db",
+  "secretARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/db",
+  "tokenUrl": "https://auth.example.com/token",
+  "credentialsPath": "/etc/creds.json",
+  "apiKeyHeader": "X-API-Key",
+  "dbPassword": "Xk9vR2mQw7pLz4Ty",
+  "APIKey": "Xk9vR2mQw7pLz4Ty",
+  "clientSecret": "@@GITHUB_TOKEN@@"
+}

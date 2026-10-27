@@ -11,6 +11,22 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed — camelCase names
+
+- **Names are matched in `snake_case` as well as lowercased.** Patterns are
+  written in snake_case, so a camelCase name - common in JSON and YAML config
+  - missed them: `secretName`, `tokenUrl` and `apiKeyHeader` were reported as
+  credentials despite the `*_name`/`*_url`/`*_header` exemptions, and
+  `privateKey` (lowercased to `privatekey`) was never matched by
+  `*private_key*`, so a real private key under that name went unreported.
+  Acronyms split at their end (`APIKey` → `api_key`); separators are kept.
+  Matching either form keeps every match the lowercase form already had.
+- Measured on the corpus, now 2,433 cases with camelCase variants of every
+  labelled name: before the change 187 false positives and 26 misses on those
+  variants; after, 100% precision and recall.
+- No contract change, so no fingerprint moves; a finding still names the key
+  as written, so existing findings and their fingerprints are unchanged.
+
 ### Changed — encodings
 
 - **Source must be UTF-8, by policy.** A file in another encoding - valid

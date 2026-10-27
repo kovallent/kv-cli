@@ -338,6 +338,21 @@ fn tsv(name: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// How a name is spelled as an environment variable: `privateKey` ->
+/// `PRIVATE_KEY`, as people write them, not `PRIVATEKEY`.
+fn env_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c.is_uppercase() && prev_lower {
+            out.push('_');
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        out.extend(c.to_uppercase());
+    }
+    out
+}
+
 /// The labelling rule, stated once: a credential shape is a credential under
 /// any name; a real-looking literal is one under a secret name; placeholders
 /// and references never are.
@@ -373,7 +388,7 @@ fn materialize_matrix(root: &Path, cases: &mut Vec<Case>) {
                 let line = form
                     .template
                     .replace("{name}", name)
-                    .replace("{NAME}", &name.to_uppercase())
+                    .replace("{NAME}", &env_name(name))
                     .replace("{head}", &value[..mid])
                     .replace("{tail}", &value[mid..])
                     .replace("{value}", value)
