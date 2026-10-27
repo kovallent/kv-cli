@@ -233,6 +233,32 @@ impl Engine {
             }
         }
 
+        // A pattern of nothing but `*` matches every name or value, which
+        // would switch a rule off while the contract still looks configured -
+        // the failure the key rule exists to catch. Turning a rule off has
+        // explicit spellings (`key_patterns: []`, `enabled: false`).
+        for (field, patterns) in [
+            (
+                "secrets.exempt_key_patterns",
+                &contract.secrets.exempt_key_patterns,
+            ),
+            (
+                "secrets.placeholder_patterns",
+                &contract.secrets.placeholder_patterns,
+            ),
+            (
+                "infrastructure.exempt_key_patterns",
+                &contract.infrastructure.exempt_key_patterns,
+            ),
+        ] {
+            if let Some(p) = patterns.iter().find(|p| p.chars().all(|c| c == '*')) {
+                return Err(format!(
+                    "{field} entry {p:?} matches everything, which disables the rule; \
+                     to turn it off say so explicitly (`key_patterns: []` or `enabled: false`)"
+                ));
+            }
+        }
+
         // Reject unknown framework names up front rather than silently doing
         // nothing at scan time.
         for name in contract
@@ -428,10 +454,11 @@ impl Engine {
                 && scalar.comment.contains(&secrets.ignore_marker);
             if marked
                 || scalar.value.chars().count() < secrets.min_value_length
-                || secrets
-                    .allow_values
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(scalar.value.trim()))
+                || is_placeholder(
+                    &scalar.value,
+                    &secrets.allow_values,
+                    &secrets.placeholder_patterns,
+                )
             {
                 continue;
             }
@@ -439,6 +466,7 @@ impl Engine {
                 &scalar.key,
                 |p| p.secret_keys,
                 |c| &c.contract.secrets.key_patterns,
+                |e| &e.contract.secrets.exempt_key_patterns,
             ) else {
                 continue;
             };
@@ -603,8 +631,18 @@ impl FileContext<'_> {
         key: &str,
         from_profile: fn(&'static FrameworkProfile) -> &'static [&'static str],
         from_contract: fn(&Engine) -> &Vec<String>,
+        exempt: fn(&Engine) -> &Vec<String>,
     ) -> Option<Option<&'static str>> {
         let lower = key.to_ascii_lowercase();
+        // An exempt name refers to the thing rather than holding it, and that
+        // is true whichever pattern - the contract's or a framework's - would
+        // otherwise have matched.
+        if exempt(self.engine)
+            .iter()
+            .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
+        {
+            return None;
+        }
         if from_contract(self.engine)
             .iter()
             .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
@@ -740,9 +778,12 @@ impl FileContext<'_> {
                     source,
                     a,
                     b,
-                    cfg.min_value_length,
-                    &cfg.allow_values,
-                    &cfg.ignore_marker,
+                    &ValueFilter {
+                        min_len: cfg.min_value_length,
+                        allow: &cfg.allow_values,
+                        placeholders: &cfg.placeholder_patterns,
+                        marker: &cfg.ignore_marker,
+                    },
                 )
             })
             .filter(|b| {
@@ -750,6 +791,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.secret_keys,
                     |e| &e.contract.secrets.key_patterns,
+                    |e| &e.contract.secrets.exempt_key_patterns,
                 )
                 .is_some()
             })
@@ -775,9 +817,12 @@ impl FileContext<'_> {
                     source,
                     a,
                     b,
-                    cfg.min_value_length,
-                    &cfg.allow_values,
-                    &cfg.ignore_marker,
+                    &ValueFilter {
+                        min_len: cfg.min_value_length,
+                        allow: &cfg.allow_values,
+                        placeholders: &[],
+                        marker: &cfg.ignore_marker,
+                    },
                 )
             })
             .filter(|b| {
@@ -785,6 +830,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.infra_keys,
                     |e| &e.contract.infrastructure.key_patterns,
+                    |e| &e.contract.infrastructure.exempt_key_patterns,
                 )
                 .is_some()
             })
@@ -796,22 +842,22 @@ impl FileContext<'_> {
         source: &str,
         a: &Analysis,
         b: &Binding,
-        min_len: usize,
-        allow: &[String],
-        marker: &str,
+        filter: &ValueFilter,
     ) -> bool {
-        let value = &source[b.value.content.clone()];
-        if value.chars().count() < min_len {
+        let value = b.value.text(source);
+        if value.chars().count() < filter.min_len {
             return false;
         }
-        if allow.iter().any(|x| x.eq_ignore_ascii_case(value.trim())) {
+        if is_placeholder(&value, filter.allow, filter.placeholders) {
             return false;
         }
-        // An f-string with a substitution is computed, not hardcoded.
-        if b.value.has_interpolation {
+        // An f-string with a substitution is computed, not hardcoded; a
+        // `${VAR}` or `{{ var }}` is a reference a renderer resolves, exactly
+        // as it is in a config file.
+        if b.value.has_interpolation || value.contains("${") || value.contains("{{") {
             return false;
         }
-        !self.line_ignored(source, a, b.line, marker)
+        !self.line_ignored(source, a, b.line, filter.marker)
     }
 
     /// Audit a parsed Python file.
@@ -891,6 +937,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.secret_keys,
                     |e| &e.contract.secrets.key_patterns,
+                    |e| &e.contract.secrets.exempt_key_patterns,
                 )
                 .flatten();
             out.push(Finding {
@@ -909,7 +956,7 @@ impl FileContext<'_> {
                 message: format!("`{}` is assigned a hardcoded literal", b.key),
                 detail: Some(format!(
                     "value {} - load it from the environment or a secret store",
-                    redact(&source[b.value.content.clone()])
+                    redact(&b.value.text(source))
                 )),
                 framework,
                 kind: FindingKind::HardcodedSecret {
@@ -981,6 +1028,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.infra_keys,
                     |e| &e.contract.infrastructure.key_patterns,
+                    |e| &e.contract.infrastructure.exempt_key_patterns,
                 )
                 .flatten();
             out.push(Finding {
@@ -994,7 +1042,7 @@ impl FileContext<'_> {
                 message: format!(
                     "`{}` is pinned to `{}`",
                     b.key,
-                    truncate(&source[b.value.content.clone()])
+                    truncate(&b.value.text(source))
                 ),
                 detail: Some(
                     "this should vary by environment - derive it from target_environment".into(),
@@ -1074,6 +1122,25 @@ impl Covered {
         self.0.insert(r.start, r.end);
         true
     }
+}
+
+/// What a bound literal must clear before a key rule may report it.
+struct ValueFilter<'a> {
+    min_len: usize,
+    allow: &'a [String],
+    placeholders: &'a [String],
+    marker: &'a str,
+}
+
+/// An exact `allow_values` entry or a `placeholder_patterns` shape, both
+/// compared case-insensitively.
+fn is_placeholder(value: &str, allow: &[String], patterns: &[String]) -> bool {
+    let v = value.trim();
+    let lower = v.to_lowercase();
+    allow.iter().any(|a| a.eq_ignore_ascii_case(v))
+        || patterns
+            .iter()
+            .any(|p| python::wildcard_match(&p.to_lowercase(), &lower))
 }
 
 fn truncate(value: &str) -> String {
@@ -1516,6 +1583,92 @@ mod tests {
         // A rule from the base contract is not attributed to a framework.
         let f = run("DB_PASSWORD = \"s3cr3tvalue\"\n");
         assert_eq!(f[0].framework, None);
+    }
+
+    /// Regression for a mistake made while writing these defaults: `"***"`
+    /// as a placeholder pattern matched every value and disabled the rule.
+    #[test]
+    fn a_match_everything_exemption_or_placeholder_is_rejected() {
+        for yaml in [
+            "version: 1\nsecrets:\n  placeholder_patterns: [\"***\"]\n",
+            "version: 1\nsecrets:\n  exempt_key_patterns: [\"*\"]\n",
+            "version: 1\ninfrastructure:\n  exempt_key_patterns: [\"**\"]\n",
+        ] {
+            let c = Contract::from_yaml(yaml).unwrap();
+            let err = Engine::new(c)
+                .err()
+                .unwrap_or_else(|| panic!("accepted: {yaml}"));
+            assert!(err.contains("matches everything"), "{err}");
+        }
+    }
+
+    /// Names that refer to a credential are exempt from the key rule; value
+    /// patterns still catch a real token under them.
+    #[test]
+    fn exempt_names_skip_the_key_rule_but_not_value_patterns() {
+        for name in [
+            "secret_name",
+            "secret_arn",
+            "credentials_path",
+            "token_url",
+            "api_key_header",
+            "password_policy",
+            "tokenizer",
+            "max_tokens",
+            "token_type",
+            "self.secret_name",
+        ] {
+            assert!(
+                run(&format!("{name} = \"Xk9vR2mQw7pLz4Ty\"\n")).is_empty(),
+                "{name}"
+            );
+        }
+        let f = run("secret_name = \"ghp_0123456789abcdef0123456789abcdef01234\"\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "github_token");
+    }
+
+    /// Exemptions win over framework key patterns too.
+    #[test]
+    fn exemptions_apply_to_framework_patterns() {
+        // `*private_key*` is a Snowpark secret key; `private_key_path` names a file.
+        let src = "from snowflake.snowpark import Session\nprivate_key_path = \"/keys/rsa.p8\"\n";
+        assert!(codes(src).iter().all(|c| *c != CODE_HARDCODED_SECRET));
+    }
+
+    #[test]
+    fn placeholder_shapes_are_not_credentials() {
+        for value in [
+            "your-api-key-here",
+            "YOUR_TOKEN",
+            "<token>",
+            "{api_key}",
+            "replace-me",
+            "CHANGE_ME",
+            "xxxxxxxx",
+            "insert-key",
+            "token-goes-here",
+        ] {
+            assert!(
+                run(&format!("API_KEY = \"{value}\"\n")).is_empty(),
+                "{value}"
+            );
+            assert!(
+                config(".env", &format!("API_KEY={value}\n")).is_empty(),
+                "{value}"
+            );
+        }
+        // A real-looking value under a secret name is still reported.
+        assert_eq!(run("API_KEY = \"Xk9vR2mQw7pLz4Ty\"\n").len(), 1);
+    }
+
+    #[test]
+    fn references_and_split_placeholders_in_python_are_not_credentials() {
+        assert!(run("DB_PASSWORD = \"${VAULT_DB_PASSWORD}\"\n").is_empty());
+        assert!(run("DB_PASSWORD = \"{{ vault('db') }}\"\n").is_empty());
+        assert!(run("DB_PASSWORD = \"chan\" \"geme\"\n").is_empty());
+        // ...but a split real value is judged whole.
+        assert_eq!(run("DB_PASSWORD = \"Xk9vR2\" \"mQw7pLz4Ty\"\n").len(), 1);
     }
 
     #[test]

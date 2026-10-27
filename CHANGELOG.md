@@ -11,6 +11,40 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed — KV002 precision
+
+Measured on the labelled corpus: precision 47.9% → 100%, recall 99.6% →
+97.9%. Treat the precision figure as an upper bound - the exemptions were
+written against the corpus's own names, so names it has never seen are the
+real test.
+
+- **`secrets.exempt_key_patterns`** (new): names that match a key pattern but
+  *refer to* a credential rather than hold one - `*_name`, `*_arn`, `*_id`,
+  `*_path`, `*_url`, `*_header`, `*_type`, `*tokenizer*`, `*max_tokens*` and
+  similar. Checked before every key pattern, framework ones included.
+  `infrastructure.exempt_key_patterns` does the same for KV003 (`*_column`, …).
+- **`secrets.placeholder_patterns`** (new): placeholder value shapes, matched
+  case-insensitively - `your*`, `<*>`, `{*}`, `replace*`, `change*me`, `*here`
+  and similar - alongside the exact `allow_values`.
+- Exemptions and placeholders apply to the key-name rule only: a real token is
+  still reported by value patterns whatever it is called.
+- **`${VAR}` and `{{ var }}` in Python are references,** as they already were
+  in config files.
+- **An implicit concatenation is judged by its joined text,** so `"chan"
+  "geme"` is the placeholder it spells.
+- A pattern of only `*` in either new list is rejected (exit `2`): it would
+  disable the rule while the contract still looked configured.
+- The recall cost is 8 corpus cases, all one shape: a token split across
+  concatenation under an exempt name (`tokenizer = "ghp_..." "..."`). Those
+  were only ever caught because the name contained "token".
+
+**Fingerprints (ADR 0001).** Adding fields changes every contract's
+fingerprint once, including contracts that never mention them - an
+earlier-`init` contract moves `c7b4c1dd8fd9e840` → `f04a49adc9e268ed`, the
+built-in defaults `daacf9563acfeedb` → `a6edcff00199c1cf`. Re-pin
+`--expect-contract` after upgrading. Existing findings and their fingerprints
+are unchanged.
+
 ### Added
 
 - **A labelled corpus** (`tests/corpus/`, `make corpus`): 1,243 cases stating
@@ -48,13 +82,11 @@ versions may carry breaking changes.
   existing `openai_api_key` only matches the legacy format), `google_api_key`,
   `stripe_live_key` and `jwt`.
 
-  **Fingerprints (ADR 0001).** Both additions change the default contract, so
-  the built-in defaults' fingerprint moves (`c7b4c1dd8fd9e840` →
-  `daacf9563acfeedb`), as does any contract that omits `scan.include` or
-  `secrets.value_patterns`. A contract written by an earlier `kv-cli init`
-  spells both out, keeps its fingerprint, and does not gain the new coverage
-  until updated - see "Upgrading" in the README. Existing findings and their
-  fingerprints are unchanged.
+  **Fingerprints (ADR 0001).** Both additions change the default contract.
+  A contract written by an earlier `kv-cli init` spells both lists out and
+  does not gain the new coverage until updated - see "Upgrading" in the
+  README. (The precision fields above move every fingerprint regardless.)
+  Existing findings and their fingerprints are unchanged.
 
 - **No star prompt after a credential warning.** A `fix` run that just said
   "rotate" exits `0`, but it is not the moment to ask for anything.

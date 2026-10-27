@@ -17,6 +17,17 @@ pub struct StringLiteral {
     pub content: Range<usize>,
     /// True for an f-string containing at least one `{...}` substitution.
     pub has_interpolation: bool,
+    /// The body of each part: one for a plain literal, several for an
+    /// implicit concatenation.
+    pub parts: Vec<Range<usize>>,
+}
+
+impl StringLiteral {
+    /// The literal's text with the parts joined - what Python evaluates
+    /// `"chan" "geme"` to, before any escape processing.
+    pub fn text(&self, source: &str) -> String {
+        self.parts.iter().map(|p| &source[p.clone()]).collect()
+    }
 }
 
 /// How a string literal came to be bound to a name.
@@ -523,9 +534,9 @@ fn bind(name: Option<Node>, value: Option<Node>, source: BindingSource, ctx: &mu
 /// implicit concatenation: `("s3cr3t" "-pw")` is as hardcoded as `"s3cr3t-pw"`.
 ///
 /// A concatenation's `content` runs from the first part's body to the last
-/// part's, so it includes the quotes between parts. That is acceptable for
-/// what `content` is used for - length, placeholder and interpolation checks,
-/// and a redacted preview - and `span` (what `fix` replaces) is exact.
+/// part's, quotes between parts included; judge its value by
+/// [`StringLiteral::text`], which joins the parts. `span` (what `fix`
+/// replaces) is exact either way.
 fn literal_of(node: Node, ctx: &Ctx) -> Option<StringLiteral> {
     let mut node = node;
     while node.kind() == "parenthesized_expression" {
@@ -547,6 +558,7 @@ fn literal_of(node: Node, ctx: &Ctx) -> Option<StringLiteral> {
                 span: node.byte_range(),
                 content: first.content.start..last.content.end,
                 has_interpolation: parts.iter().any(|p| p.has_interpolation),
+                parts: parts.iter().map(|p| p.content.clone()).collect(),
             })
         }
         _ => None,
@@ -590,6 +602,7 @@ fn string_literal(node: Node, _ctx: &Ctx) -> Option<StringLiteral> {
         span,
         content: content_start..content_end,
         has_interpolation,
+        parts: std::iter::once(content_start..content_end).collect(),
     })
 }
 

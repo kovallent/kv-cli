@@ -101,6 +101,10 @@ pub struct InfraConfig {
     pub ignore_marker: String,
     #[serde(default = "default_infra_min_len")]
     pub min_value_length: usize,
+    /// Names that match a key pattern but never hold an infrastructure
+    /// identifier, e.g. a `cluster_id_column`. Checked before key patterns.
+    #[serde(default = "default_infra_exempt")]
+    pub exempt_key_patterns: Vec<String>,
 }
 
 // Per-field defaults delegate to each section's `Default`, so omitting a key
@@ -151,6 +155,15 @@ fn default_infra_marker() -> String {
 fn default_infra_min_len() -> usize {
     InfraConfig::default().min_value_length
 }
+fn default_infra_exempt() -> Vec<String> {
+    InfraConfig::default().exempt_key_patterns
+}
+fn default_secret_exempt() -> Vec<String> {
+    SecretsConfig::default().exempt_key_patterns
+}
+fn default_placeholders() -> Vec<String> {
+    SecretsConfig::default().placeholder_patterns
+}
 
 impl Default for InfraConfig {
     fn default() -> Self {
@@ -192,6 +205,10 @@ impl Default for InfraConfig {
             .collect(),
             ignore_marker: "kovallent:allow-infra".into(),
             min_value_length: 3,
+            exempt_key_patterns: ["*_column", "*_col", "*_field", "*_header", "*_type"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -340,6 +357,17 @@ pub struct SecretsConfig {
     /// Minimum literal length before a `key_patterns` hit is reported.
     #[serde(default = "default_min_len")]
     pub min_value_length: usize,
+    /// Names that match a key pattern but *refer to* a credential rather than
+    /// hold one: `secret_name`, `token_url`, `credentials_path`. Checked before
+    /// key patterns, framework ones included. Value patterns still apply, so a
+    /// real token is reported whatever it is called.
+    #[serde(default = "default_secret_exempt")]
+    pub exempt_key_patterns: Vec<String>,
+    /// Value shapes that are placeholders, matched case-insensitively:
+    /// `your-api-key-here`, `<token>`. Like `allow_values`, they apply to the
+    /// key rule only.
+    #[serde(default = "default_placeholders")]
+    pub placeholder_patterns: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -446,6 +474,45 @@ impl Default for SecretsConfig {
             .collect(),
             ignore_marker: "kovallent:allow-secret".into(),
             min_value_length: 4,
+            exempt_key_patterns: [
+                "*_name",
+                "*_arn",
+                "*_id",
+                "*_ref",
+                "*_path",
+                "*_file",
+                "*_dir",
+                "*_url",
+                "*_uri",
+                "*_endpoint",
+                "*_header",
+                "*_field",
+                "*_prefix",
+                "*_type",
+                "*_policy",
+                "*_var",
+                "*tokenizer*",
+                "*max_tokens*",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            placeholder_patterns: [
+                "your*",
+                "<*>",
+                "{*}",
+                "*placeholder*",
+                "replace*",
+                "change*me",
+                "xxx*",
+                "todo*",
+                "fixme*",
+                "insert*",
+                "*here",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -723,6 +790,41 @@ secrets:
   # Any line containing this marker is skipped.
   ignore_marker: "kovallent:allow-secret"
   min_value_length: 4
+  # Names that match a key pattern but refer to a credential rather than hold
+  # one (a secret's name, ARN, path or URL). Checked first; value patterns
+  # still apply, so a real token is reported whatever it is called.
+  exempt_key_patterns:
+    - "*_name"
+    - "*_arn"
+    - "*_id"
+    - "*_ref"
+    - "*_path"
+    - "*_file"
+    - "*_dir"
+    - "*_url"
+    - "*_uri"
+    - "*_endpoint"
+    - "*_header"
+    - "*_field"
+    - "*_prefix"
+    - "*_type"
+    - "*_policy"
+    - "*_var"
+    - "*tokenizer*"
+    - "*max_tokens*"
+  # Placeholder value shapes (case-insensitive), for the key rule only.
+  placeholder_patterns:
+    - "your*"
+    - "<*>"
+    - "{*}"
+    - "*placeholder*"
+    - "replace*"
+    - "change*me"
+    - "xxx*"
+    - "todo*"
+    - "fixme*"
+    - "insert*"
+    - "*here"
 
 # Built-in framework profiles. Each one contributes signatures the framework
 # owns (never given contract parameters), credential shapes, and infrastructure
@@ -766,6 +868,13 @@ infrastructure:
     - "sample"
   ignore_marker: "kovallent:allow-infra"
   min_value_length: 3
+  # Names that match a key pattern but never hold an identifier. Checked first.
+  exempt_key_patterns:
+    - "*_column"
+    - "*_col"
+    - "*_field"
+    - "*_header"
+    - "*_type"
 
 # Behaviour of `kv-cli fix`.
 fix:

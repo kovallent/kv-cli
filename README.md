@@ -182,6 +182,15 @@ A hook is advisory by construction — `--no-verify` skips it, and a fresh clone
 
 Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
 
+### How KV002 decides
+
+A literal is a credential when either rule says so:
+
+1. **Its shape** — a value pattern (AWS, GitHub, Stripe, Google, JWT, PEM, a URL with a password, …) matches it, under any name and anywhere in the file, comments and notebook outputs included.
+2. **Its name** — it is assigned to a name matching `secrets.key_patterns` (`*password*`, `*token*`, …), unless the name only *refers to* a credential (`secrets.exempt_key_patterns`: `secret_name`, `token_url`, `credentials_path`, …) or the value is a placeholder (`allow_values`, `placeholder_patterns`: `changeme`, `your-api-key-here`, `<token>`), a reference (`${VAR}`, `{{ var }}`, an f-string substitution) or shorter than `min_value_length`.
+
+Exemptions and placeholders apply to the name rule only, so a real token is reported whatever it is called. A pattern that matches everything (`"*"`) is rejected: to turn a rule off, say so (`key_patterns: []`).
+
 ### Suppressions
 
 Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`. The marker counts only inside a comment — in a string literal it is data, not intent. JSON has no comments; exclude a fixture file with `scan.exclude` instead.
@@ -258,7 +267,7 @@ infrastructure:
   severity: error
 ```
 
-**Upgrading.** A contract written by an earlier `kv-cli init` spells out `scan.include` and `secrets.value_patterns` in full, so it keeps exactly the rules — and the fingerprint — it was written with: it will not pick up new file types or detectors on its own. To adopt them, compare it with a fresh template (`kv-cli init --path /tmp/kv`), copy what you want, and update the pinned fingerprint. A contract that omits those keys uses the new defaults immediately, and its fingerprint changes with the upgrade.
+**Upgrading to 0.5.0.** Every contract's fingerprint changes once: 0.5.0 adds `secrets.exempt_key_patterns`, `secrets.placeholder_patterns` and `infrastructure.exempt_key_patterns`, and a new field changes the serialized contract even where the file does not mention it (ADR 0001). If you pin `--expect-contract`, re-pin after upgrading — the run reports the new value at `run.contract_sha256`. The new fields take their defaults wherever a contract omits them, so every contract gets the name exemptions and placeholder shapes at once. `scan.include` and `secrets.value_patterns` are different: a contract written by an earlier `kv-cli init` spells them out in full, so it keeps its file types and detectors until you compare it with a fresh template (`kv-cli init --path /tmp/kv`) and copy what you want.
 
 ---
 

@@ -223,7 +223,8 @@ fn materialize_cases(root: &Path, cases: &mut Vec<Case>) {
 // --- the matrix ------------------------------------------------------------
 
 /// A syntactic form: file it lands in, lines before the first case, and how
-/// one case is written. `{name}`, `{NAME}`, `{value}`, `{head}`/`{tail}` (the
+/// one case is written. Keys repeat across cases on purpose: a suffix to make
+/// them unique (`secret_name_12`) would change what the name rules see. `{name}`, `{NAME}`, `{value}`, `{head}`/`{tail}` (the
 /// value split in two) and `{i}` are substituted.
 struct Form {
     id: &'static str,
@@ -279,7 +280,7 @@ const FORMS: &[Form] = &[
         id: "yaml",
         file: "config.yml",
         header: &[],
-        template: "{name}_{i}: \"{value}\"",
+        template: "{name}: \"{value}\"",
     },
     Form {
         id: "env",
@@ -297,13 +298,13 @@ const FORMS: &[Form] = &[
         id: "toml",
         file: "settings.toml",
         header: &["[matrix]"],
-        template: "{name}_{i} = \"{value}\"",
+        template: "{name} = \"{value}\"",
     },
     Form {
         id: "json",
         file: "settings.json",
         header: &["{"],
-        template: "  \"{name}_{i}\": \"{value}\",",
+        template: "  \"{name}\": \"{value}\",",
     },
 ];
 
