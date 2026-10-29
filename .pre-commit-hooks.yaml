@@ -8,3 +8,12 @@
   # `text`, so no list of types can select it.
   types: [text]
   files: '(\.(py|ipynb|ya?ml|toml|ini|cfg|json|env)|(^|/)\.env(\.[^/]*)?)$'
+
+- id: kv-cli-contract
+  name: kv-cli contract check
+  description: Validate .kovallent.yaml when it changes - every problem with its line, without scanning code.
+  entry: kv-cli contract check
+  language: rust
+  # Only the contract itself; each changed one is passed by name, so a
+  # contract in a subfolder is checked too.
+  files: '(^|/)\.kovallent\.yaml$'

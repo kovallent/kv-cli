@@ -758,16 +758,37 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     p[pi..].iter().all(|&c| c == b'*')
 }
 
-/// Match a path pattern against a `/`-separated relative path.
+/// Match a `scan.include` / `scan.exclude` pattern against a `/`-separated
+/// path relative to the project, with `.gitignore` semantics:
+///
+/// - `*` and `?` match within one path segment - `src/*.py` is `src/a.py`,
+///   not `src/deep/b.py`;
+/// - `**` as a whole segment matches any number of segments, including none;
+/// - a pattern with no `/` matches the file name at any depth - `*.py` is
+///   every Python file, as it is in `.gitignore`.
+///
+/// `*` used to cross `/`, so `src/*.py` silently reached every subdirectory.
 pub fn path_match(pattern: &str, path: &str) -> bool {
-    if wildcard_match(pattern, path) {
-        return true;
+    let path: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let pattern = pattern.trim_start_matches('/');
+    if !pattern.contains('/') {
+        return path
+            .last()
+            .is_some_and(|name| pattern == "**" || wildcard_match(pattern, name));
     }
-    // `**/` is also allowed to match zero leading segments.
-    if let Some(rest) = pattern.strip_prefix("**/") {
-        return path_match(rest, path);
+    let segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    match_segments(&segments, &path)
+}
+
+fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => (0..=path.len()).any(|i| match_segments(rest, &path[i..])),
+        Some((segment, rest)) => {
+            path.first().is_some_and(|p| wildcard_match(segment, p))
+                && match_segments(rest, &path[1..])
+        }
     }
-    false
 }
 
 #[cfg(test)]
@@ -1111,5 +1132,35 @@ mod tests {
         assert!(path_match("**/*.py", "pkg/sub/a.py"));
         assert!(path_match("**/.venv/**", ".venv/lib/x.py"));
         assert!(!path_match("**/.venv/**", "src/app.py"));
+    }
+
+    /// `.gitignore` semantics, one row per rule.
+    #[test]
+    fn path_patterns_follow_gitignore_rules() {
+        for (pattern, path, want) in [
+            // `*` stays within a segment.
+            ("src/*.py", "src/a.py", true),
+            ("src/*.py", "src/deep/b.py", false),
+            // `**` crosses any number of segments, including none.
+            ("src/**/*.py", "src/a.py", true),
+            ("src/**/*.py", "src/deep/er/b.py", true),
+            ("src/**", "src/deep/b.py", true),
+            ("**/tests/**", "a/tests/b/c.py", true),
+            ("**/tests/**", "tests/c.py", true),
+            // No `/`: the file name, at any depth.
+            ("*.py", "a.py", true),
+            ("*.py", "deep/er/a.py", true),
+            (".env", "conf/.env", true),
+            ("deploy.py", "jobs/deploy.py", true),
+            ("*.py", "a.pyc", false),
+            // Anchored at the project root; a leading `/` changes nothing.
+            ("/src/*.py", "src/a.py", true),
+            ("src/*.py", "lib/src/a.py", false),
+            // `?` is one character, never a separator.
+            ("src/?.py", "src/a.py", true),
+            ("src?a.py", "src/a.py", false),
+        ] {
+            assert_eq!(path_match(pattern, path), want, "{pattern} vs {path}");
+        }
     }
 }

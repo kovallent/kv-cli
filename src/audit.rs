@@ -214,69 +214,32 @@ fn compile(patterns: &[(&str, &str)], owner: &str) -> Result<Vec<(String, Regex)
 
 impl Engine {
     pub fn new(contract: Contract) -> Result<Self, String> {
-        let mut secret_values = Vec::new();
-        if contract.secrets.enabled {
-            for p in &contract.secrets.value_patterns {
-                let re = Regex::new(&p.regex)
-                    .map_err(|e| format!("secrets.value_patterns['{}'] is invalid: {e}", p.name))?;
-                secret_values.push((p.name.clone(), re));
-            }
+        // Every check lives in `Contract::validate`, which `Contract::load`
+        // has already run with line numbers; this covers a contract built in
+        // code.
+        let problems = contract.validate(None);
+        if !problems.is_empty() {
+            let all: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+            return Err(all.join("; "));
         }
-        let mut infra_values = Vec::new();
-        if contract.infrastructure.enabled {
-            for p in &contract.infrastructure.value_patterns {
-                let re = Regex::new(&p.regex).map_err(|e| {
-                    format!(
-                        "infrastructure.value_patterns['{}'] is invalid: {e}",
-                        p.name
-                    )
-                })?;
-                infra_values.push((p.name.clone(), re));
-            }
-        }
-
-        // A pattern of nothing but `*` matches every name or value, which
-        // would switch a rule off while the contract still looks configured -
-        // the failure the key rule exists to catch. Turning a rule off has
-        // explicit spellings (`key_patterns: []`, `enabled: false`).
-        for (field, patterns) in [
-            (
-                "secrets.exempt_key_patterns",
-                &contract.secrets.exempt_key_patterns,
-            ),
-            (
-                "secrets.placeholder_patterns",
-                &contract.secrets.placeholder_patterns,
-            ),
-            (
-                "infrastructure.exempt_key_patterns",
-                &contract.infrastructure.exempt_key_patterns,
-            ),
-        ] {
-            if let Some(p) = patterns.iter().find(|p| p.chars().all(|c| c == '*')) {
-                return Err(format!(
-                    "{field} entry {p:?} matches everything, which disables the rule; \
-                     to turn it off say so explicitly (`key_patterns: []` or `enabled: false`)"
-                ));
-            }
-        }
-
-        // Reject unknown framework names up front rather than silently doing
-        // nothing at scan time.
-        for name in contract
-            .frameworks
-            .enable
-            .iter()
-            .chain(&contract.frameworks.disable)
-        {
-            if name != "auto" && frameworks::by_name(name).is_none() {
-                let known: Vec<_> = frameworks::PROFILES.iter().map(|p| p.name).collect();
-                return Err(format!(
-                    "unknown framework '{name}'; known profiles: {}",
-                    known.join(", ")
-                ));
-            }
-        }
+        let compile_list = |list: &[config::ValuePattern]| -> Vec<(String, Regex)> {
+            list.iter()
+                .map(|p| {
+                    let re = Regex::new(&p.regex).expect("validate() compiled every pattern");
+                    (p.name.clone(), re)
+                })
+                .collect()
+        };
+        let secret_values = if contract.secrets.enabled {
+            compile_list(&contract.secrets.value_patterns)
+        } else {
+            Vec::new()
+        };
+        let infra_values = if contract.infrastructure.enabled {
+            compile_list(&contract.infrastructure.value_patterns)
+        } else {
+            Vec::new()
+        };
 
         let mut compiled = Vec::new();
         for profile in frameworks::PROFILES {
@@ -299,9 +262,28 @@ impl Engine {
     ///
     /// `project` is the canonical directory a symlinked file's target must
     /// resolve inside to be followed - see [`Collected`].
+    ///
+    /// `scan.include` and `scan.exclude` are matched against each path
+    /// relative to `project`, so a contract selects the same files whichever
+    /// folder is scanned: `kv-cli audit src` and `kv-cli audit .` agree on
+    /// what `src/**/*.py` means. They used to be matched relative to the
+    /// scanned folder, so `audit src` found nothing for `src/**/*.py`. A folder
+    /// outside the project has no project-relative path and is matched
+    /// relative to itself.
     pub fn collect_files(&self, root: &Path, project: &Path) -> Result<Collected, String> {
         let mut out = Collected::default();
-        self.walk(root, root, project, &mut out)?;
+        // Where `root` sits inside the project, e.g. `src`; empty for the
+        // project root itself. Resolved once, not per file.
+        let prefix = root
+            .canonicalize()
+            .ok()
+            .and_then(|r| {
+                r.strip_prefix(project)
+                    .ok()
+                    .map(|p| relative_slash(Path::new(""), p))
+            })
+            .unwrap_or_default();
+        self.walk(root, root, &prefix, project, &mut out)?;
         out.files.sort();
         Ok(out)
     }
@@ -310,6 +292,7 @@ impl Engine {
         &self,
         root: &Path,
         dir: &Path,
+        prefix: &str,
         project: &Path,
         out: &mut Collected,
     ) -> Result<(), String> {
@@ -319,7 +302,10 @@ impl Engine {
             let entry =
                 entry.map_err(|e| format!("cannot read entry in {}: {e}", dir.display()))?;
             let path = entry.path();
-            let rel = relative_slash(root, &path);
+            let rel = match relative_slash(root, &path) {
+                r if prefix.is_empty() => r,
+                r => format!("{prefix}/{r}"),
+            };
             let file_type = entry.file_type().map_err(|e| format!("{e}"))?;
 
             if file_type.is_dir() {
@@ -327,7 +313,7 @@ impl Engine {
                 if self.is_excluded(&format!("{rel}/x")) || self.is_excluded(&rel) {
                     continue;
                 }
-                self.walk(root, &path, project, out)?;
+                self.walk(root, &path, prefix, project, out)?;
                 continue;
             }
             if !file_type.is_file() && !file_type.is_symlink() {
@@ -683,35 +669,59 @@ impl FileContext<'_> {
         if rules
             .exempt_name_patterns
             .iter()
-            .any(|p| python::wildcard_match(p, &f.name))
+            .any(|p| name_match(p, &f.name))
         {
             return ScopeDecision::ExemptUser;
         }
 
-        let selected = rules.all_functions
-            || rules
-                .name_patterns
-                .iter()
-                .any(|p| python::wildcard_match(p, &f.name))
-            || f.decorators.iter().any(|d| {
-                rules.decorators.iter().any(|p| {
-                    python::wildcard_match(p, d)
-                        // Also match on the final segment so `task` matches
-                        // `kovallent.task`.
-                        || d.rsplit('.')
-                            .next()
-                            .is_some_and(|last| python::wildcard_match(p, last))
-                })
-            })
-            || self.governing_framework(f).is_some();
-
-        if !selected {
+        if self.selection_reason(f).is_none() {
             return ScopeDecision::OutOfScope;
         }
         if self.no_auto_fix_framework(f).is_some() {
             return ScopeDecision::GovernedReportOnly;
         }
         ScopeDecision::Governed
+    }
+
+    /// The rule that puts `f` under the contract, phrased for a finding: the
+    /// first of `all_functions`, a name pattern, a decorator pattern, and a
+    /// framework profile that matches. `None` when nothing selects it.
+    ///
+    /// `classify` decides scope with this same function, so a finding's
+    /// explanation can never disagree with the decision it explains.
+    /// Exemptions are not consulted here; `classify` applies them first.
+    fn selection_reason(&self, f: &FunctionDef) -> Option<String> {
+        let rules = &self.engine.contract.applies_to;
+        if rules.all_functions {
+            return Some("applies_to.all_functions is true".into());
+        }
+        if let Some(p) = rules.name_patterns.iter().find(|p| name_match(p, &f.name)) {
+            return Some(format!("name matches applies_to.name_patterns {p:?}"));
+        }
+        for d in &f.decorators {
+            // A pattern matches the dotted path or its final segment, so
+            // `task` matches `@kovallent.task`.
+            let hit = rules.decorators.iter().find(|p| {
+                name_match(p, d) || d.rsplit('.').next().is_some_and(|last| name_match(p, last))
+            });
+            if let Some(p) = hit {
+                return Some(format!(
+                    "decorator @{d} matches applies_to.decorators {p:?}"
+                ));
+            }
+        }
+        self.active.iter().find_map(|c| {
+            let d = c.profile.governing_decorator(f)?;
+            let note = if c.profile.governed_auto_fix {
+                ""
+            } else {
+                " (reported, never auto-fixed)"
+            };
+            Some(format!(
+                "@{d} is governed by the {} profile{note}",
+                c.profile.name
+            ))
+        })
     }
 
     /// Tally scope decisions for one parsed file.
@@ -892,6 +902,9 @@ impl FileContext<'_> {
                 continue;
             }
             let framework = self.governing_framework(f);
+            let reason = self
+                .selection_reason(f)
+                .expect("a governed function was selected by some rule");
             for required in &self.engine.contract.parameters {
                 if f.has_param(&required.name) {
                     continue;
@@ -914,7 +927,7 @@ impl FileContext<'_> {
                         f.name, required.name
                     ),
                     detail: Some(format!(
-                        "expected signature to declare `{}`",
+                        "expected signature to declare `{}`\nin scope: {reason}",
                         render_param(required)
                     )),
                     framework,
@@ -1187,6 +1200,14 @@ impl Covered {
         self.0.insert(r.start, r.end);
         true
     }
+}
+
+/// A contract name pattern against a function or decorator name, ignoring
+/// case - one rule for every name pattern in the contract, as key patterns
+/// already were. `deploy*` governs `Deploy_app` as `*password*` catches
+/// `DB_PASSWORD`.
+fn name_match(pattern: &str, name: &str) -> bool {
+    python::wildcard_match(&pattern.to_lowercase(), &name.to_lowercase())
 }
 
 /// A name in snake_case: `secretName` -> `secret_name`, `APIKey` ->
@@ -1767,6 +1788,68 @@ mod tests {
         // `*private_key*` is a Snowpark secret key; `private_key_path` names a file.
         let src = "from snowflake.snowpark import Session\nprivate_key_path = \"/keys/rsa.p8\"\n";
         assert!(codes(src).iter().all(|c| *c != CODE_HARDCODED_SECRET));
+    }
+
+    /// Function-name, exemption and decorator patterns ignore case, as key
+    /// patterns do.
+    #[test]
+    fn name_patterns_ignore_case() {
+        assert!(codes("def Deploy_App(a):\n    pass\n").contains(&CODE_MISSING_PARAM));
+        assert!(codes("def RUN_backfill(a):\n    pass\n").contains(&CODE_MISSING_PARAM));
+        assert!(codes("@Kovallent.Task\ndef x(a):\n    pass\n").contains(&CODE_MISSING_PARAM));
+        // Exemptions too: `test_*` exempts `Test_deploy`.
+        assert!(!codes("def Test_deploy(a):\n    pass\n").contains(&CODE_MISSING_PARAM));
+    }
+
+    fn kv001_detail(src: &str) -> String {
+        run(src)
+            .into_iter()
+            .find(|f| f.code == CODE_MISSING_PARAM)
+            .and_then(|f| f.detail)
+            .expect("a KV001 finding")
+    }
+
+    /// A KV001 finding names the rule that put the function in scope.
+    #[test]
+    fn kv001_explains_why_the_function_is_governed() {
+        for (src, why) in [
+            (
+                "def deploy_app(a):\n    pass\n",
+                "in scope: name matches applies_to.name_patterns \"deploy*\"",
+            ),
+            (
+                "@kovallent.task\ndef x(a):\n    pass\n",
+                "in scope: decorator @kovallent.task matches applies_to.decorators \"kovallent.task\"",
+            ),
+            // The default contract lists `task` itself, and the contract's
+            // own rules are reported before a framework's.
+            (
+                "from airflow.decorators import task\n\n@task\ndef extract(a):\n    pass\n",
+                "in scope: decorator @task matches applies_to.decorators \"task\"",
+            ),
+        ] {
+            let detail = kv001_detail(src);
+            assert!(detail.ends_with(why), "{src}\n{detail}");
+            assert!(detail.starts_with("expected signature to declare `"));
+        }
+        let detail_with = |c: Contract, src: &str| {
+            let e = Engine::new(c).unwrap();
+            let a = python::analyze(src);
+            let f = e.context(&a).audit("t.py", src, &a);
+            f[0].detail.clone().unwrap()
+        };
+        let mut c = Contract::default();
+        c.applies_to.all_functions = true;
+        assert!(detail_with(c, "def helper(a):\n    pass\n")
+            .ends_with("in scope: applies_to.all_functions is true"));
+
+        // With no user rule for it, the framework profile is the reason.
+        let mut c = Contract::default();
+        c.applies_to.decorators.clear();
+        let src = "from airflow.decorators import task\n\n@task\ndef extract(a):\n    pass\n";
+        assert!(detail_with(c, src).ends_with(
+            "in scope: @task is governed by the airflow profile (reported, never auto-fixed)"
+        ));
     }
 
     #[test]

@@ -905,6 +905,192 @@ fn the_readme_sample_counts_are_true() {
     let _ = std::fs::remove_dir_all(&contract_dir);
 }
 
+fn kv(dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let out = Command::new(bin())
+        .args(args)
+        .arg("--no-color")
+        .current_dir(dir)
+        .output()
+        .expect("kv-cli runs");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+    )
+}
+
+/// `contract check` lists every problem as `file:line: field: message` and
+/// exits 2; a valid contract exits 0 and prints its fingerprint.
+#[test]
+fn contract_check_reports_every_problem_with_its_line() {
+    let dir = tempdir("contract-check");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nparameters:\n  - name: env\n    default: '\"dev'\n  - name: bad-name\nframeworks:\n  enable: [sparkle]\n",
+    );
+    let (code, stdout) = kv(&dir, &["contract", "check"]);
+    assert_eq!(code, Some(2), "{stdout}");
+    for want in [
+        ".kovallent.yaml:4: parameters[0].default:",
+        ".kovallent.yaml:5: parameters[1].name:",
+        ".kovallent.yaml:7: frameworks.enable[0]: unknown framework 'sparkle'",
+        "3 problems in ./.kovallent.yaml",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
+    }
+
+    // A type error is located too.
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nsecrets:\n  min_value_length: four\n",
+    );
+    let (code, stdout) = kv(&dir, &["contract", "check"]);
+    assert_eq!(code, Some(2));
+    assert!(
+        stdout.contains(".kovallent.yaml:3: secrets.min_value_length: invalid type"),
+        "{stdout}"
+    );
+
+    write(&dir, ".kovallent.yaml", "version: 1\n");
+    let (code, stdout) = kv(&dir, &["contract", "check"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("is valid") && stdout.contains("fingerprint"),
+        "{stdout}"
+    );
+
+    // `audit` refuses the same broken contract, listing every problem.
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nparameters:\n  - name: a-b\n  - name: c-d\n",
+    );
+    write(&dir, "app.py", "x = 1\n");
+    let out = Command::new(bin())
+        .args(["audit", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("(2 problems)"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// As the pre-commit hook runs it: changed contracts by name, each checked
+/// and reported, failing if any is invalid.
+#[test]
+fn contract_check_takes_files_by_name() {
+    let dir = tempdir("contract-check-files");
+    std::fs::create_dir_all(dir.join("svc")).unwrap();
+    write(&dir, ".kovallent.yaml", "version: 1\n");
+    write(
+        &dir.join("svc"),
+        ".kovallent.yaml",
+        "version: 1\nparameters:\n  - name: a-b\n",
+    );
+
+    let (code, stdout) = kv(
+        &dir,
+        &[
+            "contract",
+            "check",
+            ".kovallent.yaml",
+            "svc/.kovallent.yaml",
+        ],
+    );
+    assert_eq!(code, Some(2), "{stdout}");
+    assert!(stdout.contains(".kovallent.yaml is valid"), "{stdout}");
+    assert!(
+        stdout.contains("svc/.kovallent.yaml:3: parameters[0].name"),
+        "{stdout}"
+    );
+
+    let (code, _) = kv(&dir, &["contract", "check", ".kovallent.yaml"]);
+    assert_eq!(code, Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `contract show` prints the effective contract and marks what the file
+/// leaves to defaults; its fingerprint is the one `audit` reports.
+#[test]
+fn contract_show_marks_defaults_and_matches_audit() {
+    let dir = tempdir("contract-show");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nsecrets:\n  min_value_length: 6\n",
+    );
+    let (code, stdout) = kv(&dir, &["contract", "show"]);
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("\n  min_value_length: 6\n"), "{stdout}");
+    assert!(
+        stdout.contains("\n  enabled: true  # default\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\nscan:  # default\n"), "{stdout}");
+    assert!(stdout.contains("\nversion: 1\n"), "{stdout}");
+
+    write(&dir, "app.py", "x = 1\n");
+    let (_, payload) = run_json(&dir, &[]);
+    let fp = payload["run"]["contract_sha256"].as_str().unwrap();
+    assert!(stdout.contains(&format!("# fingerprint {fp}")), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn contract_schema_prints_the_committed_schema() {
+    let out = Command::new(bin())
+        .args(["contract", "schema"])
+        .output()
+        .unwrap();
+    let printed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let committed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/contract.v1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(printed, committed);
+}
+
+/// Patterns are relative to the contract's folder whichever folder is
+/// scanned, and `*` stays within one folder.
+#[test]
+fn scan_patterns_follow_gitignore_rules_from_the_project_root() {
+    let dir = tempdir("globs");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nscan:\n  include: [\"src/*.py\", \"jobs/**/*.py\"]\n",
+    );
+    for sub in ["src/deep", "jobs/daily"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    write(&dir.join("src"), "a.py", "x = 1\n");
+    write(&dir.join("src/deep"), "b.py", "x = 1\n");
+    write(&dir.join("jobs/daily"), "c.py", "x = 1\n");
+
+    let files = |target: &str| -> u64 {
+        let out = Command::new(bin())
+            .args(["audit", target, "--format", "json"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let p: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        p["run"]["files_scanned"].as_u64().unwrap()
+    };
+    // src/a.py and jobs/daily/c.py; not src/deep/b.py.
+    assert_eq!(files("."), 2);
+    // The same rules from a subfolder: `jobs/**` still means jobs/**.
+    assert_eq!(files("jobs"), 1);
+    assert_eq!(files("jobs/daily"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The payload must validate against the frozen schema even when it carries
 /// `skipped` entries - the freeze in `src/payload.rs` covers a clean run;
 /// this covers the shape this file exists to fix.

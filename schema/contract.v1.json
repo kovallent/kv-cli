@@ -1,0 +1,762 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AppliesTo": {
+      "additionalProperties": false,
+      "description": "Selects the functions the contract governs. A function is in scope if it\nmatches *any* rule (or if `all_functions` is set).",
+      "properties": {
+        "all_functions": {
+          "default": false,
+          "description": "Require the contract on every function definition.",
+          "type": "boolean"
+        },
+        "decorators": {
+          "default": [
+            "kovallent.task",
+            "task",
+            "entrypoint",
+            "pipeline"
+          ],
+          "description": "Decorator patterns, matched against the dotted decorator path or its\nlast segment, ignoring case: `task` matches `@task` and\n`@airflow.decorators.task`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exempt_name_patterns": {
+          "default": [
+            "_*",
+            "test_*"
+          ],
+          "description": "Never require the contract on these function names (checked before the\nrules above), ignoring case.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name_patterns": {
+          "default": [
+            "deploy*",
+            "run_*",
+            "*_pipeline",
+            "*_job",
+            "main"
+          ],
+          "description": "Wildcard patterns (`*`, `?`) matched against the function name,\nignoring case: `deploy*` governs `deploy_app` and `Deploy_App`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "FixConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "backup_suffix": {
+          "default": ".kvbak",
+          "description": "Written alongside each modified file. Empty disables backups.",
+          "type": "string"
+        },
+        "env_var_prefix": {
+          "default": "",
+          "description": "Prefix applied to generated environment variable names.",
+          "type": "string"
+        },
+        "externalize_secrets": {
+          "default": true,
+          "description": "Rewrite hardcoded secrets to `os.environ` lookups.",
+          "type": "boolean"
+        },
+        "insert_missing_parameters": {
+          "default": true,
+          "description": "Insert missing contract parameters into function signatures.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FrameworkConfig": {
+      "additionalProperties": false,
+      "description": "Which built-in framework profiles apply.",
+      "properties": {
+        "disable": {
+          "default": [],
+          "description": "Never apply these, even when detected.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enable": {
+          "default": [
+            "auto"
+          ],
+          "description": "`auto` detects each framework from a file's imports (and, for dbt, its\nmodel signature). Naming frameworks explicitly applies them everywhere.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "InfraConfig": {
+      "additionalProperties": false,
+      "description": "KV003: hardcoded warehouses, catalogs, buckets, cluster IDs and endpoints.\nReport-only - `kv-cli fix` never rewrites these.",
+      "properties": {
+        "allow_values": {
+          "default": [
+            "local",
+            "localhost",
+            "dev",
+            "test",
+            "default",
+            "main",
+            "memory",
+            "sample"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "exempt_key_patterns": {
+          "default": [
+            "*_column",
+            "*_col",
+            "*_field",
+            "*_header",
+            "*_type"
+          ],
+          "description": "Names that match a key pattern but never hold an infrastructure\nidentifier, e.g. a `cluster_id_column`. Checked before key patterns.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ignore_marker": {
+          "default": "kovallent:allow-infra",
+          "type": "string"
+        },
+        "key_patterns": {
+          "default": [
+            "*warehouse*",
+            "*catalog*",
+            "*cluster_id*",
+            "*workspace_url*",
+            "*bucket*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "min_value_length": {
+          "default": 3,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "severity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Severity"
+            }
+          ],
+          "default": "warning",
+          "description": "Defaults to `warning` so adopting KV003 does not break CI on day one."
+        },
+        "value_patterns": {
+          "default": [
+            {
+              "name": "object_store_uri",
+              "regex": "\\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\\s\\x22']+"
+            },
+            {
+              "name": "jdbc_url",
+              "regex": "\\bjdbc:[a-z0-9]+://[^\\s\\x22']+"
+            }
+          ],
+          "items": {
+            "$ref": "#/definitions/ValuePattern"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RequiredParameter": {
+      "additionalProperties": false,
+      "description": "A parameter that in-scope functions are required to accept.",
+      "properties": {
+        "annotation": {
+          "default": null,
+          "description": "Type annotation rendered by `kv-cli fix`, e.g. `str`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default": {
+          "default": null,
+          "description": "Default value expression rendered by `kv-cli fix`, e.g. `\"dev\"`.\nA parameter without a default is inserted as required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "severity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Severity"
+            }
+          ],
+          "default": "error"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ScanConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "exclude": {
+          "default": [
+            "**/.venv/**",
+            "**/venv/**",
+            "**/.git/**",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+            "**/site-packages/**",
+            "**/build/**",
+            "**/dist/**",
+            "**/target/**",
+            "**/.tox/**",
+            "**/.mypy_cache/**",
+            "**/.kovallent.yaml"
+          ],
+          "description": "Files never audited, by the same rules as `include` - including files\nnamed on the command line, as pre-commit names them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "default": [
+            "**/*.py",
+            "**/*.ipynb",
+            "**/*.yml",
+            "**/*.yaml",
+            "**/.env",
+            "**/.env.*",
+            "**/*.env",
+            "**/*.toml",
+            "**/*.ini",
+            "**/*.cfg",
+            "**/*.json"
+          ],
+          "description": "Files a directory scan audits. Patterns are relative to the folder\nholding this contract, whichever folder is scanned, and follow\n`.gitignore` rules: `*` stays within one folder (`src/*.py` is not\n`src/deep/a.py`), `**` spans any number of folders, and a pattern with\nno `/` matches the file name at any depth (`*.py`). A file named on\nthe command line needs no match here.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SecretsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_values": {
+          "default": [
+            "",
+            "changeme",
+            "change-me",
+            "your-key-here",
+            "xxx",
+            "xxxx",
+            "todo",
+            "none",
+            "null",
+            "placeholder",
+            "example",
+            "test",
+            "dummy",
+            "redacted"
+          ],
+          "description": "Placeholder values that are never reported.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "exempt_key_patterns": {
+          "default": [
+            "*_name",
+            "*_arn",
+            "*_id",
+            "*_ref",
+            "*_path",
+            "*_file",
+            "*_dir",
+            "*_url",
+            "*_uri",
+            "*_endpoint",
+            "*_header",
+            "*_field",
+            "*_prefix",
+            "*_type",
+            "*_policy",
+            "*_var",
+            "*tokenizer*",
+            "*max_tokens*"
+          ],
+          "description": "Names that match a key pattern but *refer to* a credential rather than\nhold one: `secret_name`, `token_url`, `credentials_path`. Checked before\nkey patterns, framework ones included. Value patterns still apply, so a\nreal token is reported whatever it is called.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ignore_marker": {
+          "default": "kovallent:allow-secret",
+          "description": "A line containing this marker is skipped.",
+          "type": "string"
+        },
+        "key_patterns": {
+          "default": [
+            "*password*",
+            "*passwd*",
+            "*secret*",
+            "*token*",
+            "*api_key*",
+            "*apikey*",
+            "*access_key*",
+            "*private_key*",
+            "*credential*"
+          ],
+          "description": "Names that indicate a secret when bound to - or compared with - a string\nliteral. Matched ignoring case, as written and in snake_case, so\n`*private_key*` matches `PRIVATE_KEY` and `privateKey`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "min_value_length": {
+          "default": 4,
+          "description": "Minimum literal length before a `key_patterns` hit is reported.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "placeholder_patterns": {
+          "default": [
+            "your*",
+            "<*>",
+            "{*}",
+            "*placeholder*",
+            "replace*",
+            "change*me",
+            "xxx*",
+            "todo*",
+            "fixme*",
+            "insert*",
+            "*here"
+          ],
+          "description": "Value shapes that are placeholders, matched case-insensitively:\n`your-api-key-here`, `<token>`. Like `allow_values`, they apply to the\nkey rule only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "value_patterns": {
+          "default": [
+            {
+              "name": "aws_access_key_id",
+              "regex": "\\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\\b"
+            },
+            {
+              "name": "github_token",
+              "regex": "\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"
+            },
+            {
+              "name": "slack_token",
+              "regex": "\\bxox[baprs]-[A-Za-z0-9-]{10,}"
+            },
+            {
+              "name": "anthropic_api_key",
+              "regex": "\\bsk-ant-[A-Za-z0-9_-]{20,}"
+            },
+            {
+              "name": "openai_api_key",
+              "regex": "\\bsk-[A-Za-z0-9]{32,}\\b"
+            },
+            {
+              "name": "private_key_block",
+              "regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+            },
+            {
+              "name": "url_basic_auth",
+              "regex": "[a-zA-Z][a-zA-Z0-9+.-]*://[^/\\s:@]+:[^/\\s:@]+@"
+            },
+            {
+              "name": "github_fine_grained_token",
+              "regex": "\\bgithub_pat_[A-Za-z0-9_]{22,}"
+            },
+            {
+              "name": "openai_project_key",
+              "regex": "\\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
+            },
+            {
+              "name": "google_api_key",
+              "regex": "\\bAIza[0-9A-Za-z_-]{35}"
+            },
+            {
+              "name": "stripe_live_key",
+              "regex": "\\b(?:sk|rk)_live_[0-9A-Za-z]{24,}"
+            },
+            {
+              "name": "jwt",
+              "regex": "\\beyJ[A-Za-z0-9_-]{8,}\\.eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"
+            }
+          ],
+          "description": "High-confidence literal shapes matched anywhere in the file.",
+          "items": {
+            "$ref": "#/definitions/ValuePattern"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "ValuePattern": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "regex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "regex"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Root of the parameter contract.",
+  "properties": {
+    "applies_to": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AppliesTo"
+        }
+      ],
+      "default": {
+        "all_functions": false,
+        "decorators": [
+          "kovallent.task",
+          "task",
+          "entrypoint",
+          "pipeline"
+        ],
+        "exempt_name_patterns": [
+          "_*",
+          "test_*"
+        ],
+        "name_patterns": [
+          "deploy*",
+          "run_*",
+          "*_pipeline",
+          "*_job",
+          "main"
+        ]
+      },
+      "description": "Which functions the contract applies to."
+    },
+    "fix": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/FixConfig"
+        }
+      ],
+      "default": {
+        "backup_suffix": ".kvbak",
+        "env_var_prefix": "",
+        "externalize_secrets": true,
+        "insert_missing_parameters": true
+      }
+    },
+    "frameworks": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/FrameworkConfig"
+        }
+      ],
+      "default": {
+        "disable": [],
+        "enable": [
+          "auto"
+        ]
+      }
+    },
+    "infrastructure": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/InfraConfig"
+        }
+      ],
+      "default": {
+        "allow_values": [
+          "local",
+          "localhost",
+          "dev",
+          "test",
+          "default",
+          "main",
+          "memory",
+          "sample"
+        ],
+        "enabled": true,
+        "exempt_key_patterns": [
+          "*_column",
+          "*_col",
+          "*_field",
+          "*_header",
+          "*_type"
+        ],
+        "ignore_marker": "kovallent:allow-infra",
+        "key_patterns": [
+          "*warehouse*",
+          "*catalog*",
+          "*cluster_id*",
+          "*workspace_url*",
+          "*bucket*"
+        ],
+        "min_value_length": 3,
+        "severity": "warning",
+        "value_patterns": [
+          {
+            "name": "object_store_uri",
+            "regex": "\\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\\s\\x22']+"
+          },
+          {
+            "name": "jdbc_url",
+            "regex": "\\bjdbc:[a-z0-9]+://[^\\s\\x22']+"
+          }
+        ]
+      },
+      "description": "KV003: identifiers that should vary by environment."
+    },
+    "parameters": {
+      "default": [
+        {
+          "annotation": "str",
+          "default": "\"dev\"",
+          "name": "target_environment",
+          "severity": "error"
+        },
+        {
+          "annotation": "bool",
+          "default": "False",
+          "name": "dry_run",
+          "severity": "warning"
+        }
+      ],
+      "description": "Parameters every in-scope function must declare. Omitting the key\nuses the built-in defaults; an explicit `parameters: []` disables KV001.",
+      "items": {
+        "$ref": "#/definitions/RequiredParameter"
+      },
+      "type": "array"
+    },
+    "scan": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ScanConfig"
+        }
+      ],
+      "default": {
+        "exclude": [
+          "**/.venv/**",
+          "**/venv/**",
+          "**/.git/**",
+          "**/__pycache__/**",
+          "**/node_modules/**",
+          "**/site-packages/**",
+          "**/build/**",
+          "**/dist/**",
+          "**/target/**",
+          "**/.tox/**",
+          "**/.mypy_cache/**",
+          "**/.kovallent.yaml"
+        ],
+        "include": [
+          "**/*.py",
+          "**/*.ipynb",
+          "**/*.yml",
+          "**/*.yaml",
+          "**/.env",
+          "**/.env.*",
+          "**/*.env",
+          "**/*.toml",
+          "**/*.ini",
+          "**/*.cfg",
+          "**/*.json"
+        ]
+      }
+    },
+    "secrets": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SecretsConfig"
+        }
+      ],
+      "default": {
+        "allow_values": [
+          "",
+          "changeme",
+          "change-me",
+          "your-key-here",
+          "xxx",
+          "xxxx",
+          "todo",
+          "none",
+          "null",
+          "placeholder",
+          "example",
+          "test",
+          "dummy",
+          "redacted"
+        ],
+        "enabled": true,
+        "exempt_key_patterns": [
+          "*_name",
+          "*_arn",
+          "*_id",
+          "*_ref",
+          "*_path",
+          "*_file",
+          "*_dir",
+          "*_url",
+          "*_uri",
+          "*_endpoint",
+          "*_header",
+          "*_field",
+          "*_prefix",
+          "*_type",
+          "*_policy",
+          "*_var",
+          "*tokenizer*",
+          "*max_tokens*"
+        ],
+        "ignore_marker": "kovallent:allow-secret",
+        "key_patterns": [
+          "*password*",
+          "*passwd*",
+          "*secret*",
+          "*token*",
+          "*api_key*",
+          "*apikey*",
+          "*access_key*",
+          "*private_key*",
+          "*credential*"
+        ],
+        "min_value_length": 4,
+        "placeholder_patterns": [
+          "your*",
+          "<*>",
+          "{*}",
+          "*placeholder*",
+          "replace*",
+          "change*me",
+          "xxx*",
+          "todo*",
+          "fixme*",
+          "insert*",
+          "*here"
+        ],
+        "value_patterns": [
+          {
+            "name": "aws_access_key_id",
+            "regex": "\\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\\b"
+          },
+          {
+            "name": "github_token",
+            "regex": "\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"
+          },
+          {
+            "name": "slack_token",
+            "regex": "\\bxox[baprs]-[A-Za-z0-9-]{10,}"
+          },
+          {
+            "name": "anthropic_api_key",
+            "regex": "\\bsk-ant-[A-Za-z0-9_-]{20,}"
+          },
+          {
+            "name": "openai_api_key",
+            "regex": "\\bsk-[A-Za-z0-9]{32,}\\b"
+          },
+          {
+            "name": "private_key_block",
+            "regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+          },
+          {
+            "name": "url_basic_auth",
+            "regex": "[a-zA-Z][a-zA-Z0-9+.-]*://[^/\\s:@]+:[^/\\s:@]+@"
+          },
+          {
+            "name": "github_fine_grained_token",
+            "regex": "\\bgithub_pat_[A-Za-z0-9_]{22,}"
+          },
+          {
+            "name": "openai_project_key",
+            "regex": "\\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
+          },
+          {
+            "name": "google_api_key",
+            "regex": "\\bAIza[0-9A-Za-z_-]{35}"
+          },
+          {
+            "name": "stripe_live_key",
+            "regex": "\\b(?:sk|rk)_live_[0-9A-Za-z]{24,}"
+          },
+          {
+            "name": "jwt",
+            "regex": "\\beyJ[A-Za-z0-9_-]{8,}\\.eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"
+          }
+        ]
+      }
+    },
+    "version": {
+      "default": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "Contract",
+  "type": "object"
+}

@@ -11,7 +11,64 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`*` in `scan.include` / `scan.exclude` no longer crosses folders.** Paths
+  now follow `.gitignore` rules: `src/*.py` means files directly in `src/`;
+  use `src/**/*.py` for every depth. A pattern with no `/` (`*.py`) still
+  matches at any depth, and the default patterns (all `**/`) behave exactly
+  as before.
+- **Patterns are relative to the contract's folder, whichever folder is
+  scanned.** `kv-cli audit src` used to match `src/**/*.py` against paths
+  relative to `src/` and find nothing; it now selects what `audit .` does.
+- **Function-name and decorator patterns ignore case,** as key patterns
+  always have: `deploy*` now governs `Deploy_App`. This can only add KV001
+  findings.
+- **A contract that would misbehave is now rejected (exit `2`)** - see
+  "Contract validation" below. One that passes `kv-cli contract check` loads
+  as before.
+- No fingerprint changes: the contract's fields are unchanged.
+
 ### Added
+
+- **Contract validation that reports every problem at once, with lines.**
+  `audit`, `fix` and the new `contract check` list each as
+  `file:line: field: message`. Beyond types and unknown keys, a contract is
+  rejected when:
+  - a parameter's name, annotation or default would not render as exactly one
+    Python parameter - checked by parsing it as `fix` would write it.
+    `default: '"dev'` made `fix` write `target_environment="dev):`, a syntax
+    error; `name: target-environment` produced a finding no signature could
+    ever satisfy;
+  - a parameter is listed twice (`fix` declared it twice, a syntax error);
+  - a value-pattern regex does not compile, matches the empty string (it would
+    report every line), or shares a detector name;
+  - an exemption or placeholder pattern matches everything;
+  - a framework is unknown, both enabled and disabled (`disable` used to win
+    silently), or `auto` is disabled.
+- **`kv-cli contract check [FILES]`**: validate contracts without scanning
+  code; exit `0` (with the fingerprint) or `2`. Takes contract files by name,
+  checking and reporting each.
+- **A `kv-cli-contract` pre-commit hook** runs `contract check` on each
+  changed `.kovallent.yaml`, so a broken contract is stopped at the commit
+  that introduces it. Both hooks were run end to end through pre-commit
+  (`try-repo`) for this release - the first time the `kv-cli` hook shipped in
+  0.5.0 had been run rather than only configured.
+- **`kv-cli contract show`**: the effective contract, every inherited default
+  marked `# default`, with its fingerprint - what a partial contract really
+  enforces, and what an upgrade changed.
+- **`kv-cli contract schema`** and the committed `schema/contract.v1.json`
+  (JSON Schema draft-07, the version YAML editors support most widely),
+  generated from the Rust types and frozen by a test. `kv-cli init` writes a
+  first line pointing editors at the schema for that release, so typos,
+  wrong types and invalid values are flagged while typing, with hover
+  documentation. kv-cli never fetches it; for offline or air-gapped editors,
+  the README shows how to keep a local copy.
+- **KV001 findings say why the function is governed:** `in scope: name
+  matches applies_to.name_patterns "deploy*"`, a decorator, `all_functions`
+  or a framework profile. Computed by the same function that decides scope,
+  so the explanation cannot disagree with the decision. Detail text only;
+  fingerprints and the payload schema are unchanged.
 
 - **CI on every pull request and push to `main`** (`.github/workflows/ci.yml`):
   formatting and `clippy -D warnings` on Linux; unit, end-to-end and corpus

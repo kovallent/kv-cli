@@ -238,6 +238,18 @@ impl FrameworkProfile {
     pub fn governs_signature(&self, f: &FunctionDef) -> bool {
         decorator_matches(f, self.governed_decorators)
     }
+
+    /// The decorator, as written, by which this framework governs `f`.
+    pub fn governing_decorator<'f>(&self, f: &'f FunctionDef) -> Option<&'f str> {
+        f.decorators
+            .iter()
+            .find(|d| {
+                self.governed_decorators.iter().any(|want| {
+                    d.as_str() == *want || d.rsplit('.').next().is_some_and(|last| last == *want)
+                })
+            })
+            .map(String::as_str)
+    }
 }
 
 /// Match a decorator by full dotted path or by its final segment, so `task`

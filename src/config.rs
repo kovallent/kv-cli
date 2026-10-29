@@ -1,5 +1,6 @@
 //! The `.kovallent.yaml` parameter contract: schema, defaults, and loading.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Root of the parameter contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
     #[serde(default = "default_version")]
@@ -50,7 +51,7 @@ pub struct Contract {
 }
 
 /// Which built-in framework profiles apply.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FrameworkConfig {
     /// `auto` detects each framework from a file's imports (and, for dbt, its
@@ -83,7 +84,7 @@ impl FrameworkConfig {
 
 /// KV003: hardcoded warehouses, catalogs, buckets, cluster IDs and endpoints.
 /// Report-only - `kv-cli fix` never rewrites these.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InfraConfig {
     #[serde(default = "yes")]
@@ -217,11 +218,19 @@ fn default_version() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScanConfig {
+    /// Files a directory scan audits. Patterns are relative to the folder
+    /// holding this contract, whichever folder is scanned, and follow
+    /// `.gitignore` rules: `*` stays within one folder (`src/*.py` is not
+    /// `src/deep/a.py`), `**` spans any number of folders, and a pattern with
+    /// no `/` matches the file name at any depth (`*.py`). A file named on
+    /// the command line needs no match here.
     #[serde(default = "default_include")]
     pub include: Vec<String>,
+    /// Files never audited, by the same rules as `include` - including files
+    /// named on the command line, as pre-commit names them.
     #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
 }
@@ -267,7 +276,7 @@ impl Default for ScanConfig {
 }
 
 /// A parameter that in-scope functions are required to accept.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredParameter {
     pub name: String,
@@ -282,7 +291,7 @@ pub struct RequiredParameter {
     pub severity: Severity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
@@ -303,19 +312,23 @@ impl Severity {
 
 /// Selects the functions the contract governs. A function is in scope if it
 /// matches *any* rule (or if `all_functions` is set).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppliesTo {
-    /// Wildcard patterns matched against the function name.
+    /// Wildcard patterns (`*`, `?`) matched against the function name,
+    /// ignoring case: `deploy*` governs `deploy_app` and `Deploy_App`.
     #[serde(default = "default_name_patterns")]
     pub name_patterns: Vec<String>,
-    /// Decorator names, matched against the dotted decorator path.
+    /// Decorator patterns, matched against the dotted decorator path or its
+    /// last segment, ignoring case: `task` matches `@task` and
+    /// `@airflow.decorators.task`.
     #[serde(default = "default_decorators")]
     pub decorators: Vec<String>,
     /// Require the contract on every function definition.
     #[serde(default)]
     pub all_functions: bool,
-    /// Never require the contract on these (checked before the rules above).
+    /// Never require the contract on these function names (checked before the
+    /// rules above), ignoring case.
     #[serde(default = "default_exempt")]
     pub exempt_name_patterns: Vec<String>,
 }
@@ -337,12 +350,14 @@ impl Default for AppliesTo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// Assignment targets that indicate a secret when bound to a string literal.
+    /// Names that indicate a secret when bound to - or compared with - a string
+    /// literal. Matched ignoring case, as written and in snake_case, so
+    /// `*private_key*` matches `PRIVATE_KEY` and `privateKey`.
     #[serde(default = "default_secret_keys")]
     pub key_patterns: Vec<String>,
     /// High-confidence literal shapes matched anywhere in the file.
@@ -377,7 +392,7 @@ fn default_min_len() -> usize {
     4
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ValuePattern {
     pub name: String,
@@ -517,7 +532,7 @@ impl Default for SecretsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FixConfig {
     /// Insert missing contract parameters into function signatures.
@@ -637,7 +652,200 @@ impl Contract {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        Self::from_yaml(&raw).map_err(|e| format!("invalid contract at {}: {e}", path.display()))
+        let contract = Self::from_yaml(&raw)
+            .map_err(|e| format!("invalid contract at {}: {e}", path.display()))?;
+        let problems = contract.validate(Some(&raw));
+        if problems.is_empty() {
+            Ok(contract)
+        } else {
+            Err(describe_problems(path, &problems))
+        }
+    }
+
+    /// Everything wrong with the contract that its types do not already rule
+    /// out - every problem at once, so one run shows the whole list rather
+    /// than one fix-and-rerun per mistake. `raw`, the file's text, lets each
+    /// problem name its line.
+    ///
+    /// Each check closes a way a contract could look fine and do something
+    /// else: a parameter `fix` would render as broken Python, a finding no
+    /// signature could ever satisfy, a regex that cannot compile or that
+    /// matches every line, a pattern that disables its own rule, or two
+    /// settings that contradict each other.
+    pub fn validate(&self, raw: Option<&str>) -> Vec<Problem> {
+        let mut out = Vec::new();
+        let mut problem = |path: String, line: Option<usize>, message: String| {
+            out.push(Problem {
+                path,
+                line,
+                message,
+            })
+        };
+
+        // --- parameters: each must render as exactly one Python parameter.
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, p) in self.parameters.iter().enumerate() {
+            let field = |f: &str| format!("parameters[{i}].{f}");
+            let occurrence = seen.iter().filter(|n| **n == p.name).count();
+            let name_line = locate(raw, "name", &p.name, occurrence);
+            if !renders_as_parameter(&p.name, None, None) {
+                problem(
+                    field("name"),
+                    name_line,
+                    format!(
+                        "{:?} is not a Python identifier, so no signature could declare it",
+                        p.name
+                    ),
+                );
+                seen.push(&p.name);
+                continue;
+            }
+            if let Some(first) = self.parameters.iter().position(|q| q.name == p.name) {
+                if first < i {
+                    problem(
+                        field("name"),
+                        name_line,
+                        format!(
+                            "{:?} is already required by parameters[{first}]; `fix` would declare it twice",
+                            p.name
+                        ),
+                    );
+                }
+            }
+            seen.push(&p.name);
+            if let Some(a) = &p.annotation {
+                if !renders_as_parameter("x", Some(a), None) {
+                    problem(
+                        field("annotation"),
+                        locate(raw, "annotation", a, 0),
+                        format!("{a:?} is not a valid Python type annotation"),
+                    );
+                }
+            }
+            if let Some(d) = &p.default {
+                if !renders_as_parameter("x", None, Some(d)) {
+                    problem(
+                        field("default"),
+                        locate(raw, "default", d, 0),
+                        format!(
+                            "{d:?} is not a valid Python expression - a string default needs its \
+                             quotes inside the YAML value, e.g. '\"dev\"'"
+                        ),
+                    );
+                }
+            }
+        }
+
+        // --- regexes: must compile, and must not match the empty string -
+        // that would report a finding on every line of every file.
+        for (section, patterns) in [
+            ("secrets", &self.secrets.value_patterns),
+            ("infrastructure", &self.infrastructure.value_patterns),
+        ] {
+            for (i, p) in patterns.iter().enumerate() {
+                let field = |f: &str| format!("{section}.value_patterns[{i}].{f}");
+                if p.name.trim().is_empty() {
+                    problem(
+                        field("name"),
+                        None,
+                        "a detector needs a name; findings report it".into(),
+                    );
+                } else if patterns[..i].iter().any(|q| q.name == p.name) {
+                    problem(
+                        field("name"),
+                        locate(raw, "name", &p.name, 1),
+                        format!(
+                            "{:?} names another detector too; findings could not tell them apart",
+                            p.name
+                        ),
+                    );
+                }
+                match regex::Regex::new(&p.regex) {
+                    Err(e) => problem(
+                        field("regex"),
+                        locate(raw, "regex", &p.regex, 0),
+                        format!("does not compile: {}", regex_reason(&e)),
+                    ),
+                    Ok(re) if re.is_match("") => problem(
+                        field("regex"),
+                        locate(raw, "regex", &p.regex, 0),
+                        format!(
+                            "{:?} matches the empty string, so it would report every line",
+                            p.regex
+                        ),
+                    ),
+                    Ok(_) => {}
+                }
+            }
+        }
+
+        // --- patterns that match everything disable their own rule while
+        // the contract still looks configured. Turning a rule off has
+        // explicit spellings (`key_patterns: []`, `enabled: false`).
+        for (field, patterns) in [
+            (
+                "secrets.exempt_key_patterns",
+                &self.secrets.exempt_key_patterns,
+            ),
+            (
+                "secrets.placeholder_patterns",
+                &self.secrets.placeholder_patterns,
+            ),
+            (
+                "infrastructure.exempt_key_patterns",
+                &self.infrastructure.exempt_key_patterns,
+            ),
+        ] {
+            for (i, p) in patterns.iter().enumerate() {
+                if p.chars().all(|c| c == '*') {
+                    let key = field.rsplit('.').next().unwrap_or(field);
+                    problem(
+                        format!("{field}[{i}]"),
+                        locate(raw, key, p, 0),
+                        format!(
+                            "{p:?} matches everything, which disables the rule; to turn it off \
+                             say so explicitly (`key_patterns: []` or `enabled: false`)"
+                        ),
+                    );
+                }
+            }
+        }
+
+        // --- frameworks: known names, and no contradictions.
+        let known: Vec<&str> = crate::frameworks::PROFILES.iter().map(|p| p.name).collect();
+        for (list, names) in [
+            ("enable", &self.frameworks.enable),
+            ("disable", &self.frameworks.disable),
+        ] {
+            for (i, name) in names.iter().enumerate() {
+                let path = format!("frameworks.{list}[{i}]");
+                if name == "auto" {
+                    if list == "disable" {
+                        problem(
+                            path,
+                            locate(raw, "disable", name, 0),
+                            "\"auto\" cannot be disabled; remove it from `enable` instead".into(),
+                        );
+                    }
+                } else if crate::frameworks::by_name(name).is_none() {
+                    problem(
+                        path,
+                        locate(raw, list, name, 0),
+                        format!(
+                            "unknown framework '{name}'; known profiles: {}",
+                            known.join(", ")
+                        ),
+                    );
+                } else if list == "enable" && self.frameworks.disable.contains(name) {
+                    problem(
+                        path,
+                        locate(raw, "enable", name, 0),
+                        format!("'{name}' is both enabled and disabled; keep it in one list"),
+                    );
+                }
+            }
+        }
+        out
     }
 
     /// Parse contract text. Unknown keys are rejected rather than ignored: a
@@ -669,8 +877,126 @@ impl Contract {
     }
 }
 
+/// One thing wrong with a contract, located as precisely as the file allows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// The field, e.g. `parameters[1].name`.
+    pub path: String,
+    /// Line in the contract file, when it can be found.
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
+
+impl Problem {
+    /// `file:line: field: message`, the shape compilers use, so editors and
+    /// terminals can jump to the line.
+    pub fn render(&self, file: &Path) -> String {
+        match self.line {
+            Some(line) => format!("{}:{line}: {self}", file.display()),
+            None => format!("{}: {self}", file.display()),
+        }
+    }
+}
+
+/// The error for a contract with problems: a count, then one line each.
+pub fn describe_problems(file: &Path, problems: &[Problem]) -> String {
+    let mut out = format!(
+        "invalid contract {} ({} problem{}):",
+        file.display(),
+        problems.len(),
+        if problems.len() == 1 { "" } else { "s" }
+    );
+    for p in problems {
+        out.push_str("\n  ");
+        out.push_str(&p.render(file));
+    }
+    out
+}
+
+/// Does this parameter render - as `kv-cli fix` would write it - as exactly
+/// one Python parameter named `name`? Checked by parsing it in a signature,
+/// so whatever passes here is code `fix` can safely insert, and a default
+/// such as `1, y=2` (two parameters) or `"dev  # x` (a comment that eats the
+/// closing paren) is caught.
+fn renders_as_parameter(name: &str, annotation: Option<&str>, default: Option<&str>) -> bool {
+    let rendered = crate::audit::render_param(&RequiredParameter {
+        name: name.to_string(),
+        annotation: annotation.map(str::to_string),
+        default: default.map(str::to_string),
+        severity: Severity::Error,
+    });
+    let a = crate::python::analyze(&format!("def _kv_check({rendered}):\n    pass\n"));
+    !a.has_error
+        && a.functions.len() == 1
+        && matches!(a.functions[0].params.as_slice(), [p] if p.name == name)
+}
+
+/// The reason a regex failed, without the library's multi-line caret
+/// diagram: `unclosed group`, not `regex parse error: (unclosed ^ error: ...`.
+fn regex_reason(e: &regex::Error) -> String {
+    let text = e.to_string();
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(&text);
+    last.trim().trim_start_matches("error:").trim().to_string()
+}
+
+/// Best-effort line of `key: value` - or a `- value` list item, or a flow
+/// list on the key's line - in the contract text; the `nth` match when the
+/// same pair appears more than once. `None` when the text is not to hand or
+/// the value is written in a shape this cannot see (anchors, multi-line).
+fn locate(raw: Option<&str>, key: &str, value: &str, nth: usize) -> Option<usize> {
+    let raw = raw?;
+    let unquote = |s: &str| {
+        let s = s.trim();
+        s.strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(s)
+            .to_string()
+    };
+    let mut hits = raw.lines().enumerate().filter_map(|(i, line)| {
+        let t = line.trim_start();
+        let t = t.strip_prefix("- ").map(str::trim_start).unwrap_or(t);
+        let on_key_line = !key.is_empty()
+            && t.strip_prefix(key)
+                .and_then(|r| r.trim_start().strip_prefix(':'))
+                .is_some_and(|rest| {
+                    let rest = rest.split(" #").next().unwrap_or(rest);
+                    unquote(rest) == value
+                        || rest
+                            .trim()
+                            .trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .split(',')
+                            .any(|item| unquote(item) == value)
+                });
+        let as_list_item = line.trim_start().starts_with("- ")
+            && unquote(line.trim_start()[2..].split(" #").next().unwrap_or("")) == value;
+        (on_key_line || (as_list_item && key != "name")).then_some(i + 1)
+    });
+    hits.nth(nth)
+}
+
 /// The commented template written by `kv-cli init`.
-pub const DEFAULT_CONTRACT_YAML: &str = r#"# .kovallent.yaml - Kovallent parameter contract
+///
+/// The first line points editors that support it (VS Code's YAML extension,
+/// JetBrains via schema mapping) at the JSON Schema for this exact release, so
+/// a typo or a wrong type is flagged as it is typed.
+pub const DEFAULT_CONTRACT_YAML: &str = concat!(
+    "# yaml-language-server: $schema=",
+    "https://raw.githubusercontent.com/kovallent/kv-cli/v",
+    env!("CARGO_PKG_VERSION"),
+    "/schema/contract.v1.json\n",
+    r#"# .kovallent.yaml - Kovallent parameter contract
 # Checked by `kv-cli audit`; repaired by `kv-cli fix`.
 version: 1
 
@@ -891,7 +1217,8 @@ fix:
   env_var_prefix: ""
   # Written next to each modified file. Set to "" to disable backups.
   backup_suffix: ".kvbak"
-"#;
+"#
+);
 
 #[cfg(test)]
 mod tests {
@@ -962,6 +1289,126 @@ mod tests {
     fn explicit_empty_list_disables_a_check() {
         let c: Contract = serde_yaml::from_str("version: 1\nparameters: []\n").unwrap();
         assert!(c.parameters.is_empty());
+    }
+
+    // --- validation --------------------------------------------------------
+
+    fn problems(yaml: &str) -> Vec<Problem> {
+        let c = Contract::from_yaml(yaml).expect("parses");
+        c.validate(Some(yaml))
+    }
+
+    /// One `(path, line)` per problem, for compact assertions.
+    fn located(yaml: &str) -> Vec<(String, Option<usize>)> {
+        problems(yaml)
+            .into_iter()
+            .map(|p| (p.path, p.line))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_contract_and_template_are_valid() {
+        assert_eq!(Contract::default().validate(None), vec![]);
+        assert_eq!(problems(DEFAULT_CONTRACT_YAML), vec![]);
+    }
+
+    /// Each of these made `fix` write a syntax error, or a finding that no
+    /// signature could ever satisfy.
+    #[test]
+    fn parameters_must_render_as_one_python_parameter() {
+        let yaml = "version: 1\nparameters:\n  - name: env\n    default: '\"dev'\n  - name: target-environment\n  - name: dry_run\n    annotation: \"bool =\"\n  - name: class\n  - name: env2\n    default: \"1, y=2\"\n";
+        assert_eq!(
+            located(yaml),
+            vec![
+                ("parameters[0].default".to_string(), Some(4)),
+                ("parameters[1].name".to_string(), Some(5)),
+                ("parameters[2].annotation".to_string(), Some(7)),
+                ("parameters[3].name".to_string(), Some(8)),
+                ("parameters[4].default".to_string(), Some(10)),
+            ]
+        );
+    }
+
+    #[test]
+    fn valid_parameter_shapes_pass() {
+        let yaml = "version: 1\nparameters:\n  - name: target_environment\n    annotation: \"Literal['dev', 'prod']\"\n    default: '\"dev\"'\n  - name: retries\n    annotation: \"int | None\"\n    default: \"None\"\n  - name: run_date\n";
+        assert_eq!(problems(yaml), vec![]);
+    }
+
+    #[test]
+    fn a_parameter_listed_twice_points_at_the_second() {
+        let yaml = "version: 1\nparameters:\n  - name: env\n  - name: other\n  - name: env\n";
+        assert_eq!(
+            located(yaml),
+            vec![("parameters[2].name".to_string(), Some(5))]
+        );
+    }
+
+    #[test]
+    fn regexes_must_compile_and_must_not_match_everything() {
+        let yaml = "version: 1\nsecrets:\n  value_patterns:\n    - name: broken\n      regex: \"(unclosed\"\n    - name: empty\n      regex: \"a*\"\n    - name: broken\n      regex: \"x+\"\n";
+        let p = problems(yaml);
+        assert_eq!(
+            p.iter()
+                .map(|p| (p.path.as_str(), p.line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("secrets.value_patterns[0].regex", Some(5)),
+                ("secrets.value_patterns[1].regex", Some(7)),
+                ("secrets.value_patterns[2].name", Some(8)),
+            ]
+        );
+        assert_eq!(p[0].message, "does not compile: unclosed group");
+    }
+
+    #[test]
+    fn framework_lists_must_be_known_and_consistent() {
+        let yaml = "version: 1\nframeworks:\n  enable: [dbt, sparkle]\n  disable:\n    - dbt\n    - auto\n";
+        assert_eq!(
+            located(yaml),
+            vec![
+                ("frameworks.enable[0]".to_string(), Some(3)),
+                ("frameworks.enable[1]".to_string(), Some(3)),
+                ("frameworks.disable[1]".to_string(), Some(6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn match_everything_patterns_are_located_in_flow_and_block_lists() {
+        assert_eq!(
+            located("version: 1\nsecrets:\n  placeholder_patterns: [\"***\"]\n"),
+            vec![("secrets.placeholder_patterns[0]".to_string(), Some(3))]
+        );
+        assert_eq!(
+            located(
+                "version: 1\nsecrets:\n  exempt_key_patterns:\n    - \"*_name\"\n    - \"*\"\n"
+            ),
+            vec![("secrets.exempt_key_patterns[1]".to_string(), Some(5))]
+        );
+    }
+
+    #[test]
+    fn loading_reports_every_problem_with_file_and_line() {
+        let dir = std::env::temp_dir().join(format!("kvcli-validate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONTRACT_FILE);
+        std::fs::write(
+            &path,
+            "version: 1\nparameters:\n  - name: a-b\n  - name: c-d\n",
+        )
+        .unwrap();
+        let err = Contract::load(&path).unwrap_err();
+        assert!(err.contains("(2 problems)"), "{err}");
+        assert!(
+            err.contains(".kovallent.yaml:3: parameters[0].name"),
+            "{err}"
+        );
+        assert!(
+            err.contains(".kovallent.yaml:4: parameters[1].name"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- unknown keys ----------------------------------------------------

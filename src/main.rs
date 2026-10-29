@@ -109,6 +109,12 @@ enum Command {
     /// Print the JSON payload schema that this build emits.
     Schema,
 
+    /// Check, show or describe the `.kovallent.yaml` contract itself.
+    Contract {
+        #[command(subcommand)]
+        action: ContractAction,
+    },
+
     /// List the built-in framework profiles and what each contributes.
     Frameworks,
 
@@ -127,6 +133,29 @@ enum Command {
         #[arg(long)]
         no_backup: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ContractAction {
+    /// Validate the contract without scanning any code. Lists every problem
+    /// with its line; exits 0 when valid, 2 when not.
+    Check {
+        /// Contract files to check, e.g. as pre-commit passes them
+        /// (defaults to `--config`, else the nearest `.kovallent.yaml`).
+        files: Vec<PathBuf>,
+        /// Contract file to check.
+        #[arg(short, long, conflicts_with = "files")]
+        config: Option<PathBuf>,
+    },
+    /// Print the effective contract: the file plus every default it leaves
+    /// out, each marked, with the fingerprint.
+    Show {
+        /// Contract file to show (defaults to the nearest `.kovallent.yaml`).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Print the JSON Schema for `.kovallent.yaml`, for editor validation.
+    Schema,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -169,6 +198,13 @@ fn main() -> ExitCode {
             },
         ),
         Command::Schema => cmd_schema(),
+        Command::Contract { action } => match action {
+            ContractAction::Check { files, config } => {
+                cmd_contract_check(&files, config.as_deref())
+            }
+            ContractAction::Show { config } => cmd_contract_show(config.as_deref()),
+            ContractAction::Schema => cmd_contract_schema(),
+        },
         Command::Frameworks => cmd_frameworks(),
         Command::Fix {
             paths,
@@ -199,6 +235,10 @@ fn main() -> ExitCode {
 fn emits_machine_output(command: &Command) -> bool {
     match command {
         Command::Schema => true,
+        // Both print a document meant to be piped or saved.
+        Command::Contract {
+            action: ContractAction::Show { .. } | ContractAction::Schema,
+        } => true,
         Command::Audit { format, .. } => *format == Format::Json,
         _ => false,
     }
@@ -285,6 +325,186 @@ fn file_kind(path: &Path) -> FileKind {
 /// The payload schema, generated from the Rust types so it cannot drift.
 pub fn payload_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(Payload)).expect("schema is serializable")
+}
+
+/// The contract schema, generated from the Rust types so it cannot drift.
+///
+/// Draft-07, unlike the payload schema: this one is read by editors, and
+/// draft-07 is the version every YAML editor's schema support handles. It
+/// says the same things as a 2020-12 schema would.
+pub fn contract_schema() -> serde_json::Value {
+    let schema = schemars::generate::SchemaSettings::draft07()
+        .into_generator()
+        .into_root_schema_for::<Contract>();
+    serde_json::to_value(schema).expect("schema is serializable")
+}
+
+fn cmd_contract_schema() -> Result<u8, String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&contract_schema()).map_err(|e| e.to_string())?
+    );
+    Ok(EXIT_OK)
+}
+
+/// The contract a `contract` subcommand works on: the one named, or the
+/// nearest found from here up. `None` means the built-in defaults apply.
+fn contract_file(explicit: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    match explicit {
+        Some(p) if p.is_file() => Ok(Some(p.to_path_buf())),
+        Some(p) => Err(format!("contract not found: {}", p.display())),
+        None => Ok(Contract::discover(Path::new("."))),
+    }
+}
+
+/// Parse and validate `path`, as `audit` would - but report every problem as
+/// `file:line: field: message` on stdout instead of stopping at the first.
+/// `Err` carries the exit code once the problems are printed.
+fn checked_contract(path: &Path) -> Result<(String, Contract), u8> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            println!("{}: cannot read: {e}", path.display());
+            return Err(EXIT_ERROR);
+        }
+    };
+    let contract = match Contract::from_yaml(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            // serde_yaml ends its messages with "at line N column M".
+            let (message, line) = match e.rsplit_once(" at line ") {
+                Some((m, rest)) => (m.to_string(), rest.split_whitespace().next()),
+                None => (e.clone(), None),
+            };
+            match line {
+                Some(l) => println!("{}:{l}: {message}", path.display()),
+                None => println!("{}: {message}", path.display()),
+            }
+            println!("{} problem in {}", "1".red().bold(), path.display());
+            return Err(EXIT_ERROR);
+        }
+    };
+    let problems = contract.validate(Some(&raw));
+    if !problems.is_empty() {
+        for p in &problems {
+            println!("{}", p.render(path));
+        }
+        println!(
+            "{} problem{} in {}",
+            problems.len().to_string().red().bold(),
+            if problems.len() == 1 { "" } else { "s" },
+            path.display()
+        );
+        return Err(EXIT_ERROR);
+    }
+    Ok((raw, contract))
+}
+
+/// Check each named contract - or the one `--config` names, or the nearest -
+/// and fail if any is invalid. Every file is checked and reported, so one
+/// run lists every problem in every changed contract.
+fn cmd_contract_check(files: &[PathBuf], config: Option<&Path>) -> Result<u8, String> {
+    let targets: Vec<PathBuf> = if files.is_empty() {
+        match contract_file(config)? {
+            Some(path) => vec![path],
+            None => {
+                println!(
+                    "no {CONTRACT_FILE} found from here up; the built-in defaults apply \
+                     (fingerprint {}) - run `kv-cli init` to write one",
+                    Contract::default().fingerprint()
+                );
+                return Ok(EXIT_OK);
+            }
+        }
+    } else {
+        for f in files {
+            if !f.is_file() {
+                return Err(format!("contract not found: {}", f.display()));
+            }
+        }
+        files.to_vec()
+    };
+    let mut code = EXIT_OK;
+    for path in &targets {
+        match checked_contract(path) {
+            Ok((_, contract)) => println!(
+                "{} {} is valid \u{b7} fingerprint {}",
+                "\u{2713}".green().bold(),
+                path.display(),
+                contract.fingerprint().bold()
+            ),
+            Err(c) => code = c,
+        }
+    }
+    Ok(code)
+}
+
+fn cmd_contract_show(config: Option<&Path>) -> Result<u8, String> {
+    let (source, raw, contract) = match contract_file(config)? {
+        Some(path) => match checked_contract(&path) {
+            Ok((raw, contract)) => (path.display().to_string(), Some(raw), contract),
+            Err(code) => return Ok(code),
+        },
+        None => ("built-in defaults".to_string(), None, Contract::default()),
+    };
+    let written: Option<serde_yaml::Value> =
+        raw.as_deref().and_then(|r| serde_yaml::from_str(r).ok());
+    let yaml = serde_yaml::to_string(&contract).map_err(|e| e.to_string())?;
+    println!("# effective contract: {source}");
+    println!("# fingerprint {}", contract.fingerprint());
+    println!("# keys marked `# default` are not in the file; their default applies");
+    print!("{}", mark_defaults(&yaml, written.as_ref()));
+    Ok(EXIT_OK)
+}
+
+/// Mark each top-level key, and each key of a top-level section, that the
+/// contract file leaves out - so a three-line contract shows exactly which
+/// rules it inherits. List items are not marked: a list is written or not as
+/// a whole. With no file, everything is a default.
+fn mark_defaults(effective: &str, written: Option<&serde_yaml::Value>) -> String {
+    let has = |path: &[&str]| -> bool {
+        let mut v = match written {
+            Some(v) => v,
+            None => return false,
+        };
+        for key in path {
+            match v.get(*key) {
+                Some(next) => v = next,
+                None => return false,
+            }
+        }
+        true
+    };
+    let mut section: Option<&str> = None;
+    let mut out = String::new();
+    // The key a `key:` or `key: value` line opens, if the line is one.
+    fn key_of(l: &str) -> Option<&str> {
+        l.strip_suffix(':')
+            .or_else(|| l.split_once(": ").map(|(k, _)| k))
+            .filter(|k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    }
+    for line in effective.lines() {
+        let marked = if let Some(key) = key_of(line) {
+            section = Some(key);
+            !has(&[key])
+        } else if let (Some(sec), Some(key)) = (section, line.strip_prefix("  ").and_then(key_of)) {
+            // Only a section the file writes as a mapping has keys of its
+            // own; the indented keys of a list (`parameters`) belong to its
+            // items, which are written whole.
+            let written_mapping = written
+                .and_then(|w| w.get(sec))
+                .is_some_and(serde_yaml::Value::is_mapping);
+            written_mapping && !has(&[sec, key])
+        } else {
+            false
+        };
+        out.push_str(line);
+        if marked {
+            out.push_str("  # default");
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn cmd_schema() -> Result<u8, String> {
@@ -910,8 +1130,12 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             f.code.dimmed(),
             f.message
         );
+        // A detail can span lines - a KV001 adds why the function is in
+        // scope - and each is indented under the finding.
         if let Some(d) = &f.detail {
-            println!("        {}", d.dimmed());
+            for line in d.lines() {
+                println!("        {}", line.dimmed());
+            }
         }
     }
 
@@ -1273,6 +1497,59 @@ mod tests {
         assert!(!emits_machine_output(&cli(&["audit"])));
         assert!(!emits_machine_output(&cli(&["fix", "-n"])));
         assert!(!emits_machine_output(&cli(&["init"])));
+    }
+
+    /// **The freeze.** The committed contract schema is generated from the
+    /// Rust types; editors read the committed file, so it must never lag the
+    /// binary. Regenerate deliberately: `cargo run -- contract schema >
+    /// schema/contract.v1.json`.
+    #[test]
+    fn committed_contract_schema_matches_the_types() {
+        let committed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/schema/contract.v1.json"
+            ))
+            .expect("schema/contract.v1.json is committed"),
+        )
+        .expect("valid JSON");
+        assert_eq!(
+            serde_json::to_string_pretty(&committed).unwrap(),
+            serde_json::to_string_pretty(&contract_schema()).unwrap(),
+            "schema/contract.v1.json is stale; regenerate with `cargo run -- contract schema > schema/contract.v1.json`"
+        );
+    }
+
+    /// What an editor sees: the template validates, a typo and a wrong type
+    /// do not.
+    #[test]
+    fn the_contract_schema_accepts_the_template_and_flags_mistakes() {
+        let schema = contract_schema();
+        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+        let as_json = |yaml: &str| -> serde_json::Value { serde_yaml::from_str(yaml).unwrap() };
+
+        assert!(validator.is_valid(&as_json(DEFAULT_CONTRACT_YAML)));
+        assert!(validator.is_valid(&as_json("version: 1\n")));
+        for bad in [
+            "version: 1\napplies_to:\n  name_pattern: [\"etl_*\"]\n",
+            "version: 1\nsecrets:\n  min_value_length: \"four\"\n",
+            "version: 1\nparameters:\n  - name: env\n    severity: critical\n",
+            "version: 1\nrules:\n  KV001: {}\n",
+        ] {
+            assert!(!validator.is_valid(&as_json(bad)), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn the_init_template_points_editors_at_this_releases_schema() {
+        let first = DEFAULT_CONTRACT_YAML.lines().next().unwrap();
+        assert_eq!(
+            first,
+            format!(
+                "# yaml-language-server: $schema=https://raw.githubusercontent.com/kovallent/kv-cli/v{}/schema/contract.v1.json",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
     }
 
     #[test]
