@@ -15,7 +15,7 @@ Nothing yet.
 
 ---
 
-## [0.5.0] — 2026-10-27
+## [0.5.0] — 2026-10-29
 
 Zero-trust hardening of the scanner, the gate and `fix`. Credentials are now
 found in notebooks and config files, in every syntactic form measured by a
