@@ -930,13 +930,16 @@ fn contract_check_reports_every_problem_with_its_line() {
     );
     let (code, stdout) = kv(&dir, &["contract", "check"]);
     assert_eq!(code, Some(2), "{stdout}");
+    // Text output shows the discovered path in the platform's own spelling
+    // (`.\.kovallent.yaml` on Windows); only the JSON payload normalizes.
+    let found = Path::new(".").join(".kovallent.yaml").display().to_string();
     for want in [
-        ".kovallent.yaml:4: parameters[0].default:",
-        ".kovallent.yaml:5: parameters[1].name:",
-        ".kovallent.yaml:7: frameworks.enable[0]: unknown framework 'sparkle'",
-        "3 problems in ./.kovallent.yaml",
+        ".kovallent.yaml:4: parameters[0].default:".to_string(),
+        ".kovallent.yaml:5: parameters[1].name:".to_string(),
+        ".kovallent.yaml:7: frameworks.enable[0]: unknown framework 'sparkle'".to_string(),
+        format!("3 problems in {found}"),
     ] {
-        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
+        assert!(stdout.contains(&want), "missing {want:?} in:\n{stdout}");
     }
 
     // A type error is located too.
