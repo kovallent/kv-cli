@@ -759,6 +759,19 @@ fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutco
         .collect()
 }
 
+/// A path as the payload carries it: forward-slashed on every platform, as
+/// finding paths already are (ADR 0001), so a consumer never has to guess the
+/// separator. Only Windows is rewritten - elsewhere a backslash is a legal
+/// character in a file name, not a separator.
+fn slash_path(p: &Path) -> String {
+    let shown = p.display().to_string();
+    if cfg!(windows) {
+        shown.replace('\\', "/")
+    } else {
+        shown
+    }
+}
+
 fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
     let identity = Identity::resolve(r.identity);
     let payload = Payload {
@@ -772,7 +785,7 @@ fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
             identity_source: identity.source,
             strict: r.strict,
             contract_sha256: r.fingerprint.to_string(),
-            contract_path: r.contract_path.map(|p| p.display().to_string()),
+            contract_path: r.contract_path.map(slash_path),
             contract_expected: r.expected.map(str::to_string),
             contract_drift: r.drift,
             files_scanned: r.files.len(),
