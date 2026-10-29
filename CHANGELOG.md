@@ -11,7 +11,18 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-### Upgrading
+Nothing yet.
+
+---
+
+## [0.6.0] — 2026-10-29
+
+Contract schema polish: the contract's rules are explicit and deterministic,
+and a mistake in it is caught while typing, before committing, or on the
+first run - with every problem and its line. Fingerprints are unchanged; two
+behaviours are not, so read "Upgrading" first.
+
+### Upgrading from 0.5.x
 
 - **`*` in `scan.include` / `scan.exclude` no longer crosses folders.** Paths
   now follow `.gitignore` rules: `src/*.py` means files directly in `src/`;
@@ -786,22 +797,23 @@ Initial prototype.
 
 ## Current state
 
-As of 0.5.0: 188 unit tests, 28 end-to-end tests against the compiled binary,
+As of 0.6.0: 202 unit tests, 33 end-to-end tests against the compiled binary,
 and the labelled corpus (2,433 cases plus 2 expected skips, 0 known
-deviations). `make check` (fmt, `clippy -D warnings`, tests) passes clean;
-`make corpus` prints precision and recall.
+deviations), run by CI on Linux, macOS and Windows. `make check` (fmt,
+`clippy -D warnings`, tests) passes clean; `make corpus` prints precision and
+recall.
 
 | Module | Lines | Tests |
 | --- | --- | --- |
-| `audit.rs` | 2199 | 67 |
-| `config.rs` | 1158 | 18 |
-| `python.rs` | 1115 | 25 |
-| `main.rs` | 1278 | 7 |
+| `audit.rs` | 2282 | 69 |
+| `config.rs` | 1605 | 26 |
+| `main.rs` | 1568 | 10 |
+| `python.rs` | 1166 | 26 |
 | `fix.rs` | 674 | 30 |
+| `payload.rs` | 453 | 10 |
 | `configscan.rs` | 423 | 8 |
 | `yamlscan.rs` | 404 | 13 |
-| `payload.rs` | 453 | 10 |
-| `frameworks.rs` | 314 | 6 |
+| `frameworks.rs` | 326 | 6 |
 | `notebook.rs` | 189 | 4 |
 
 ### Known limits

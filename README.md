@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/kovallent/kv-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
@@ -146,10 +146,10 @@ Add `kv-cli` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
-      - id: kv-cli-contract   # from v0.6.0: validates .kovallent.yaml when it changes
+      - id: kv-cli-contract   # validates .kovallent.yaml when it changes
 ```
 
 `kv-cli-contract` runs `kv-cli contract check` on each changed `.kovallent.yaml`, without scanning code, so a broken contract is stopped at the commit that introduces it — with every problem and its line.
@@ -318,6 +318,8 @@ scan:
 infrastructure:
   severity: error
 ```
+
+**Upgrading to 0.6.0.** Fingerprints do not change. Two behaviours do: `*` in `scan.include` / `scan.exclude` no longer crosses folders (`src/*.py` means files directly in `src/`; write `src/**/*.py` for every depth), and a contract that fails validation is refused with exit `2` instead of loading. Run `kv-cli contract check` first — it lists anything to change, each with its line.
 
 **Upgrading to 0.5.0.** Every contract's fingerprint changes once: 0.5.0 adds `secrets.exempt_key_patterns`, `secrets.placeholder_patterns` and `infrastructure.exempt_key_patterns`, and a new field changes the serialized contract even where the file does not mention it (ADR 0001). If you pin `--expect-contract`, re-pin after upgrading — the run reports the new value at `run.contract_sha256`. The new fields take their defaults wherever a contract omits them, so every contract gets the name exemptions and placeholder shapes at once. `scan.include` and `secrets.value_patterns` are different: a contract written by an earlier `kv-cli init` spells them out in full, so it keeps its file types and detectors until you compare it with a fresh template (`kv-cli init --path /tmp/kv`) and copy what you want.
 
