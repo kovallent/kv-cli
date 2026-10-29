@@ -11,7 +11,20 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **CI on every pull request and push to `main`** (`.github/workflows/ci.yml`):
+  formatting and `clippy -D warnings` on Linux; unit, end-to-end and corpus
+  tests on Linux, macOS and Windows - the platforms the release ships for, of
+  which only macOS had ever run the tests. The Linux job prints the corpus
+  precision/recall table. `--all-targets` also keeps `examples/dump.rs`
+  compiling.
+
+### Fixed
+
+- **`run.contract_path` used backslashes on Windows.** It is now
+  forward-slashed on every platform, as finding paths already were (ADR 0001).
+  Only Windows is rewritten; elsewhere a backslash is a file-name character.
 
 ---
 

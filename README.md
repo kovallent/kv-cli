@@ -2,6 +2,7 @@
 
 **Sub-200ms local contract guardrails for data pipelines.** Airflow, dbt, PySpark, Databricks, Snowpark, Flink, Polars.
 
+[![CI](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
@@ -355,6 +356,8 @@ make check    # fmt --check + clippy -D warnings + tests
 make corpus   # precision/recall report for the labelled corpus
 make demo     # build, then audit samples/ (exits 1 by design)
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same gate on every pull request and push to `main`: `cargo fmt --check` and `clippy -D warnings` on Linux, and the full test suite — corpus included — on Linux, macOS and Windows, the platforms the release ships for.
 
 `samples/compliant.py` must always audit clean.
 
