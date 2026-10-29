@@ -1,0 +1,34 @@
+# Key names, labelled by a person: does a literal under this name hold a
+# credential? Every name below contains a default key-pattern word, so the
+# "not" rows measure false positives directly.
+# name<TAB>label (secret|not)<TAB>why
+password	secret	the canonical case
+db_password	secret	connection credential
+api_key	secret	API credential
+secret_key	secret	framework signing key (Django, Flask)
+access_token	secret	bearer credential
+client_secret	secret	OAuth client credential
+auth_token	secret	bearer credential
+private_key	secret	key material
+tokenizer	not	NLP model name; contains "token"
+max_tokens	not	LLM parameter; contains "token"
+secret_name	not	secret-store lookup key, not the secret
+secret_arn	not	AWS Secrets Manager ARN, not the secret
+credentials_path	not	path to a credentials file, not its content
+token_url	not	OAuth endpoint; contains "token"
+password_policy	not	policy name; contains "password"
+api_key_header	not	HTTP header name, e.g. X-API-Key
+dbPassword	secret	camelCase, as in JSON/YAML config
+apiKey	secret	camelCase
+secretKey	secret	camelCase
+accessToken	secret	camelCase
+clientSecret	secret	camelCase
+authToken	secret	camelCase
+privateKey	secret	camelCase
+maxTokens	not	camelCase LLM parameter
+secretName	not	camelCase secret-store lookup key
+secretArn	not	camelCase ARN
+credentialsPath	not	camelCase path
+tokenUrl	not	camelCase OAuth endpoint
+passwordPolicy	not	camelCase policy name
+apiKeyHeader	not	camelCase header name

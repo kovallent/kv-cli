@@ -2,3 +2,6 @@
 **/*.rs.bk
 *.pdb
 .env
+.DS_Store
+# kv-cli fix backups hold the original source, credentials included.
+*.kvbak

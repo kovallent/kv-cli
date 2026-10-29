@@ -2,8 +2,10 @@
 
 mod audit;
 mod config;
+mod configscan;
 mod fix;
 mod frameworks;
+mod notebook;
 mod payload;
 mod python;
 mod yamlscan;
@@ -12,8 +14,9 @@ use audit::{Engine, Finding, Scope};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use config::{Contract, CONTRACT_FILE, DEFAULT_CONTRACT_YAML, FINGERPRINT_LEN};
+use configscan::ConfigKind;
 use payload::{Identity, IdentityFlags, Payload, RunMeta, SkippedFile, SCHEMA_VERSION};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -34,6 +37,9 @@ const EXIT_OK: u8 = 0;
 const EXIT_FINDINGS: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 const EXIT_DRIFT: u8 = 3;
+
+const STAR_CTA: &str =
+    "\u{2b50} Catching drift in <200ms? Star us on GitHub: https://github.com/kovallent/kv-cli";
 
 #[derive(Parser)]
 #[command(
@@ -135,6 +141,10 @@ fn main() -> ExitCode {
         colored::control::set_override(false);
     }
 
+    let machine_output = emits_machine_output(&cli.command);
+    // Set when the run surfaced exposed credentials.
+    let mut credentials_warned = false;
+
     let code = match cli.command {
         Command::Init { path, force } => cmd_init(&path, force),
         Command::Audit {
@@ -165,16 +175,44 @@ fn main() -> ExitCode {
             config,
             dry_run,
             no_backup,
-        } => cmd_fix(&paths, config.as_deref(), dry_run, no_backup),
+        } => cmd_fix(&paths, config.as_deref(), dry_run, no_backup).map(|fix| {
+            credentials_warned = fix.credentials_externalized > 0;
+            fix.code
+        }),
     };
 
     match code {
-        Ok(c) => ExitCode::from(c),
+        Ok(c) => {
+            if shows_star_cta(c, machine_output, credentials_warned) {
+                eprintln!("{}", STAR_CTA.dimmed());
+            }
+            ExitCode::from(c)
+        }
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());
             ExitCode::from(EXIT_ERROR)
         }
     }
+}
+
+/// Commands whose stdout is meant to be parsed rather than read.
+fn emits_machine_output(command: &Command) -> bool {
+    match command {
+        Command::Schema => true,
+        Command::Audit { format, .. } => *format == Format::Json,
+        _ => false,
+    }
+}
+
+/// Whether to print the GitHub star line after a run.
+///
+/// Only after a successful run, and never alongside output meant to be parsed.
+/// It goes to stderr, so even a CI log that captures it cannot have stdout
+/// corrupted by it. Findings, tool errors and drift are not the moment to ask
+/// for anything - and neither is a run that just told someone to rotate
+/// exposed credentials, even though it exited `0`.
+fn shows_star_cta(code: u8, machine_output: bool, credentials_warned: bool) -> bool {
+    code == EXIT_OK && !machine_output && !credentials_warned
 }
 
 fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
@@ -225,11 +263,23 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
     Ok(EXIT_OK)
 }
 
-fn is_yaml(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("yml") | Some("yaml")
-    )
+/// How a file is read. Python gets the full audit; notebooks and config
+/// files are scanned for credentials only. Anything unrecognised - a file
+/// named explicitly on the command line - is read as Python.
+enum FileKind {
+    Python,
+    Notebook,
+    Config(ConfigKind),
+}
+
+fn file_kind(path: &Path) -> FileKind {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+    {
+        return FileKind::Notebook;
+    }
+    ConfigKind::of(path).map_or(FileKind::Python, FileKind::Config)
 }
 
 /// The payload schema, generated from the Rust types so it cannot drift.
@@ -319,24 +369,110 @@ fn load_engine(explicit: Option<&Path>, root: &Path) -> Result<(Engine, Option<P
     Ok((Engine::new(contract)?, path))
 }
 
-/// Expand the CLI's path arguments into a concrete file list.
-fn resolve_targets(engine: &Engine, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
+/// The directory a run belongs to: the one holding the discovered contract,
+/// or failing that the invocation root. Findings' paths are made relative to
+/// it, and symlinked files are followed only to targets inside it.
+fn project_root(contract_path: Option<&Path>, paths: &[PathBuf]) -> PathBuf {
+    contract_path
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| root_of(paths))
+}
+
+/// Expand the CLI's path arguments into a concrete file list, each file once.
+///
+/// The same file can arrive twice - named twice, or reached through a symlink
+/// as well as its real path - and would otherwise be audited and counted
+/// twice. Identity is the canonical path; the real path is kept over a link
+/// to it.
+///
+/// A file named explicitly needs no `scan.include` match - naming it is the
+/// selection - but `scan.exclude` still applies: it is the contract saying
+/// "never audit this", and pre-commit names every staged file, so a fixture
+/// excluded in CI would otherwise be audited on every commit.
+fn resolve_targets(
+    engine: &Engine,
+    paths: &[PathBuf],
+    project: &Path,
+) -> Result<audit::Collected, String> {
+    let project = if project.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        project
+    };
+    let project = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    let mut found = Vec::new();
+    let mut not_followed = 0;
+    let mut named_excluded = 0;
     for p in paths {
         if p.is_file() {
-            files.push(p.clone());
+            if engine.is_excluded(&audit::normalize_path(&project, p)) {
+                named_excluded += 1;
+                continue;
+            }
+            found.push(p.clone());
         } else if p.is_dir() {
-            files.extend(engine.collect_files(p)?);
+            let c = engine.collect_files(p, &project)?;
+            found.extend(c.files);
+            not_followed += c.symlinks_not_followed;
         } else {
             return Err(format!("no such file or directory: {}", p.display()));
         }
     }
-    files.dedup();
-    Ok(files)
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut index: HashMap<PathBuf, usize> = HashMap::new();
+    for f in found {
+        let id = f.canonicalize().unwrap_or_else(|_| f.clone());
+        match index.get(&id) {
+            Some(&i) => {
+                if files[i].is_symlink() && !f.is_symlink() {
+                    files[i] = f;
+                }
+            }
+            None => {
+                index.insert(id, files.len());
+                files.push(f);
+            }
+        }
+    }
+    Ok(audit::Collected {
+        files,
+        symlinks_not_followed: not_followed,
+        named_excluded,
+    })
+}
+
+fn no_files_error(paths: &[PathBuf], include: &[String]) -> String {
+    let searched: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "no files to audit under {}: nothing matched scan.include [{}]; \
+         a run that checks nothing cannot pass",
+        searched.join(", "),
+        include.join(", ")
+    )
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
-    read_source_raw(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    read_source_raw(path).map_err(|e| format!("cannot read {}: {}", path.display(), read_error(&e)))
+}
+
+/// Why a file could not be read, phrased for whoever has to fix it.
+///
+/// Source must be UTF-8. Python accepts other encodings through a PEP 263
+/// coding line, but kv-cli does not decode them: a file it cannot read as
+/// written is reported as unreadable - which always gates - rather than
+/// guessed at, since a wrong guess could hide exactly what the scan is for.
+fn read_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        "not valid UTF-8 - kv-cli reads UTF-8 source only; re-encode the file \
+         (e.g. `iconv -f latin1 -t utf-8`)"
+            .to_string()
+    } else {
+        e.to_string()
+    }
 }
 
 /// The bare I/O result, for callers that already have a normalized path to
@@ -406,6 +542,10 @@ struct RunReport<'a> {
     strict: bool,
     scope: Scope,
     identity: &'a IdentityFlags<'a>,
+    /// Symlinks the walk did not follow; see `audit::Collected`.
+    symlinks_not_followed: usize,
+    /// Named files skipped because `scan.exclude` covers them.
+    named_excluded: usize,
 }
 
 fn cmd_audit(
@@ -418,16 +558,24 @@ fn cmd_audit(
 ) -> Result<u8, String> {
     let root = root_of(paths);
     let (engine, contract_path) = load_engine(config, &root)?;
-    let files = resolve_targets(&engine, paths)?;
-
     // Findings are born with a normalized path so their identity does not
     // depend on how the scan was invoked. Prefer the directory holding the
     // discovered contract; fall back to the invocation root.
-    let base = contract_path
-        .as_deref()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| root_of(paths));
+    let base = project_root(contract_path.as_deref(), paths);
+    let audit::Collected {
+        files,
+        symlinks_not_followed,
+        named_excluded,
+    } = resolve_targets(&engine, paths, &base)?;
+    // A run that checked nothing is unverifiable, and an unverifiable run
+    // never passes: "PASS 0 files are compliant" is what a wrong path or a
+    // mistyped include glob looked like. Exit 2 sends it to whoever operates
+    // the gate, which is who misconfigured it. The exception is files named
+    // outright and excluded by the contract - a commit that stages only a
+    // fixture - which is the contract's own decision, not a misconfiguration.
+    if files.is_empty() && named_excluded == 0 {
+        return Err(no_files_error(paths, &engine.contract.scan.include));
+    }
 
     let mut findings: Vec<Finding> = Vec::new();
     // Two concerns, kept apart at the source rather than merged into prose:
@@ -440,28 +588,12 @@ fn cmd_audit(
     let mut skipped: Vec<SkippedFile> = Vec::new();
     let mut detected: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut scope = Scope::default();
-    for file in &files {
-        let rel = audit::normalize_path(&base, file);
-        match read_source_raw(file) {
-            Ok(src) if is_yaml(file) => findings.extend(engine.audit_yaml(&rel, &src)),
-            Ok(src) => {
-                let analysis = python::analyze(&src);
-                // A file we cannot parse is a hole in the gate, not a pass:
-                // tree-sitter's partial parse may yield no findings at all,
-                // and that must be visible rather than silently counted as a
-                // clean file.
-                if analysis.has_error {
-                    skipped.push(SkippedFile::syntax_error(rel.clone()));
-                }
-                let ctx = engine.context(&analysis);
-                scope.add(ctx.scope(&analysis));
-                for name in ctx.frameworks() {
-                    detected.entry(name).or_insert(0);
-                    *detected.get_mut(name).unwrap() += 1;
-                }
-                findings.extend(ctx.audit(&rel, &src, &analysis));
-            }
-            Err(e) => skipped.push(SkippedFile::unreadable(rel, e.to_string())),
+    for outcome in audit_files(&engine, &base, &files) {
+        findings.extend(outcome.findings);
+        skipped.extend(outcome.skipped);
+        scope.add(outcome.scope);
+        for name in outcome.frameworks {
+            *detected.entry(name).or_insert(0) += 1;
         }
     }
 
@@ -500,6 +632,8 @@ fn cmd_audit(
         strict,
         scope,
         identity,
+        symlinks_not_followed,
+        named_excluded,
     };
 
     match format {
@@ -517,6 +651,112 @@ fn cmd_audit(
     } else {
         EXIT_OK
     })
+}
+
+/// Everything one file contributes to a run.
+#[derive(Default)]
+struct FileOutcome {
+    findings: Vec<Finding>,
+    skipped: Option<SkippedFile>,
+    scope: Scope,
+    frameworks: Vec<&'static str>,
+}
+
+fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
+    let rel = audit::normalize_path(base, file);
+    let src = match read_source_raw(file) {
+        Ok(src) => src,
+        Err(e) => {
+            return FileOutcome {
+                skipped: Some(SkippedFile::unreadable(rel, read_error(&e))),
+                ..Default::default()
+            }
+        }
+    };
+    match file_kind(file) {
+        FileKind::Python => {}
+        FileKind::Config(kind) => {
+            return FileOutcome {
+                findings: engine.audit_config(&rel, &src, kind),
+                ..Default::default()
+            }
+        }
+        FileKind::Notebook => {
+            let (findings, error) = engine.audit_notebook(&rel, &src);
+            // Not a readable notebook: its code was not analysed, which must
+            // be visible - though value patterns still read its raw text.
+            let skipped = error.map(|why| SkippedFile {
+                detail: Some(format!(
+                    "not a readable notebook ({why}); only value patterns were applied"
+                )),
+                ..SkippedFile::syntax_error(rel.clone())
+            });
+            return FileOutcome {
+                findings,
+                skipped,
+                ..Default::default()
+            };
+        }
+    }
+    let analysis = python::analyze(&src);
+    let ctx = engine.context(&analysis);
+    FileOutcome {
+        findings: ctx.audit(&rel, &src, &analysis),
+        // A file we cannot parse is a hole in the gate, not a pass:
+        // tree-sitter's partial parse may yield no findings at all, and that
+        // must be visible rather than silently counted as a clean file.
+        skipped: analysis
+            .has_error
+            .then(|| SkippedFile::syntax_error(rel.clone())),
+        scope: ctx.scope(&analysis),
+        frameworks: ctx.frameworks(),
+    }
+}
+
+/// Audit `files` across the machine's cores.
+///
+/// Parsing dominates a run - profiling puts nearly all of it inside
+/// tree-sitter - and files are independent, so this is where the time goes.
+/// Workers pull the next index from a shared counter, which keeps one huge
+/// file from stalling a pre-assigned batch. Outcomes are returned in input
+/// order, so the output is identical to a sequential run's.
+fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutcome> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(files.len());
+    if workers <= 1 {
+        return files.iter().map(|f| audit_file(engine, base, f)).collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let mut outcomes: Vec<Option<FileOutcome>> = files.iter().map(|_| None).collect();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(file) = files.get(i) else {
+                            return done;
+                        };
+                        done.push((i, audit_file(engine, base, file)));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (i, outcome) in handle.join().expect("audit worker panicked") {
+                outcomes[i] = Some(outcome);
+            }
+        }
+    });
+    outcomes
+        .into_iter()
+        .map(|o| o.expect("every file is audited exactly once"))
+        .collect()
 }
 
 fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
@@ -581,6 +821,26 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             list.join(", ").cyan()
         );
     }
+    if r.named_excluded > 0 {
+        println!(
+            "  {} {} named file{} excluded by scan.exclude",
+            "\u{b7}".dimmed(),
+            r.named_excluded,
+            if r.named_excluded == 1 { "" } else { "s" }
+        );
+    }
+    if r.symlinks_not_followed > 0 {
+        println!(
+            "  {} {} symlink{} not followed (a directory, or a target outside the project)",
+            "\u{b7}".dimmed(),
+            r.symlinks_not_followed,
+            if r.symlinks_not_followed == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    }
     if r.scope.functions_total > 0 {
         let s = &r.scope;
         println!(
@@ -618,7 +878,9 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             println!("\n{}", f.path.clone().underline());
             current = Some(f.path.as_str());
         }
-        let is_error = r.strict || f.severity.is_error();
+        // Intrinsic severity, as everywhere else: `--strict` changes what
+        // gates, which the summary line reports, not what a finding is.
+        let is_error = f.severity.is_error();
         let label = if is_error {
             "error".red().bold()
         } else {
@@ -698,14 +960,25 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             };
         if r.gating > 0 {
             println!("{} {summary}{gate_note}", "FAIL".red().bold());
-            println!(
-                "{}",
-                "run `kv-cli fix` to apply the standard fixes".dimmed()
-            );
+            // `fix` acts on findings; it cannot help a run that failed only
+            // because a file could not be read.
+            if !findings.is_empty() {
+                println!(
+                    "{}",
+                    "run `kv-cli fix` to apply the standard fixes".dimmed()
+                );
+            }
         } else {
             println!("{} {summary}{gate_note}", "PASS".green().bold());
         }
     }
+}
+
+/// What a `fix` run tells `main` beyond its exit code.
+struct FixOutcome {
+    code: u8,
+    /// Credentials moved out of the source, each one now to be rotated.
+    credentials_externalized: usize,
 }
 
 fn cmd_fix(
@@ -713,10 +986,15 @@ fn cmd_fix(
     config: Option<&Path>,
     dry_run: bool,
     no_backup: bool,
-) -> Result<u8, String> {
+) -> Result<FixOutcome, String> {
     let root = root_of(paths);
-    let (engine, _) = load_engine(config, &root)?;
-    let files = resolve_targets(&engine, paths)?;
+    let (engine, contract_path) = load_engine(config, &root)?;
+    let files = resolve_targets(
+        &engine,
+        paths,
+        &project_root(contract_path.as_deref(), paths),
+    )?
+    .files;
 
     println!(
         "{} {}{}",
@@ -732,6 +1010,9 @@ fn cmd_fix(
     let mut changed_files = 0usize;
     let mut total_changes = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    // Credentials moved out of source, and the backups that still hold them.
+    let mut externalized = 0usize;
+    let mut credential_backups: Vec<PathBuf> = Vec::new();
 
     for file in &files {
         let src = match read_source(file) {
@@ -741,6 +1022,33 @@ fn cmd_fix(
                 continue;
             }
         };
+        // Config files and notebooks are never rewritten - the right
+        // replacement (`env_var()`, a vault reference, a CI secret, a cleared
+        // output) depends on what reads the file - but what `audit` reports
+        // there must not be answered with "nothing to fix".
+        let shown = file.display().to_string();
+        let manual = match file_kind(file) {
+            FileKind::Python => None,
+            FileKind::Config(kind) => Some((
+                engine.audit_config(&shown, &src, kind),
+                format!(
+                    "credential in {} - move it to the environment or a secret store by hand",
+                    kind.label()
+                ),
+            )),
+            FileKind::Notebook => Some((
+                engine.audit_notebook(&shown, &src).0,
+                "credential in notebook - remove it by hand, and clear saved outputs \
+                 that printed it"
+                    .to_string(),
+            )),
+        };
+        if let Some((findings, what)) = manual {
+            for f in findings {
+                skipped.push(format!("{shown}:{} {what}", f.line));
+            }
+            continue;
+        }
         let report = fix::fix_source(&engine, file, &src);
         skipped.extend(report.skipped.iter().cloned());
 
@@ -753,6 +1061,7 @@ fn cmd_fix(
 
         changed_files += 1;
         total_changes += report.change_count();
+        externalized += report.secrets_externalized.len();
         println!("\n{}", file.display().to_string().underline());
         for (func, param) in &report.params_added {
             println!(
@@ -776,8 +1085,21 @@ fn cmd_fix(
             if !no_backup && !backup_suffix.is_empty() {
                 let mut backup = file.clone().into_os_string();
                 backup.push(backup_suffix);
-                std::fs::copy(file, &backup)
-                    .map_err(|e| format!("cannot write backup for {}: {e}", file.display()))?;
+                let backup = PathBuf::from(backup);
+                if !write_backup(&backup, &src)
+                    .map_err(|e| format!("cannot write backup for {}: {e}", file.display()))?
+                {
+                    println!(
+                        "  {} kept existing backup {}",
+                        "\u{b7}".dimmed(),
+                        backup.display()
+                    );
+                }
+                // Written now or kept from an earlier run, it predates this
+                // rewrite - so it holds the credential this run removed.
+                if !report.secrets_externalized.is_empty() {
+                    credential_backups.push(backup);
+                }
             }
             std::fs::write(file, new_source)
                 .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
@@ -811,8 +1133,69 @@ fn cmd_fix(
         println!("{}", "review the diff, then re-run `kv-cli audit`".dimmed());
     }
 
-    // Secrets that were externalised still need real values in the environment.
-    Ok(EXIT_OK)
+    print_credential_warnings(
+        externalized,
+        &credential_backups,
+        &engine.contract.fix.backup_suffix,
+    );
+    Ok(FixOutcome {
+        code: EXIT_OK,
+        credentials_externalized: externalized,
+    })
+}
+
+/// Moving a credential out of the source does not make it secret again.
+///
+/// It may already be in git history, a CI log or a teammate's clone, so the
+/// only safe assumption is that it is exposed and must be rotated. And the
+/// `fix` backup is a plaintext copy of exactly what was removed, sitting next
+/// to the file where `git add .` will pick it up. Both are said every time,
+/// because the rewrite alone reads like the problem is solved.
+fn print_credential_warnings(externalized: usize, backups: &[PathBuf], suffix: &str) {
+    if externalized == 0 {
+        return;
+    }
+    println!();
+    println!(
+        "  {} {externalized} credential{} {} in source: treat {it} as exposed - rotate, \
+         then set the new value in the environment; removing {it} from the file \
+         does not remove {it} from git history",
+        "rotate:".red().bold(),
+        if externalized == 1 { "" } else { "s" },
+        if externalized == 1 { "was" } else { "were" },
+        it = if externalized == 1 { "it" } else { "them" },
+    );
+    if backups.is_empty() {
+        return;
+    }
+    println!(
+        "  {} still holding the original plaintext - delete after reviewing the \
+         diff, and add `*{suffix}` to .gitignore so a backup is never committed:",
+        "backups:".red().bold()
+    );
+    for b in backups {
+        println!("        {}", b.display());
+    }
+}
+
+/// Write `contents` to `backup` unless a backup is already there.
+///
+/// An existing backup is never overwritten: it holds the source as it was
+/// before kv-cli first touched it, and a second `fix` run would otherwise
+/// replace it with already-rewritten code - losing the only copy of the
+/// original. `create_new` makes the check and the create one step. Returns
+/// whether a backup was written.
+fn write_backup(backup: &Path, contents: &str) -> std::io::Result<bool> {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(backup)
+    {
+        Ok(mut out) => out.write_all(contents.as_bytes()).map(|()| true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -854,6 +1237,29 @@ mod tests {
     fn a_valid_fingerprint_round_trips_through_the_validator() {
         let fp = Contract::default().fingerprint();
         assert_eq!(parse_expected_contract(&fp).unwrap(), fp);
+    }
+
+    #[test]
+    fn star_cta_only_follows_a_successful_run() {
+        assert!(shows_star_cta(EXIT_OK, false, false));
+        // Not on findings, tool errors or drift.
+        for code in [EXIT_FINDINGS, EXIT_ERROR, EXIT_DRIFT] {
+            assert!(!shows_star_cta(code, false, false), "exit {code}");
+        }
+        // Never alongside output meant to be parsed.
+        assert!(!shows_star_cta(EXIT_OK, true, false));
+        // Never right after telling someone to rotate exposed credentials.
+        assert!(!shows_star_cta(EXIT_OK, false, true));
+    }
+
+    #[test]
+    fn json_and_schema_count_as_machine_output() {
+        let cli = |args: &[&str]| Cli::parse_from(["kv-cli"].iter().chain(args)).command;
+        assert!(emits_machine_output(&cli(&["schema"])));
+        assert!(emits_machine_output(&cli(&["audit", "--format", "json"])));
+        assert!(!emits_machine_output(&cli(&["audit"])));
+        assert!(!emits_machine_output(&cli(&["fix", "-n"])));
+        assert!(!emits_machine_output(&cli(&["init"])));
     }
 
     #[test]

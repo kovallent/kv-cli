@@ -1,0 +1,9 @@
+{
+  "database": {
+    "user": "svc_loader",
+    "dbPassword": "s3cr3t-production-pw"
+  },
+  "secretName": "prod/warehouse/db",
+  "tokenUrl": "https://auth.example.com/oauth/token",
+  "apiKeyHeader": "X-API-Key"
+}

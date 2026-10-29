@@ -3,7 +3,7 @@
 **Sub-200ms local contract guardrails for data pipelines.** Airflow, dbt, PySpark, Databricks, Snowpark, Flink, Polars.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/kovallent/kv-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
@@ -13,7 +13,7 @@
 
 That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — init, fail, fix, pass. Five things are worth noticing:
 
-- **`init` writes the contract and says what it enabled** — two required parameters, 16 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
+- **`init` writes the contract and says what it enabled** — two required parameters, 21 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
 - **`deploy_service` is missing `target_environment`.** The function runs fine and passes tests; in production it silently takes the dev default. No linter has a rule for this.
 - **The secret value is redacted in the output** — `value "s3…" (<redacted>, 20 chars)`. A tool that reports credentials in CI logs has moved the leak, not closed it.
 - **`fix` rewrites it rather than describing it**: `DB_PASSWORD` now reads `os.environ["DB_PASSWORD"]`, with `import os` inserted above the existing imports. 18 changes land automatically; the hardcoded *default* on line 90 is deliberately left as a `manual:` item, because `os.environ[...]` in a default binds once at import time rather than per call. Thread that one line yourself and the re-run reports `PASS`.
@@ -34,7 +34,7 @@ curl -sSL https://github.com/kovallent/kv-cli/releases/latest/download/kv-cli-x8
 ./kv-cli audit ~/your-pipeline-repo
 ```
 
-Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1` if there are findings.
+Typical run: **about 10ms on the bundled samples, about 0.3s on a 500-file repository** (8 cores; files are scanned in parallel). Exit `0` if compliant, `1` if there are findings.
 
 ### Or clone and run the bundled samples
 
@@ -43,12 +43,14 @@ Typical run: **under 200ms on a 47-file repository.** Exit `0` if compliant, `1`
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
 ./kv-cli init                           # created wrote ./.kovallent.yaml
-./kv-cli audit --strict samples/        # FAIL 13 errors, 6 warnings — by design
+./kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
 ./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 ./kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
 
-`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors.
+`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors. `samples/credentials.py` shows every form a hardcoded credential takes — subscripts, `getenv` fallbacks, comparisons, a token split across a concatenation, camelCase names — next to names that are *not* credentials (`secret_name`, `token_url`, `tokenizer`). `samples/configs/` covers `.env`, `airflow.cfg`, `secrets.toml` and camelCase JSON, with a `.env.example` that must stay clean; `samples/notebooks/` has a notebook whose saved output printed a token.
+
+The counts above are pinned by a test against the real output, so they cannot drift from what the tool reports.
 
 > If you build from source instead of downloading the binary, budget a few minutes for the first compile — `cargo` builds the tree-sitter grammar and needs a C compiler. `make demo` builds and then audits `samples/` in one step.
 
@@ -56,9 +58,11 @@ git clone https://github.com/kovallent/kv-cli && cd kv-cli
 
 Three common causes, all of them by design:
 
-1. **Your models are SQL.** Analysis is Python only. A hardcoded relation in a `.sql` file is not seen.
+1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only. A hardcoded relation in a `.sql` file is not seen.
 2. **No contract file, so defaults applied.** Run `kv-cli init` and enable the rules you want.
 3. **The framework owns your signatures.** Check the scope line in the output — if `in scope` is low relative to the total, that is the exemption working, not a miss. See [Framework support](#framework-support).
+
+If no file matched at all, that is not a pass: the run exits `2` with `no files to audit` and names the globs it tried.
 
 ---
 
@@ -125,7 +129,9 @@ There is currently **no PyPI or Homebrew distribution**. `pip install kv-cli` wi
 | **2** | Tool error | Whoever operates the gate |
 | **3** | Contract drift | Whoever owns the contract |
 
-Resolution is first-match-wins in the order 2, 3, 1, 0. An unverifiable run never passes, and drift outranks findings — findings computed against the wrong contract are not a meaningful result.
+Resolution is first-match-wins in the order 2, 3, 1, 0. An unverifiable run never passes, and drift outranks findings — findings computed against the wrong contract are not a meaningful result. A run that resolves **no files to scan** is exit `2`: a wrong path or a mistyped `scan.include` glob would otherwise report `PASS 0 files are compliant`.
+
+After a successful run, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. Because it is on stderr it shows in CI logs but never in stdout, and it is never printed alongside `--format json` or `schema` output or after a run that exits non-zero. It makes no network call.
 
 ---
 
@@ -136,7 +142,7 @@ Add `kv-cli` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.4.1
+    rev: v0.5.0
     hooks:
       - id: kv-cli
 ```
@@ -166,11 +172,32 @@ A hook is advisory by construction — `--no-verify` skips it, and a fresh clone
 
 ### Auto-fixing behaviour
 
-`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`.
+`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`; an existing backup is never overwritten, so it always holds the source as it was before the first `fix`. When a credential is moved out of the source, `fix` lists the backups that still hold it in plaintext — add `*.kvbak` to `.gitignore` and delete them after review — and reminds you to rotate it: a value that was ever committed is in git history whatever the file says now.
+
+### Where each rule applies
+
+| Files | KV001 | KV002 | KV003 |
+| --- | --- | --- | --- |
+| Python (`.py`) | ✓ | ✓ | ✓ |
+| Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | |
+| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | |
+
+Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
+
+Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
+
+### How KV002 decides
+
+A literal is a credential when either rule says so:
+
+1. **Its shape** — a value pattern (AWS, GitHub, Stripe, Google, JWT, PEM, a URL with a password, …) matches it, under any name and anywhere in the file, comments and notebook outputs included — and across an implicit concatenation, so `"ghp_abc" "def"` is read as the one token it spells.
+2. **Its name** — it is assigned to, or compared against (`if password == "..."`), a name matching `secrets.key_patterns` (`*password*`, `*token*`, …), unless the name only *refers to* a credential (`secrets.exempt_key_patterns`: `secret_name`, `token_url`, `credentials_path`, …) or the value is a placeholder (`allow_values`, `placeholder_patterns`: `changeme`, `your-api-key-here`, `<token>`), a reference (`${VAR}`, `{{ var }}`, an f-string substitution) or shorter than `min_value_length`.
+
+Names are matched both as written (lowercased) and in `snake_case`, so `secretName` meets the `*_name` exemption and `privateKey` meets `*private_key*`. Exemptions and placeholders apply to the name rule only, so a real token is reported whatever it is called. A pattern that matches everything (`"*"`) is rejected: to turn a rule off, say so (`key_patterns: []`).
 
 ### Suppressions
 
-Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`.
+Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`. The marker counts only inside a comment — in a string literal it is data, not intent. JSON has no comments; exclude a fixture file with `scan.exclude` instead.
 
 ---
 
@@ -203,9 +230,9 @@ frameworks:
   disable: [databricks]  # never apply, even when detected
 ```
 
-### dbt YAML
+### dbt YAML and other config files
 
-`profiles.yml`, `dbt_project.yml` and any other scanned YAML are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}` and `${VAR}` are recognised as correct and never flagged. `KV003` is deliberately not applied to YAML: a per-target config file is exactly where environment-specific values belong.
+`profiles.yml`, `dbt_project.yml` and every other scanned config file are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}`, `${VAR}` and INI `%(name)s` interpolation are recognised as correct and never flagged. A framework's own config file activates its profile: `profiles.yml` brings in dbt's credential keys, `airflow.cfg` brings in Airflow's (`fernet_key`, …). `KV003` is deliberately not applied: a per-target config file is exactly where environment-specific values belong.
 
 ---
 
@@ -225,19 +252,26 @@ frameworks:
 
 `.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), and the secret detectors. Run `kv-cli init` for a fully commented template.
 
+Any key you leave out keeps its default, so a contract can be as small as the rules you change. Unknown keys are rejected (exit `2`): a misspelled key would otherwise silently fall back to its default.
+
 ```yaml
-version: "1"
-rules:
-  KV001:
-    enabled: true
+version: 1
+parameters:
+  - name: target_environment
+    annotation: str
+    default: '"dev"'
     severity: error
-    strict_parameters: true
-  KV002:
-    enabled: true
-    severity: critical
-    ignore_paths:
-      - "tests/fixtures/*"
+applies_to:
+  decorators: ["my_org.task"]
+scan:
+  exclude:
+    - "**/.venv/**"
+    - "tests/fixtures/**"
+infrastructure:
+  severity: error
 ```
+
+**Upgrading to 0.5.0.** Every contract's fingerprint changes once: 0.5.0 adds `secrets.exempt_key_patterns`, `secrets.placeholder_patterns` and `infrastructure.exempt_key_patterns`, and a new field changes the serialized contract even where the file does not mention it (ADR 0001). If you pin `--expect-contract`, re-pin after upgrading — the run reports the new value at `run.contract_sha256`. The new fields take their defaults wherever a contract omits them, so every contract gets the name exemptions and placeholder shapes at once. `scan.include` and `secrets.value_patterns` are different: a contract written by an earlier `kv-cli init` spells them out in full, so it keeps its file types and detectors until you compare it with a fresh template (`kv-cli init --path /tmp/kv`) and copy what you want.
 
 ---
 
@@ -294,7 +328,7 @@ Signatures come from the tree too, so multi-line parameter lists, `async def`, `
 1. A parameter default (`def f(password="...")`) is reported but never auto-fixed: `os.environ[...]` in a default is evaluated once at import time, not per call, so the rewrite would change behaviour. `fix` prints it as a `manual:` item.
 2. A file with syntax errors is audited on tree-sitter's partial parse and flagged in the output, but `fix` refuses to rewrite it.
 
-YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a parser: `serde_yaml` would give the structure but not line numbers, and a finding without a line number is not actionable. It tracks block scalars so prose inside a `|` block is not mistaken for mapping keys.
+Config files are handled by line scanners rather than parsers — `src/yamlscan.rs` for YAML, `src/configscan.rs` for `.env`, INI, TOML and JSON — because the parsers give structure but not line numbers, and a finding without a line number is not actionable. The YAML scanner tracks block scalars so prose inside a `|` block is not mistaken for mapping keys; the JSON scanner tokenizes strings so a match never begins inside one. Notebooks (`src/notebook.rs`) join their code cells into one Python source — an import in the first cell still informs the fifth — and map each finding back to the line in the `.ipynb` file.
 
 ---
 
@@ -307,7 +341,7 @@ YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a pa
 | Data-stack aware (Airflow, dbt, Spark, Snowpark) | no | no | no | **yes** |
 | Enforces a **required-parameter contract** | no | no | no | **yes** |
 | Runs locally with nothing transmitted | yes | yes | usually not | **yes** |
-| Typical runtime | instant | instant | minutes | **<200ms on the 47-file sample repo** |
+| Typical runtime | instant | instant | minutes | **~10ms on the bundled samples; ~0.3s on 500 files** |
 
 `detect-secrets` finds high-entropy strings; `KV002` finds a literal assigned to a name your contract forbids, which also catches `password = "dev"`. Neither has any concept of "this function must accept `target_environment`."
 
@@ -316,12 +350,15 @@ YAML is handled separately by `src/yamlscan.rs`, a line scanner rather than a pa
 ## Development
 
 ```bash
-make test     # unit tests (121)
+make test     # unit, end-to-end and corpus tests
 make check    # fmt --check + clippy -D warnings + tests
+make corpus   # precision/recall report for the labelled corpus
 make demo     # build, then audit samples/ (exits 1 by design)
 ```
 
-`samples/compliant.py` must always audit clean. `cargo run --example dump <file.py>` prints the parse tree with field names — useful when adding a rule that needs a node kind you have not handled yet.
+`samples/compliant.py` must always audit clean.
+
+**The labelled corpus** (`tests/corpus/`) states what kv-cli *should* report, independently of what it does. Hand-written cases mark each expected finding with `expect: KV00n` on its line (or in a `<file>.expect` sidecar for JSON and notebooks); `matrix/names.tsv` and `matrix/values.tsv` hold labelled key names and values that are expanded across every syntactic form. Every disagreement is listed in `baseline.tsv` as a known false positive or miss, and the test fails when that list changes either way — so a regression fails, and so does an unrecorded improvement. After an intended change, run `KV_CORPUS_BLESS=1 cargo test --test corpus` and review the baseline diff. Cases write credentials as placeholders (`@@GITHUB_TOKEN@@`) that become fakes only in a temporary copy, so nothing token-shaped is committed. `cargo run --example dump <file.py>` prints the parse tree with field names — useful when adding a rule that needs a node kind you have not handled yet.
 
 ### Dependency notes
 

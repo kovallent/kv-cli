@@ -39,6 +39,10 @@ check: ## Format check, clippy, and tests
 fmt: ## Format the source tree
 	$(CARGO) fmt
 
+.PHONY: corpus
+corpus: ## Labelled corpus: precision/recall report against tests/corpus
+	$(CARGO) test --test corpus -- --nocapture
+
 .PHONY: demo
 demo: release ## Audit the bundled sample project (expected to fail)
 	@echo "--- kv-cli audit samples/ ---"

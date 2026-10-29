@@ -1,12 +1,15 @@
 //! The compliance engine: file discovery, contract checks, secret detection.
 
 use crate::config::{self, Contract, Severity, FINGERPRINT_LEN};
+use crate::configscan::{self, ConfigKind};
 use crate::frameworks::{self, FrameworkProfile};
-use crate::python::{self, Analysis, Binding, FunctionDef};
-use crate::yamlscan;
+use crate::notebook;
+use crate::python::{self, Analysis, Binding, BindingSource, FunctionDef};
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 pub const CODE_MISSING_PARAM: &str = "KV001";
@@ -166,6 +169,23 @@ pub fn normalize_path(base: &Path, file: &Path) -> String {
     }
 }
 
+/// What a directory walk found.
+///
+/// Symlinks are followed only to a *file* that resolves inside the project.
+/// A link committed to a repository stores a path, not content, so a target
+/// outside the project is not this repository's code - and following one
+/// would let an untrusted change point the scanner at `~/.aws/credentials`
+/// on a CI runner. Linked directories are not followed either, which rules
+/// out cycles; their contents are scanned through their real paths. What is
+/// not followed is counted rather than silently dropped.
+#[derive(Debug, Default)]
+pub struct Collected {
+    pub files: Vec<PathBuf>,
+    pub symlinks_not_followed: usize,
+    /// Files named on the command line that `scan.exclude` covers.
+    pub named_excluded: usize,
+}
+
 /// A framework profile with its regexes compiled.
 struct CompiledFramework {
     profile: &'static FrameworkProfile,
@@ -215,6 +235,32 @@ impl Engine {
             }
         }
 
+        // A pattern of nothing but `*` matches every name or value, which
+        // would switch a rule off while the contract still looks configured -
+        // the failure the key rule exists to catch. Turning a rule off has
+        // explicit spellings (`key_patterns: []`, `enabled: false`).
+        for (field, patterns) in [
+            (
+                "secrets.exempt_key_patterns",
+                &contract.secrets.exempt_key_patterns,
+            ),
+            (
+                "secrets.placeholder_patterns",
+                &contract.secrets.placeholder_patterns,
+            ),
+            (
+                "infrastructure.exempt_key_patterns",
+                &contract.infrastructure.exempt_key_patterns,
+            ),
+        ] {
+            if let Some(p) = patterns.iter().find(|p| p.chars().all(|c| c == '*')) {
+                return Err(format!(
+                    "{field} entry {p:?} matches everything, which disables the rule; \
+                     to turn it off say so explicitly (`key_patterns: []` or `enabled: false`)"
+                ));
+            }
+        }
+
         // Reject unknown framework names up front rather than silently doing
         // nothing at scan time.
         for name in contract
@@ -250,14 +296,23 @@ impl Engine {
     }
 
     /// Recursively collect files matching the contract's include/exclude globs.
-    pub fn collect_files(&self, root: &Path) -> Result<Vec<PathBuf>, String> {
-        let mut out = Vec::new();
-        self.walk(root, root, &mut out)?;
-        out.sort();
+    ///
+    /// `project` is the canonical directory a symlinked file's target must
+    /// resolve inside to be followed - see [`Collected`].
+    pub fn collect_files(&self, root: &Path, project: &Path) -> Result<Collected, String> {
+        let mut out = Collected::default();
+        self.walk(root, root, project, &mut out)?;
+        out.files.sort();
         Ok(out)
     }
 
-    fn walk(&self, root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    fn walk(
+        &self,
+        root: &Path,
+        dir: &Path,
+        project: &Path,
+        out: &mut Collected,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
         for entry in entries {
@@ -272,26 +327,44 @@ impl Engine {
                 if self.is_excluded(&format!("{rel}/x")) || self.is_excluded(&rel) {
                     continue;
                 }
-                self.walk(root, &path, out)?;
-            } else if file_type.is_file() {
-                if self.is_excluded(&rel) {
-                    continue;
+                self.walk(root, &path, project, out)?;
+                continue;
+            }
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            if self.is_excluded(&rel) {
+                continue;
+            }
+            let target = file_type
+                .is_symlink()
+                .then(|| std::fs::canonicalize(&path).ok());
+            let is_dir_link = matches!(&target, Some(Some(t)) if t.is_dir());
+            let included = self
+                .contract
+                .scan
+                .include
+                .iter()
+                .any(|p| python::path_match(p, &rel));
+            match target {
+                // A regular file.
+                None if included => out.files.push(path),
+                // A link to a file inside the project.
+                Some(Some(t)) if included && t.is_file() && t.starts_with(project) => {
+                    out.files.push(path)
                 }
-                if self
-                    .contract
-                    .scan
-                    .include
-                    .iter()
-                    .any(|p| python::path_match(p, &rel))
-                {
-                    out.push(path);
-                }
+                // A link that would have been scanned, or a linked directory
+                // that might hold such files: not followed, but counted.
+                Some(_) if included || is_dir_link => out.symlinks_not_followed += 1,
+                _ => {}
             }
         }
         Ok(())
     }
 
-    fn is_excluded(&self, rel: &str) -> bool {
+    /// True when `rel`, a `/`-separated path relative to the project, is
+    /// matched by `scan.exclude`.
+    pub fn is_excluded(&self, rel: &str) -> bool {
         self.contract
             .scan
             .exclude
@@ -326,25 +399,28 @@ impl Engine {
         }
     }
 
-    /// Context for a YAML config file. There are no imports to detect from, so
-    /// auto-detection falls back to recognising dbt project files by name.
-    pub fn yaml_context(&self, path: &Path) -> FileContext<'_> {
+    /// Context for a config file or notebook pass. There are no imports to
+    /// detect from, so auto-detection falls back to recognising a framework's
+    /// own config files by name: dbt's `profiles.yml` / `dbt_project.yml` and
+    /// Airflow's `airflow.cfg`, where `fernet_key` and friends live.
+    pub fn config_context(&self, path: &Path) -> FileContext<'_> {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let looks_like_dbt = matches!(
-            name.as_str(),
-            "profiles.yml" | "profiles.yaml" | "dbt_project.yml" | "dbt_project.yaml"
-        );
+        let detected = match name.as_str() {
+            "profiles.yml" | "profiles.yaml" | "dbt_project.yml" | "dbt_project.yaml" => {
+                Some("dbt")
+            }
+            "airflow.cfg" => Some("airflow"),
+            _ => None,
+        };
         let active = self
             .frameworks
             .iter()
             .filter(|f| match self.explicitly_enabled(f) {
                 Some(decided) => decided,
-                None => {
-                    self.contract.frameworks.is_auto() && looks_like_dbt && f.profile.name == "dbt"
-                }
+                None => self.contract.frameworks.is_auto() && detected == Some(f.profile.name),
             })
             .collect();
         FileContext {
@@ -353,67 +429,190 @@ impl Engine {
         }
     }
 
-    /// Audit a YAML config file for credentials and infrastructure literals.
+    #[cfg(test)]
     pub fn audit_yaml(&self, path: &str, source: &str) -> Vec<Finding> {
-        let ctx = self.yaml_context(Path::new(path));
+        self.audit_config(path, source, ConfigKind::Yaml)
+    }
+
+    /// Audit a config file - YAML, `.env`, INI, TOML, JSON - for credentials.
+    ///
+    /// KV003 is deliberately not applied: a per-environment config file is
+    /// exactly where environment-specific values belong.
+    pub fn audit_config(&self, path: &str, source: &str, kind: ConfigKind) -> Vec<Finding> {
+        let ctx = self.config_context(Path::new(path));
         let mut out = Vec::new();
         let secrets = &self.contract.secrets;
-        let infra = &self.contract.infrastructure;
-
-        for scalar in yamlscan::scalars(source) {
-            // `{{ env_var(...) }}` and `${VAR}` are exactly what we want to see.
-            if yamlscan::is_templated(&scalar.value) || scalar.value.is_empty() {
-                continue;
-            }
-
-            if secrets.enabled
-                && !scalar.raw.contains(&secrets.ignore_marker)
-                && scalar.value.chars().count() >= secrets.min_value_length
-                && !secrets
-                    .allow_values
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(scalar.value.trim()))
-            {
-                if let Some(fw) = ctx.matches_key(
-                    &scalar.key,
-                    |p| p.secret_keys,
-                    |c| &c.contract.secrets.key_patterns,
-                ) {
-                    out.push(Finding {
-                        fingerprint: finding_fingerprint(
-                            path,
-                            CODE_HARDCODED_SECRET,
-                            &scalar.key,
-                            "key_pattern",
-                        ),
-                        path: path.to_string(),
-                        symbol: scalar.key.clone(),
-                        subject: "key_pattern".to_string(),
-                        line: scalar.line,
-                        code: CODE_HARDCODED_SECRET,
-                        severity: Severity::Error,
-                        message: format!("`{}` holds a plaintext credential", scalar.key),
-                        detail: Some(format!(
-                            "value {} - use `{{{{ env_var('...') }}}}` or a secret store",
-                            redact(&scalar.value)
-                        )),
-                        framework: fw,
-                        kind: FindingKind::HardcodedSecret {
-                            detector: "key_pattern".into(),
-                            key: Some(scalar.key.clone()),
-                        },
-                    });
-                    continue;
-                }
-            }
-
-            // KV003 is deliberately not applied to YAML: a per-target config
-            // file is exactly where environment-specific values belong.
-            let _ = infra;
+        if !secrets.enabled {
+            return out;
         }
 
+        // `.env` templates hold placeholders by design; value patterns still
+        // apply to them below.
+        let key_rule = !(kind == ConfigKind::Env && configscan::is_env_template(Path::new(path)));
+        for scalar in kind.scalars(source).into_iter().filter(|_| key_rule) {
+            // `{{ env_var(...) }}` and `${VAR}` are exactly what we want to see.
+            if kind.is_templated(&scalar.value) || scalar.value.is_empty() {
+                continue;
+            }
+            let marked = !secrets.ignore_marker.is_empty()
+                && scalar.comment.contains(&secrets.ignore_marker);
+            if marked
+                || scalar.value.chars().count() < secrets.min_value_length
+                || is_placeholder(
+                    &scalar.value,
+                    &secrets.allow_values,
+                    &secrets.placeholder_patterns,
+                )
+            {
+                continue;
+            }
+            let Some(fw) = ctx.matches_key(
+                &scalar.key,
+                |p| p.secret_keys,
+                |c| &c.contract.secrets.key_patterns,
+                |e| &e.contract.secrets.exempt_key_patterns,
+            ) else {
+                continue;
+            };
+            let advice = if kind == ConfigKind::Yaml {
+                "use `{{ env_var('...') }}` or a secret store"
+            } else {
+                "load it from the environment or a secret store"
+            };
+            out.push(Finding {
+                fingerprint: finding_fingerprint(
+                    path,
+                    CODE_HARDCODED_SECRET,
+                    &scalar.key,
+                    "key_pattern",
+                ),
+                path: path.to_string(),
+                symbol: scalar.key.clone(),
+                subject: "key_pattern".to_string(),
+                line: scalar.line,
+                code: CODE_HARDCODED_SECRET,
+                severity: Severity::Error,
+                message: format!("`{}` holds a plaintext credential", scalar.key),
+                detail: Some(format!("value {} - {advice}", redact(&scalar.value))),
+                framework: fw,
+                kind: FindingKind::HardcodedSecret {
+                    detector: "key_pattern".into(),
+                    key: Some(scalar.key.clone()),
+                },
+            });
+        }
+
+        self.raw_secret_values(path, source, &ctx, Some(kind), &|_| false, &mut out);
         out.sort_by_key(|f| (f.line, f.code));
         out
+    }
+
+    /// Audit a Jupyter notebook for credentials.
+    ///
+    /// Code cells get the full Python credential analysis. Value patterns
+    /// also read everything else - markdown, outputs, metadata - because a
+    /// token printed into a saved output is as committed as one in code.
+    /// Returns, alongside the findings, why the file could not be read as a
+    /// notebook, if it could not; the value-pattern pass runs regardless.
+    pub fn audit_notebook(&self, path: &str, raw: &str) -> (Vec<Finding>, Option<String>) {
+        let mut out = Vec::new();
+        if !self.contract.secrets.enabled {
+            return (out, None);
+        }
+        let (nb, error) = match notebook::extract(raw) {
+            Ok(nb) => (Some(nb), None),
+            Err(e) => (None, Some(e)),
+        };
+        if let Some(nb) = &nb {
+            let a = python::analyze(&nb.python);
+            for mut f in self.context(&a).audit(path, &nb.python, &a) {
+                // Credentials only, as for config files: a notebook is neither
+                // a governed entrypoint nor a deployment config.
+                if f.code != CODE_HARDCODED_SECRET {
+                    continue;
+                }
+                let (line, cell) = nb.locate(f.line);
+                f.line = line;
+                f.detail = Some(format!("cell {cell}: {}", f.detail.unwrap_or_default()));
+                out.push(f);
+            }
+        }
+        let ctx = self.config_context(Path::new(path));
+        // Lines holding code-cell source were judged by the Python analysis,
+        // including any ignore marker there.
+        let is_code = |line: usize| nb.as_ref().is_some_and(|nb| nb.is_code_line(line));
+        self.raw_secret_values(path, raw, &ctx, None, &is_code, &mut out);
+        out.sort_by_key(|f| (f.line, f.code));
+        (out, error)
+    }
+
+    /// Value-pattern credentials anywhere in a file's raw text - sequence
+    /// items, flow mappings, block scalars, comments, notebook outputs - the
+    /// same shapes rule 2 finds in Python. Key rules only see `key = value`
+    /// scalars, so a `ghp_...` in a workflow's `env:` list or a PEM block under
+    /// `|` used to pass unexamined.
+    ///
+    /// `kind` decides what counts as a comment for ignore markers (none, when
+    /// `None`); lines for which `skip` is true are left to another pass.
+    fn raw_secret_values(
+        &self,
+        path: &str,
+        source: &str,
+        ctx: &FileContext,
+        kind: Option<ConfigKind>,
+        skip: &dyn Fn(usize) -> bool,
+        out: &mut Vec<Finding>,
+    ) {
+        let marker = &self.contract.secrets.ignore_marker;
+        let lines: Vec<&str> = source.lines().collect();
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        // An earlier rule already reported these lines with a more precise message.
+        let mut reported: HashSet<usize> = out.iter().map(|f| f.line).collect();
+
+        let framework_values = ctx.active.iter().flat_map(|c| {
+            c.secret_values
+                .iter()
+                .map(move |v| (Some(c.profile.name), v))
+        });
+        for (framework, (name, re)) in self
+            .secret_values
+            .iter()
+            .map(|v| (None, v))
+            .chain(framework_values)
+        {
+            for mat in re.find_iter(source) {
+                let line = line_starts.partition_point(|&s| s <= mat.start());
+                if skip(line) {
+                    continue;
+                }
+                let text = lines.get(line - 1).copied().unwrap_or("");
+                let comment = kind.map_or("", |k| k.comment_of(text));
+                if !marker.is_empty() && comment.contains(marker.as_str()) {
+                    continue;
+                }
+                if !reported.insert(line) {
+                    continue;
+                }
+                out.push(Finding {
+                    fingerprint: finding_fingerprint(path, CODE_HARDCODED_SECRET, "", name),
+                    path: path.to_string(),
+                    symbol: String::new(),
+                    subject: name.clone(),
+                    line,
+                    code: CODE_HARDCODED_SECRET,
+                    severity: Severity::Error,
+                    message: format!("hardcoded credential detected ({name})"),
+                    detail: Some(format!("matched {}", redact(mat.as_str()))),
+                    framework,
+                    kind: FindingKind::HardcodedSecret {
+                        detector: name.clone(),
+                        key: None,
+                    },
+                });
+            }
+        }
     }
 }
 
@@ -436,19 +635,29 @@ impl FileContext<'_> {
         key: &str,
         from_profile: fn(&'static FrameworkProfile) -> &'static [&'static str],
         from_contract: fn(&Engine) -> &Vec<String>,
+        exempt: fn(&Engine) -> &Vec<String>,
     ) -> Option<Option<&'static str>> {
-        let lower = key.to_ascii_lowercase();
-        if from_contract(self.engine)
-            .iter()
-            .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
-        {
+        // Judge the name in two spellings: lowercased as written, and as
+        // snake_case. Patterns are written in snake_case (`*private_key*`,
+        // `*_name`), so `privateKey` lowercased to `privatekey` slipped past a
+        // key rule and `secretName` past its exemption; matching either form
+        // keeps every match the lowercase form already had.
+        let forms = [key.to_ascii_lowercase(), snake_case(key)];
+        let hits = |p: &str| {
+            let p = p.to_ascii_lowercase();
+            forms.iter().any(|f| python::wildcard_match(&p, f))
+        };
+        // An exempt name refers to the thing rather than holding it, and that
+        // is true whichever pattern - the contract's or a framework's - would
+        // otherwise have matched.
+        if exempt(self.engine).iter().any(|p| hits(p)) {
+            return None;
+        }
+        if from_contract(self.engine).iter().any(|p| hits(p)) {
             return Some(None);
         }
         for f in &self.active {
-            if from_profile(f.profile)
-                .iter()
-                .any(|p| python::wildcard_match(&p.to_ascii_lowercase(), &lower))
-            {
+            if from_profile(f.profile).iter().any(|p| hits(p)) {
                 return Some(Some(f.profile.name));
             }
         }
@@ -549,8 +758,12 @@ impl FileContext<'_> {
             .map(|c| c.profile.name)
     }
 
+    /// An ignore marker suppresses a line only when it is written in a
+    /// comment. Anywhere else - inside a string literal, say - it is data a
+    /// file could carry by accident or on purpose, and zero trust means it
+    /// earns nothing.
     fn line_ignored(&self, source: &str, a: &Analysis, line: usize, marker: &str) -> bool {
-        !marker.is_empty() && source[a.line_span(line)].contains(marker)
+        !marker.is_empty() && a.comment_on_line_contains(source, line, marker)
     }
 
     /// Bindings that rule 1 considers hardcoded secrets.
@@ -569,9 +782,12 @@ impl FileContext<'_> {
                     source,
                     a,
                     b,
-                    cfg.min_value_length,
-                    &cfg.allow_values,
-                    &cfg.ignore_marker,
+                    &ValueFilter {
+                        min_len: cfg.min_value_length,
+                        allow: &cfg.allow_values,
+                        placeholders: &cfg.placeholder_patterns,
+                        marker: &cfg.ignore_marker,
+                    },
                 )
             })
             .filter(|b| {
@@ -579,6 +795,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.secret_keys,
                     |e| &e.contract.secrets.key_patterns,
+                    |e| &e.contract.secrets.exempt_key_patterns,
                 )
                 .is_some()
             })
@@ -591,7 +808,7 @@ impl FileContext<'_> {
         if !cfg.enabled {
             return Vec::new();
         }
-        let secrets: Vec<_> = self
+        let secrets: HashSet<usize> = self
             .flagged_secrets(source, a)
             .iter()
             .map(|b| b.value.span.start)
@@ -599,14 +816,20 @@ impl FileContext<'_> {
         a.bindings
             .iter()
             .filter(|b| !secrets.contains(&b.value.span.start))
+            // `if warehouse == "PROD_WH":` branches on the environment - the
+            // opposite of pinning to it.
+            .filter(|b| b.source != BindingSource::Comparison)
             .filter(|b| {
                 self.binding_passes_filters(
                     source,
                     a,
                     b,
-                    cfg.min_value_length,
-                    &cfg.allow_values,
-                    &cfg.ignore_marker,
+                    &ValueFilter {
+                        min_len: cfg.min_value_length,
+                        allow: &cfg.allow_values,
+                        placeholders: &[],
+                        marker: &cfg.ignore_marker,
+                    },
                 )
             })
             .filter(|b| {
@@ -614,6 +837,7 @@ impl FileContext<'_> {
                     &b.key,
                     |p| p.infra_keys,
                     |e| &e.contract.infrastructure.key_patterns,
+                    |e| &e.contract.infrastructure.exempt_key_patterns,
                 )
                 .is_some()
             })
@@ -625,33 +849,38 @@ impl FileContext<'_> {
         source: &str,
         a: &Analysis,
         b: &Binding,
-        min_len: usize,
-        allow: &[String],
-        marker: &str,
+        filter: &ValueFilter,
     ) -> bool {
-        let value = &source[b.value.content.clone()];
-        if value.chars().count() < min_len {
+        let value = b.value.text(source);
+        if value.chars().count() < filter.min_len {
             return false;
         }
-        if allow.iter().any(|x| x.eq_ignore_ascii_case(value.trim())) {
+        if is_placeholder(&value, filter.allow, filter.placeholders) {
             return false;
         }
-        // An f-string with a substitution is computed, not hardcoded.
-        if b.value.has_interpolation {
+        // An f-string with a substitution is computed, not hardcoded; a
+        // `${VAR}` or `{{ var }}` is a reference a renderer resolves, exactly
+        // as it is in a config file.
+        if b.value.has_interpolation || value.contains("${") || value.contains("{{") {
             return false;
         }
-        !self.line_ignored(source, a, b.line, marker)
+        !self.line_ignored(source, a, b.line, filter.marker)
     }
 
     /// Audit a parsed Python file.
     pub fn audit(&self, path: &str, source: &str, a: &Analysis) -> Vec<Finding> {
         let mut findings = Vec::new();
+        // Source already reported, so a value-pattern hit on the same text is
+        // not reported twice. Secrets go first: a literal that is both a
+        // credential and an endpoint is reported as the credential.
+        let mut covered = Covered::default();
         self.check_parameters(path, a, &mut findings);
         if self.engine.contract.secrets.enabled {
-            self.check_secrets(path, source, a, &mut findings);
+            self.check_secrets(path, source, a, &mut findings, &mut covered);
+            self.check_concatenations(path, source, a, &mut findings, &mut covered);
         }
         if self.engine.contract.infrastructure.enabled {
-            self.check_infra(path, source, a, &mut findings);
+            self.check_infra(path, source, a, &mut findings, &mut covered);
         }
         findings.sort_by_key(|f| (f.line, f.code));
         findings
@@ -698,16 +927,25 @@ impl FileContext<'_> {
         }
     }
 
-    fn check_secrets(&self, path: &str, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
+    fn check_secrets(
+        &self,
+        path: &str,
+        source: &str,
+        a: &Analysis,
+        out: &mut Vec<Finding>,
+        covered: &mut Covered,
+    ) {
         let cfg = &self.engine.contract.secrets;
 
         // Rule 1: a suspiciously-named target bound to a string literal.
         for b in self.flagged_secrets(source, a) {
+            covered.insert(b.value.span.clone());
             let framework = self
                 .matches_key(
                     &b.key,
                     |p| p.secret_keys,
                     |e| &e.contract.secrets.key_patterns,
+                    |e| &e.contract.secrets.exempt_key_patterns,
                 )
                 .flatten();
             out.push(Finding {
@@ -726,7 +964,7 @@ impl FileContext<'_> {
                 message: format!("`{}` is assigned a hardcoded literal", b.key),
                 detail: Some(format!(
                     "value {} - load it from the environment or a secret store",
-                    redact(&source[b.value.content.clone()])
+                    redact(&b.value.text(source))
                 )),
                 framework,
                 kind: FindingKind::HardcodedSecret {
@@ -737,28 +975,17 @@ impl FileContext<'_> {
         }
 
         // Rule 2: high-confidence credential shapes anywhere in the file.
-        let framework_values = self.active.iter().flat_map(|c| {
-            c.secret_values
-                .iter()
-                .map(move |v| (Some(c.profile.name), v))
-        });
-        for (framework, (name, re)) in self
-            .engine
-            .secret_values
-            .iter()
-            .map(|v| (None, v))
-            .chain(framework_values)
-        {
+        for (framework, (name, re)) in self.secret_value_patterns() {
             for mat in re.find_iter(source) {
                 let line = a.line_of(mat.start());
                 if self.line_ignored(source, a, line, &cfg.ignore_marker) {
                     continue;
                 }
-                // Rule 1 already covers this line with a more precise message.
-                if out
-                    .iter()
-                    .any(|f| f.line == line && f.code == CODE_HARDCODED_SECRET)
-                {
+                // Already reported - by rule 1 with a more precise message, or
+                // by another value pattern. Judged by the text itself, not the
+                // line: a second credential sharing a line with a reported one
+                // is still a credential.
+                if !covered.insert(mat.range()) {
                     continue;
                 }
                 out.push(Finding {
@@ -781,15 +1008,92 @@ impl FileContext<'_> {
         }
     }
 
-    fn check_infra(&self, path: &str, source: &str, a: &Analysis, out: &mut Vec<Finding>) {
+    /// The contract's credential shapes, then each active framework's, with
+    /// the framework that contributed each.
+    fn secret_value_patterns(&self) -> Vec<(Option<&'static str>, &(String, Regex))> {
+        let framework_values = self.active.iter().flat_map(|c| {
+            c.secret_values
+                .iter()
+                .map(move |v| (Some(c.profile.name), v))
+        });
+        self.engine
+            .secret_values
+            .iter()
+            .map(|v| (None, v))
+            .chain(framework_values)
+            .collect()
+    }
+
+    /// Rule 2 over the joined text of each implicit concatenation:
+    /// `"ghp_abc" "def"` spells one token that no raw-text match can see,
+    /// under any name or none. Runs after rules 1 and 2, so a literal they
+    /// already reported - whole or in part - is not reported again.
+    fn check_concatenations(
+        &self,
+        path: &str,
+        source: &str,
+        a: &Analysis,
+        out: &mut Vec<Finding>,
+        covered: &mut Covered,
+    ) {
+        let marker = &self.engine.contract.secrets.ignore_marker;
+        let patterns = self.secret_value_patterns();
+        // An interpolated part is computed: the joined text is not the value.
+        for lit in a.concatenations.iter().filter(|l| !l.has_interpolation) {
+            let line = a.line_of(lit.span.start);
+            if self.line_ignored(source, a, line, marker) {
+                continue;
+            }
+            let text = lit.text(source);
+            let Some((framework, (name, mat))) = patterns
+                .iter()
+                .find_map(|(fw, (name, re))| re.find(&text).map(|m| (*fw, (name, m))))
+            else {
+                continue;
+            };
+            if !covered.insert(lit.span.clone()) {
+                continue;
+            }
+            out.push(Finding {
+                fingerprint: finding_fingerprint(path, CODE_HARDCODED_SECRET, "", name),
+                path: path.to_string(),
+                symbol: String::new(),
+                subject: name.clone(),
+                line,
+                code: CODE_HARDCODED_SECRET,
+                severity: Severity::Error,
+                message: format!("hardcoded credential detected ({name})"),
+                detail: Some(format!(
+                    "matched {} across a string concatenation",
+                    redact(mat.as_str())
+                )),
+                framework,
+                kind: FindingKind::HardcodedSecret {
+                    detector: name.clone(),
+                    key: None,
+                },
+            });
+        }
+    }
+
+    fn check_infra(
+        &self,
+        path: &str,
+        source: &str,
+        a: &Analysis,
+        out: &mut Vec<Finding>,
+        covered: &mut Covered,
+    ) {
         let cfg = &self.engine.contract.infrastructure;
 
         for b in self.flagged_infra(source, a) {
+            covered.insert(b.value.span.clone());
             let framework = self
                 .matches_key(
                     &b.key,
                     |p| p.infra_keys,
                     |e| &e.contract.infrastructure.key_patterns,
+                    |e| &e.contract.infrastructure.exempt_key_patterns,
                 )
                 .flatten();
             out.push(Finding {
@@ -803,7 +1107,7 @@ impl FileContext<'_> {
                 message: format!(
                     "`{}` is pinned to `{}`",
                     b.key,
-                    truncate(&source[b.value.content.clone()])
+                    truncate(&b.value.text(source))
                 ),
                 detail: Some(
                     "this should vary by environment - derive it from target_environment".into(),
@@ -833,7 +1137,7 @@ impl FileContext<'_> {
                 if self.line_ignored(source, a, line, &cfg.ignore_marker) {
                     continue;
                 }
-                if out.iter().any(|f| f.line == line) {
+                if !covered.insert(mat.range()) {
                     continue;
                 }
                 out.push(Finding {
@@ -858,6 +1162,72 @@ impl FileContext<'_> {
             }
         }
     }
+}
+
+/// Disjoint byte ranges of source already reported in this file.
+///
+/// Ordered by start so an overlap check is two lookups rather than a scan of
+/// every earlier finding - a generated file can carry tens of thousands.
+#[derive(Default)]
+struct Covered(BTreeMap<usize, usize>);
+
+impl Covered {
+    /// Record `r` unless it overlaps a recorded range. Returns whether it was
+    /// recorded, i.e. whether this text is newly reported.
+    fn insert(&mut self, r: Range<usize>) -> bool {
+        // Recorded ranges are disjoint, so only the nearest range starting at
+        // or before `r.start` and the first one starting after it can overlap.
+        let before = self.0.range(..=r.start).next_back();
+        let after = self.0.range(r.start + 1..).next();
+        let overlaps = before.is_some_and(|(_, &end)| end > r.start)
+            || after.is_some_and(|(&start, _)| start < r.end.max(r.start + 1));
+        if overlaps {
+            return false;
+        }
+        self.0.insert(r.start, r.end);
+        true
+    }
+}
+
+/// A name in snake_case: `secretName` -> `secret_name`, `APIKey` ->
+/// `api_key`, `self.dbPassword` -> `self.db_password`. A capital starts a new
+/// word after a lowercase letter or digit, or at the end of an acronym
+/// (`APIKey`: the `K` that is followed by lowercase). Existing separators are
+/// kept, so `DB_PASSWORD` and `db-password` are unchanged apart from case.
+fn snake_case(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let mut out = String::with_capacity(key.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let ends_acronym =
+                prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_lowercase() || prev.is_ascii_digit() || ends_acronym {
+                out.push('_');
+            }
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// What a bound literal must clear before a key rule may report it.
+struct ValueFilter<'a> {
+    min_len: usize,
+    allow: &'a [String],
+    placeholders: &'a [String],
+    marker: &'a str,
+}
+
+/// An exact `allow_values` entry or a `placeholder_patterns` shape, both
+/// compared case-insensitively.
+fn is_placeholder(value: &str, allow: &[String], patterns: &[String]) -> bool {
+    let v = value.trim();
+    let lower = v.to_lowercase();
+    allow.iter().any(|a| a.eq_ignore_ascii_case(v))
+        || patterns
+            .iter()
+            .any(|p| python::wildcard_match(&p.to_lowercase(), &lower))
 }
 
 fn truncate(value: &str) -> String {
@@ -972,10 +1342,56 @@ mod tests {
         assert!(run("TOKEN = \"\"\n").is_empty());
     }
 
+    /// A credential the code checks against is in the source as surely as
+    /// one it assigns.
     #[test]
-    fn ignores_comparisons_and_marked_lines() {
-        assert!(run("if password == \"abcd1234efgh\":\n    pass\n").is_empty());
+    fn comparisons_against_a_credential_literal_are_reported() {
+        let f = run("if password == \"abcd1234efgh\":\n    pass\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            (f[0].code, f[0].symbol.as_str()),
+            (CODE_HARDCODED_SECRET, "password")
+        );
+        assert_eq!(
+            run("if \"abcd1234efgh\" != self.api_key:\n    pass\n").len(),
+            1
+        );
+        // Placeholders, exempt names and markers behave as for assignments.
+        assert!(run("if password == \"changeme\":\n    pass\n").is_empty());
+        assert!(run("if token_type == \"Bearer\":\n    pass\n").is_empty());
+        assert!(
+            run("if password == \"abcd1234efgh\":  # kovallent:allow-secret\n    pass\n")
+                .is_empty()
+        );
+        // Branching on an infrastructure value is not pinning it.
+        assert!(run("if warehouse == \"PROD_WH\":\n    pass\n").is_empty());
+    }
+
+    #[test]
+    fn ignores_marked_lines() {
         assert!(run("TOKEN = \"abcd1234efgh\"  # kovallent:allow-secret\n").is_empty());
+    }
+
+    /// A token split across a concatenation is one token, under any name -
+    /// or none, as an argument.
+    #[test]
+    fn value_patterns_see_through_concatenation() {
+        let token = "\"ghp_0123456789abcdef01\" \"23456789abcdef01234\"";
+        for src in [
+            format!("tokenizer = {token}\n"),
+            format!("call({token})\n"),
+            format!("x = ({token})\n"),
+        ] {
+            let f = run(&src);
+            assert_eq!(f.len(), 1, "{src}: {f:#?}");
+            assert_eq!(f[0].subject, "github_token");
+            assert!(!f[0].detail.as_deref().unwrap().contains("0123456789"));
+        }
+        // A secret name already reports the whole literal once.
+        assert_eq!(run(&format!("API_TOKEN = {token}\n")).len(), 1);
+        // An interpolated part makes the joined text something else.
+        assert!(run("x = \"ghp_0123456789abcdef01\" f\"{rest}\"\n").is_empty());
+        assert!(run(&format!("x = {token}  # kovallent:allow-secret\n")).is_empty());
     }
 
     #[test]
@@ -996,6 +1412,98 @@ mod tests {
     #[test]
     fn fstring_with_substitution_is_not_hardcoded() {
         assert!(run("token = f\"{prefix}-{suffix}-value\"\n").is_empty());
+    }
+
+    // --- zero-trust credential scanning --------------------------------
+
+    fn secrets_in(src: &str) -> usize {
+        run(src)
+            .iter()
+            .filter(|f| f.code == CODE_HARDCODED_SECRET)
+            .count()
+    }
+
+    /// Each of these used to pass unexamined.
+    #[test]
+    fn credential_forms_that_used_to_slip_through() {
+        for src in [
+            "DB_PASSWORD = \"s3cr3t\" \"-prod-pw\"\n",
+            "DB_PASSWORD = (\"s3cr3t-prod-pw\")\n",
+            "config[\"db_password\"] = \"s3cr3t-prod-pw\"\n",
+            "os.environ[\"DB_PASSWORD\"] = \"s3cr3t-prod-pw\"\n",
+            "pw = os.getenv(\"DB_PASSWORD\", \"s3cr3t-prod-pw\")\n",
+            "pw = os.environ.get(\"API_TOKEN\", default=\"s3cr3t-prod-pw\")\n",
+        ] {
+            assert_eq!(secrets_in(src), 1, "{src}");
+        }
+    }
+
+    /// A placeholder fallback and a non-secret variable are still fine.
+    #[test]
+    fn harmless_env_fallbacks_are_not_reported() {
+        assert_eq!(secrets_in("pw = os.getenv(\"DB_PASSWORD\", \"\")\n"), 0);
+        assert_eq!(secrets_in("h = os.getenv(\"DB_HOST\", \"localhost\")\n"), 0);
+    }
+
+    /// Regression: the marker anywhere on the line - even inside a string in
+    /// another statement - suppressed every finding on it.
+    #[test]
+    fn ignore_marker_only_counts_in_a_comment() {
+        assert_eq!(
+            secrets_in("note = \"kovallent:allow-secret\"; DB_PASSWORD = \"s3cr3t-prod-pw\"\n"),
+            1
+        );
+        assert_eq!(
+            secrets_in("DB_PASSWORD = \"s3cr3t-prod-pw\"  # kovallent:allow-secret\n"),
+            0
+        );
+        // Value-pattern hits follow the same rule.
+        assert_eq!(
+            secrets_in("k = \"AKIAIOSFODNN7EXAMPLE kovallent:allow-secret\"\n"),
+            1
+        );
+        assert_eq!(
+            secrets_in("k = \"AKIAIOSFODNN7EXAMPLE\"  # kovallent:allow-secret\n"),
+            0
+        );
+    }
+
+    /// Regression: deduplication was per line, so a second credential sharing
+    /// a line with a reported one vanished.
+    #[test]
+    fn two_credentials_on_one_line_are_both_reported() {
+        let src = "cfg = {\"password\": \"pw-1234567\", \"dsn\": \"postgres://admin:hunter2@db:5432/x\"}\n";
+        assert_eq!(secrets_in(src), 2);
+        // ...while one literal matched by both rules is still reported once.
+        assert_eq!(secrets_in("AWS_SECRET = \"AKIAIOSFODNN7EXAMPLE\"\n"), 1);
+    }
+
+    /// Regression: any finding on a line - even KV001 on a `def` - hid a
+    /// value-pattern KV003 there.
+    #[test]
+    fn a_contract_finding_does_not_hide_infrastructure_on_the_same_line() {
+        let f = run("def deploy_x(path=\"s3://prod-bucket/x\"):\n    pass\n");
+        assert!(f.iter().any(|x| x.code == CODE_MISSING_PARAM));
+        assert!(f.iter().any(|x| x.code == CODE_HARDCODED_INFRA));
+    }
+
+    #[test]
+    fn a_secret_endpoint_is_reported_once_as_the_secret() {
+        let f = run("import polars\nuri = \"s3://AKIAIOSFODNN7EXAMPLE:x@bucket/k\"\n");
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].code, CODE_HARDCODED_SECRET);
+    }
+
+    #[test]
+    fn covered_ranges_detect_overlap_exactly() {
+        let mut c = Covered::default();
+        assert!(c.insert(10..20));
+        assert!(!c.insert(15..25), "overlaps the tail");
+        assert!(!c.insert(5..11), "overlaps the head");
+        assert!(!c.insert(12..14), "inside");
+        assert!(!c.insert(0..30), "contains");
+        assert!(c.insert(20..30), "adjacent after");
+        assert!(c.insert(0..10), "adjacent before");
     }
 
     // --- finding fingerprints -------------------------------------------
@@ -1210,6 +1718,139 @@ mod tests {
         assert_eq!(f[0].framework, None);
     }
 
+    /// Regression for a mistake made while writing these defaults: `"***"`
+    /// as a placeholder pattern matched every value and disabled the rule.
+    #[test]
+    fn a_match_everything_exemption_or_placeholder_is_rejected() {
+        for yaml in [
+            "version: 1\nsecrets:\n  placeholder_patterns: [\"***\"]\n",
+            "version: 1\nsecrets:\n  exempt_key_patterns: [\"*\"]\n",
+            "version: 1\ninfrastructure:\n  exempt_key_patterns: [\"**\"]\n",
+        ] {
+            let c = Contract::from_yaml(yaml).unwrap();
+            let err = Engine::new(c)
+                .err()
+                .unwrap_or_else(|| panic!("accepted: {yaml}"));
+            assert!(err.contains("matches everything"), "{err}");
+        }
+    }
+
+    /// Names that refer to a credential are exempt from the key rule; value
+    /// patterns still catch a real token under them.
+    #[test]
+    fn exempt_names_skip_the_key_rule_but_not_value_patterns() {
+        for name in [
+            "secret_name",
+            "secret_arn",
+            "credentials_path",
+            "token_url",
+            "api_key_header",
+            "password_policy",
+            "tokenizer",
+            "max_tokens",
+            "token_type",
+            "self.secret_name",
+        ] {
+            assert!(
+                run(&format!("{name} = \"Xk9vR2mQw7pLz4Ty\"\n")).is_empty(),
+                "{name}"
+            );
+        }
+        let f = run("secret_name = \"ghp_0123456789abcdef0123456789abcdef01234\"\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "github_token");
+    }
+
+    /// Exemptions win over framework key patterns too.
+    #[test]
+    fn exemptions_apply_to_framework_patterns() {
+        // `*private_key*` is a Snowpark secret key; `private_key_path` names a file.
+        let src = "from snowflake.snowpark import Session\nprivate_key_path = \"/keys/rsa.p8\"\n";
+        assert!(codes(src).iter().all(|c| *c != CODE_HARDCODED_SECRET));
+    }
+
+    #[test]
+    fn snake_case_spellings() {
+        for (key, want) in [
+            ("secretName", "secret_name"),
+            ("APIKey", "api_key"),
+            ("secretARN", "secret_arn"),
+            ("self.dbPassword", "self.db_password"),
+            ("DB_PASSWORD", "db_password"),
+            ("db-password", "db-password"),
+            ("oauth2Token", "oauth2_token"),
+            ("password", "password"),
+        ] {
+            assert_eq!(snake_case(key), want, "{key}");
+        }
+    }
+
+    /// Regression: names were only matched lowercased, so a camelCase
+    /// reference name missed its snake_case exemption and a camelCase secret
+    /// name missed a snake_case key pattern.
+    #[test]
+    fn camel_case_names_match_snake_case_patterns() {
+        for name in [
+            "secretName",
+            "tokenUrl",
+            "credentialsPath",
+            "apiKeyHeader",
+            "secretARN",
+        ] {
+            assert!(
+                config("c.json", &format!("{{\"{name}\": \"Xk9vR2mQw7pLz4Ty\"}}")).is_empty(),
+                "{name}"
+            );
+        }
+        for name in ["privateKey", "dbPassword", "APIKey", "clientSecret"] {
+            assert_eq!(
+                run(&format!("{name} = \"Xk9vR2mQw7pLz4Ty\"\n")).len(),
+                1,
+                "{name}"
+            );
+        }
+        // The finding names the key as written.
+        assert_eq!(
+            run("privateKey = \"Xk9vR2mQw7pLz4Ty\"\n")[0].symbol,
+            "privateKey"
+        );
+    }
+
+    #[test]
+    fn placeholder_shapes_are_not_credentials() {
+        for value in [
+            "your-api-key-here",
+            "YOUR_TOKEN",
+            "<token>",
+            "{api_key}",
+            "replace-me",
+            "CHANGE_ME",
+            "xxxxxxxx",
+            "insert-key",
+            "token-goes-here",
+        ] {
+            assert!(
+                run(&format!("API_KEY = \"{value}\"\n")).is_empty(),
+                "{value}"
+            );
+            assert!(
+                config(".env", &format!("API_KEY={value}\n")).is_empty(),
+                "{value}"
+            );
+        }
+        // A real-looking value under a secret name is still reported.
+        assert_eq!(run("API_KEY = \"Xk9vR2mQw7pLz4Ty\"\n").len(), 1);
+    }
+
+    #[test]
+    fn references_and_split_placeholders_in_python_are_not_credentials() {
+        assert!(run("DB_PASSWORD = \"${VAULT_DB_PASSWORD}\"\n").is_empty());
+        assert!(run("DB_PASSWORD = \"{{ vault('db') }}\"\n").is_empty());
+        assert!(run("DB_PASSWORD = \"chan\" \"geme\"\n").is_empty());
+        // ...but a split real value is judged whole.
+        assert_eq!(run("DB_PASSWORD = \"Xk9vR2\" \"mQw7pLz4Ty\"\n").len(), 1);
+    }
+
     #[test]
     fn unknown_framework_name_is_rejected() {
         let mut c = Contract::default();
@@ -1340,6 +1981,210 @@ mod tests {
         let f = yaml("profiles.yml", src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].code, CODE_HARDCODED_SECRET);
+    }
+
+    /// Each of these used to pass unexamined.
+    #[test]
+    fn yaml_credential_forms_that_used_to_slip_through() {
+        for src in [
+            "password: &pw s3cr3t-prod-pw\n",
+            "password: !!str s3cr3t-prod-pw\n",
+            "aws_key: AKIAIOSFODNN7EXAMPLE\n",
+            "env:\n  GH: ghp_0123456789abcdef0123456789abcdef01234\n",
+            "tokens:\n  - ghp_0123456789abcdef0123456789abcdef01234\n",
+            "creds: {gh: ghp_0123456789abcdef0123456789abcdef01234}\n",
+            "private_key: |\n  -----BEGIN RSA PRIVATE KEY-----\n  MIIabc\n",
+        ] {
+            let f = yaml("ci.yml", src);
+            assert_eq!(f.len(), 1, "{src}: {f:#?}");
+            assert_eq!(f[0].code, CODE_HARDCODED_SECRET);
+            assert!(!f[0].detail.as_deref().unwrap_or("").contains("0123456789"));
+        }
+    }
+
+    #[test]
+    fn yaml_key_and_value_rules_report_one_line_once() {
+        let f = yaml(
+            "ci.yml",
+            "github_token: ghp_0123456789abcdef0123456789abcdef01234\n",
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "key_pattern");
+    }
+
+    #[test]
+    fn yaml_marker_only_counts_in_a_comment() {
+        assert_eq!(
+            yaml("ci.yml", "password: \"x-kovallent:allow-secret\"\n").len(),
+            1
+        );
+        assert!(yaml(
+            "ci.yml",
+            "GH: ghp_0123456789abcdef0123456789abcdef01234  # kovallent:allow-secret\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn yaml_aliases_and_application_tags_are_not_reported() {
+        assert!(yaml("ci.yml", "password: *pw\n").is_empty());
+        assert!(yaml(
+            "ci.yml",
+            "password: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n"
+        )
+        .is_empty());
+    }
+
+    // --- other config files and notebooks --------------------------------
+
+    fn config(name: &str, src: &str) -> Vec<Finding> {
+        let kind = ConfigKind::of(Path::new(name)).expect("a config file name");
+        engine().audit_config(name, src, kind)
+    }
+
+    #[test]
+    fn credentials_in_each_config_format() {
+        for (name, src, line) in [
+            (".env", "HOST=db\nDB_PASSWORD=s3cr3t-prod-pw\n", 2),
+            ("airflow.cfg", "[core]\nfernet_key = s3cr3t-prod-pw\n", 2),
+            ("secrets.toml", "[db]\npassword = \"s3cr3t-prod-pw\"\n", 2),
+            ("creds.json", "{\n  \"api_key\": \"s3cr3t-prod-pw\"\n}\n", 2),
+        ] {
+            let f = config(name, src);
+            assert_eq!(f.len(), 1, "{name}: {f:#?}");
+            assert_eq!(
+                (f[0].code, f[0].line),
+                (CODE_HARDCODED_SECRET, line),
+                "{name}"
+            );
+            assert!(!f[0].detail.as_deref().unwrap().contains("s3cr3t-prod-pw"));
+        }
+    }
+
+    #[test]
+    fn config_value_patterns_cover_lines_the_key_rule_cannot_read() {
+        // A connection string under an innocuous key, and a token in a JSON array.
+        assert_eq!(
+            config(
+                "alembic.ini",
+                "sqlalchemy.url = postgresql://u:hunter2@db/x\n"
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            config(
+                "c.json",
+                "{\"tokens\": [\"ghp_0123456789abcdef0123456789abcdef01234\"]}"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn config_templating_markers_and_placeholders() {
+        assert!(config(".env", "DB_PASSWORD=${VAULT_DB_PASSWORD}\n").is_empty());
+        assert!(config("airflow.cfg", "[x]\npassword = %(base_pw)s\n").is_empty());
+        assert!(config(
+            ".env",
+            "DB_PASSWORD=s3cr3t-prod-pw  # kovallent:allow-secret\n"
+        )
+        .is_empty());
+        assert!(config(".env", "DB_PASSWORD=changeme\n").is_empty());
+        // A marker inside the value is data, not a suppression.
+        assert_eq!(
+            config(".env", "DB_PASSWORD=\"kovallent:allow-secret\"\n").len(),
+            1
+        );
+    }
+
+    /// `.env.example` exists to hold placeholders: the name rule is off, but a
+    /// real credential pasted into one is still caught.
+    #[test]
+    fn env_templates_get_value_patterns_only() {
+        assert!(config(
+            ".env.example",
+            "API_KEY=your-api-key-here\nDB_PASSWORD=replace-me\n"
+        )
+        .is_empty());
+        let f = config(
+            ".env.example",
+            "GH_TOKEN=ghp_0123456789abcdef0123456789abcdef01234\n",
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "github_token");
+    }
+
+    /// The layout Jupyter writes, with a credential in a code cell and a
+    /// different one printed into a saved output.
+    const NOTEBOOK: &str = r##"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "token ghp_0123456789abcdef0123456789abcdef01234\n"
+     ]
+    }
+   ],
+   "source": [
+    "import os\n",
+    "DB_PASSWORD = \"s3cr3t-prod-pw\"\n",
+    "SAFE = \"abcd1234efgh\"  # kovallent:allow-secret"
+   ]
+  }
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"##;
+
+    #[test]
+    fn notebook_code_cells_and_outputs_are_both_scanned() {
+        let (f, error) = engine().audit_notebook("nb.ipynb", NOTEBOOK);
+        assert!(error.is_none());
+        let got: Vec<(usize, &str)> = f.iter().map(|x| (x.line, x.subject.as_str())).collect();
+        // Output line 12 by value pattern; code line 18 by the Python key rule,
+        // at the notebook's own line number.
+        assert_eq!(
+            got,
+            vec![(12, "github_token"), (18, "key_pattern")],
+            "{f:#?}"
+        );
+        assert!(f[1].detail.as_deref().unwrap().starts_with("cell 1:"));
+    }
+
+    /// The Python pass owns code lines, ignore markers included: the raw pass
+    /// must not re-report the line the marker suppressed.
+    #[test]
+    fn notebook_ignore_marker_holds_across_both_passes() {
+        let (f, _) = engine().audit_notebook("nb.ipynb", NOTEBOOK);
+        assert!(f.iter().all(|x| x.line != 19), "{f:#?}");
+    }
+
+    #[test]
+    fn unreadable_notebook_still_gets_value_patterns() {
+        let raw = "{ broken json ghp_0123456789abcdef0123456789abcdef01234";
+        let (f, error) = engine().audit_notebook("nb.ipynb", raw);
+        assert!(error.is_some());
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn notebook_cells_see_framework_imports_from_earlier_cells() {
+        let raw = r#"{"cells":[
+{"cell_type":"code","source":["import databricks"]},
+{"cell_type":"code","source":["TOK = \"dapi1234567890abcdef1234567890abcdef\""]}
+]}"#;
+        let (f, _) = engine().audit_notebook("nb.ipynb", raw);
+        assert!(f.iter().any(|x| x.subject == "databricks_pat"), "{f:#?}");
     }
 
     #[test]

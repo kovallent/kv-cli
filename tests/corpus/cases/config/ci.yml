@@ -1,0 +1,23 @@
+env:
+  GH_TOKEN: "@@GITHUB_TOKEN@@"  # expect: KV002
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  API_KEY: "{{ env_var('API_KEY') }}"
+steps:
+  - run: echo hi
+    password: Xk9vR2mQw7pLz4Ty  # expect: KV002
+anchors:
+  base_password: &pw Xk9vR2mQw7pLz4Ty  # expect: KV002
+  alias_password: *pw
+  tagged_password: !!str Xk9vR2mQw7pLz4Ty  # expect: KV002
+  vault_password: !vault |
+    $ANSIBLE_VAULT;1.1;AES256
+  creds: {user: svc, password: Xk9vR2mQw7pLz4Ty}  # expect: KV002
+  list_tokens:
+    - "@@SLACK_TOKEN@@"  # expect: KV002
+notes: |
+  password: this is prose, not a key
+private_key: |
+  @@PRIVATE_KEY_BLOCK@@  # expect: KV002
+allowed_password: Xk9vR2mQw7pLz4Ty  # kovallent:allow-secret
+placeholder_password: changeme
+warehouse: PROD_WH
