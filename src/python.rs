@@ -981,6 +981,46 @@ mod tests {
         assert!(a.has_error);
     }
 
+    /// Pins the README's "Stack compatibility" Python line: every syntax it
+    /// lists parses cleanly, and the one gap it names still does not. If a
+    /// grammar upgrade changes either, update the README with this test.
+    #[test]
+    fn readme_python_syntax_claims() {
+        let supported = [
+            ("3.8 walrus", "if (n := 3) > 2:\n    pass\n"),
+            ("3.8 positional-only", "def f(a, /, b):\n    pass\n"),
+            (
+                "3.10 match",
+                "match x:\n    case {\"a\": 1}:\n        pass\n",
+            ),
+            (
+                "3.11 except*",
+                "try:\n    pass\nexcept* ValueError:\n    pass\n",
+            ),
+            ("3.12 type alias", "type Point = tuple[float, float]\n"),
+            (
+                "3.12 generic def",
+                "def first[T](xs: list[T]) -> T:\n    return xs[0]\n",
+            ),
+            ("3.12 generic class", "class Box[T]:\n    pass\n"),
+            ("3.12 nested f-string quotes", "x = f\"{d[\"k\"]}\"\n"),
+            ("3.14 template string", "x = t\"hello {name}\"\n"),
+            (
+                "3.14 unparenthesised except",
+                "try:\n    pass\nexcept ValueError, TypeError:\n    pass\n",
+            ),
+        ];
+        for (feature, src) in supported {
+            assert!(!analyze(src).has_error, "{feature} no longer parses");
+        }
+
+        let gap = "def f[T = int](x: T) -> T:\n    return x\n";
+        assert!(
+            analyze(gap).has_error,
+            "3.13 type-parameter defaults now parse: drop the README's known gap"
+        );
+    }
+
     /// The recursive matcher `wildcard_match` replaced, kept as an oracle.
     fn reference_match(p: &[u8], t: &[u8]) -> bool {
         if p.is_empty() {
