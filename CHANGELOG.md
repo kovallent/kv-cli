@@ -11,7 +11,11 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- README "Stack compatibility" now states which Python syntax is parsed
+  (Python 3 through 3.14) instead of "3.9, 3.10, 3.11, 3.12+", and names the
+  one known gap: 3.13 type-parameter defaults (`def f[T = int]`).
 
 ---
 

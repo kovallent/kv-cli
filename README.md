@@ -245,7 +245,8 @@ frameworks:
 
 ## Stack compatibility
 
-* **Python:** 3.9, 3.10, 3.11, 3.12+
+* **Python:** source written for any Python 3 release through 3.14. `kv-cli` never runs Python; it parses source with tree-sitter, so no interpreter is needed and the version installed does not matter. Covered syntax includes `:=` and `/` parameters (3.8), `match` (3.10), `except*` (3.11), `type` aliases, generic `def f[T]` / `class C[T]` and nested-quote f-strings (3.12), and `t"…"` template strings and unparenthesised `except A, B:` (3.14).
+  * **Known gap:** type-parameter defaults (`def f[T = int]`, 3.13) do not parse. Such a file is audited on a partial parse and listed as `syntax_error` (a warning; an error under `--strict`); findings elsewhere in the file are still reported, and `fix` will not rewrite it.
 * **dbt:** `def model(dbt, session)` model signatures; `profiles.yml` credential scanning.
 * **Apache Airflow:** `@dag`, `@task_group`, `@setup`, `@teardown`, `@task` governance; Fernet keys; `conn_id`, pool, queue.
 * **Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
