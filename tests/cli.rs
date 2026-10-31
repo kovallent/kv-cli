@@ -284,13 +284,13 @@ fn star_cta_follows_a_passing_run_on_stderr() {
 
     let (code, stdout, stderr) = audit_streams(&dir, &["audit", ".", "--no-color"]);
     assert_eq!(code, Some(0));
-    assert!(stderr.contains("Star us on GitHub"), "{stderr}");
-    assert!(!stdout.contains("Star us"), "{stdout}");
+    assert!(stderr.contains("a star helps"), "{stderr}");
+    assert!(!stdout.contains("a star helps"), "{stdout}");
 
     // JSON output is parsed, so the line appears on neither stream.
     let (code, stdout, stderr) = audit_streams(&dir, &["audit", ".", "--format", "json"]);
     assert_eq!(code, Some(0));
-    assert!(!stdout.contains("Star us") && !stderr.contains("Star us"));
+    assert!(!stdout.contains("a star helps") && !stderr.contains("a star helps"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -303,7 +303,7 @@ fn star_cta_does_not_follow_findings() {
 
     let (code, stdout, stderr) = audit_streams(&dir, &["audit", ".", "--no-color"]);
     assert_eq!(code, Some(1));
-    assert!(!stdout.contains("Star us") && !stderr.contains("Star us"));
+    assert!(!stdout.contains("a star helps") && !stderr.contains("a star helps"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -498,10 +498,10 @@ fn no_star_line_after_a_credential_warning() {
     };
 
     write(&dir, "secret.py", "DB_PASSWORD = \"hunter2hunter2\"\n");
-    assert!(!fix_stderr("secret.py").contains("Star us"));
+    assert!(!fix_stderr("secret.py").contains("a star helps"));
 
     write(&dir, "params.py", "def deploy_x(name):\n    pass\n");
-    assert!(fix_stderr("params.py").contains("Star us"));
+    assert!(fix_stderr("params.py").contains("a star helps"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

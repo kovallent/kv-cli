@@ -1,6 +1,6 @@
 # kv-cli
 
-**Sub-200ms local contract guardrails for data pipelines.** Airflow, dbt, PySpark, Databricks, Snowpark, Flink, Polars.
+**Local contract guardrails for Python data pipelines.** Airflow, dbt, Databricks, Snowpark, Flink, Polars.
 
 [![CI](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -248,7 +248,7 @@ frameworks:
 * **Python:** 3.9, 3.10, 3.11, 3.12+
 * **dbt:** `def model(dbt, session)` model signatures; `profiles.yml` credential scanning.
 * **Apache Airflow:** `@dag`, `@task_group`, `@setup`, `@teardown`, `@task` governance; Fernet keys; `conn_id`, pool, queue.
-* **PySpark / Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
+* **Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
 * **Snowpark:** `@sproc`, `@udf`; session config account, warehouse, role.
 * **Flink:** `@udf`, `@udtf`, `@udaf`; broker and JDBC endpoints via `pyflink`.
 * **Polars:** `storage_options` credentials and object-store path identifiers.

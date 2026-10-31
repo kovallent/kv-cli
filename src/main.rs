@@ -39,7 +39,7 @@ const EXIT_ERROR: u8 = 2;
 const EXIT_DRIFT: u8 = 3;
 
 const STAR_CTA: &str =
-    "\u{2b50} Catching drift in <200ms? Star us on GitHub: https://github.com/kovallent/kv-cli";
+    "If kv-cli caught something useful, a star helps: https://github.com/kovallent/kv-cli";
 
 #[derive(Parser)]
 #[command(
@@ -1487,6 +1487,13 @@ mod tests {
         assert!(!shows_star_cta(EXIT_OK, true, false));
         // Never right after telling someone to rotate exposed credentials.
         assert!(!shows_star_cta(EXIT_OK, false, true));
+    }
+
+    /// The line once claimed a speed that was never measured; keep any
+    /// timing out of it.
+    #[test]
+    fn star_cta_makes_no_speed_claim() {
+        assert!(!STAR_CTA.contains("ms"), "{STAR_CTA}");
     }
 
     #[test]

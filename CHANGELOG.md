@@ -15,6 +15,15 @@ Nothing yet.
 
 ---
 
+## [0.6.1] — 2026-10-30
+
+### Changed
+
+- The post-`init`/`fix` stderr message no longer makes an unmeasured speed
+  claim or uses an emoji.
+
+---
+
 ## [0.6.0] — 2026-10-29
 
 Contract schema polish: the contract's rules are explicit and deterministic,
