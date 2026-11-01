@@ -1118,3 +1118,106 @@ fn a_run_with_a_skip_validates_against_the_schema() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `explain` serves the rule pages compiled into the binary: the list, one
+/// page by code (any case), and exit 2 naming the rules for an unknown code.
+#[test]
+fn explain_prints_the_rule_pages() {
+    let dir = tempdir("explain");
+
+    let (code, list, _) = audit_streams(&dir, &["explain", "--no-color"]);
+    assert_eq!(code, Some(0));
+    for rule in ["KV001", "KV002", "KV003"] {
+        assert!(list.contains(rule), "{list}");
+    }
+
+    let (code, page, _) = audit_streams(&dir, &["explain", "kv002"]);
+    assert_eq!(code, Some(0));
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(repo.join("docs/rules/KV002.md")).unwrap();
+    assert_eq!(page, source, "explain prints docs/rules/KV002.md verbatim");
+
+    let (code, _, stderr) = audit_streams(&dir, &["explain", "KV999"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("KV001, KV002, KV003"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A run with findings points at `explain` for the lowest code it reported.
+#[test]
+fn findings_point_to_explain() {
+    let dir = tempdir("explain-hint");
+    write(&dir, "app.py", "DB_PASSWORD = \"hunter2hunter2\"\n");
+    let (code, stdout, _) = audit_streams(&dir, &["audit", ".", "--no-color"]);
+    assert_eq!(code, Some(1));
+    assert!(stdout.contains("run `kv-cli explain KV002`"), "{stdout}");
+
+    write(&dir, "app.py", "x = 1\n");
+    let (code, stdout, _) = audit_streams(&dir, &["audit", ".", "--no-color"]);
+    assert_eq!(code, Some(0));
+    assert!(!stdout.contains("kv-cli explain"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The README's copy-paste snippets pin a release. They must name this one,
+/// so a version bump cannot ship with stale install instructions.
+#[test]
+fn readme_snippets_pin_this_release() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(repo.join("README.md")).unwrap();
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for (what, prefix) in [
+        ("pre-commit rev", "rev: v"),
+        ("Actions KV_VERSION", "KV_VERSION: v"),
+        ("cargo install --tag", "--tag v"),
+    ] {
+        let pins: Vec<&str> = readme
+            .match_indices(prefix)
+            .map(|(i, _)| {
+                let rest = &readme[i + prefix.len() - 1..];
+                rest.split(|c: char| c.is_whitespace()).next().unwrap()
+            })
+            .collect();
+        assert!(!pins.is_empty(), "README has no {what}");
+        for pin in pins {
+            assert_eq!(pin, tag, "README {what} is stale");
+        }
+    }
+}
+
+/// Every relative link in the README and docs/ points at a file that exists,
+/// so moving a page cannot leave a dead link behind.
+#[test]
+fn documentation_links_resolve() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pages = vec![repo.join("README.md")];
+    let mut dirs = vec![repo.join("docs")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                pages.push(path);
+            }
+        }
+    }
+
+    let mut dead = Vec::new();
+    for page in &pages {
+        let text = std::fs::read_to_string(page).unwrap();
+        for (i, _) in text.match_indices("](") {
+            let target = text[i + 2..].split(')').next().unwrap();
+            let target = target.split('#').next().unwrap();
+            if target.is_empty() || target.contains("://") {
+                continue;
+            }
+            if !page.parent().unwrap().join(target).exists() {
+                dead.push(format!("{}: {target}", page.display()));
+            }
+        }
+    }
+    assert!(dead.is_empty(), "dead links: {dead:#?}");
+}
