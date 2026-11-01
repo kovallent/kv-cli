@@ -38,6 +38,14 @@ const EXIT_FINDINGS: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 const EXIT_DRIFT: u8 = 3;
 
+/// Each rule's reference page, compiled in so `kv-cli explain` works offline.
+/// The same files are the rule pages on GitHub (`docs/rules/`).
+const RULES: [(&str, &str); 3] = [
+    ("KV001", include_str!("../docs/rules/KV001.md")),
+    ("KV002", include_str!("../docs/rules/KV002.md")),
+    ("KV003", include_str!("../docs/rules/KV003.md")),
+];
+
 const STAR_CTA: &str =
     "If kv-cli caught something useful, a star helps: https://github.com/kovallent/kv-cli";
 
@@ -65,6 +73,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Write a default `.kovallent.yaml` parameter contract.
+    #[command(after_help = "Examples:\n  \
+        kv-cli init                 write ./.kovallent.yaml\n  \
+        kv-cli init --path svc/     write svc/.kovallent.yaml\n  \
+        kv-cli contract show        print every rule now in effect")]
     Init {
         /// Directory to write the contract into.
         #[arg(short, long, default_value = ".")]
@@ -74,7 +86,15 @@ enum Command {
         force: bool,
     },
 
-    /// Scan Python files for contract violations and hardcoded secrets.
+    /// Scan Python, notebooks and config files for contract violations,
+    /// hardcoded credentials and pinned infrastructure.
+    #[command(after_help = "Examples:\n  \
+        kv-cli audit                          scan the current folder\n  \
+        kv-cli audit src/ dags/etl.py         scan some paths only\n  \
+        kv-cli audit --strict                 fail on warnings too (CI)\n  \
+        kv-cli audit --format json > out.json machine-readable payload\n\n\
+        Exit codes: 0 compliant, 1 findings, 2 tool error, 3 contract drift.\n\
+        Run `kv-cli explain KV001` for what a rule checks and how to fix it.")]
     Audit {
         /// Files or directories to scan.
         #[arg(default_value = ".")]
@@ -118,7 +138,15 @@ enum Command {
     /// List the built-in framework profiles and what each contributes.
     Frameworks,
 
-    /// Apply the standard fixes to non-compliant files.
+    /// Apply the standard fixes: insert missing contract parameters and move
+    /// hardcoded credentials to environment variables.
+    #[command(after_help = "Examples:\n  \
+        kv-cli fix --dry-run        show what would change, write nothing\n  \
+        kv-cli fix                  fix the current folder\n  \
+        kv-cli fix samples/a.py     fix one file\n\n\
+        Each changed file is backed up to <file>.kvbak first. Pinned\n\
+        infrastructure (KV003) and hardcoded parameter defaults are listed as\n\
+        `manual:` items, never rewritten.")]
     Fix {
         /// Files or directories to repair.
         #[arg(default_value = ".")]
@@ -132,6 +160,15 @@ enum Command {
         /// Do not write `.kvbak` backups.
         #[arg(long)]
         no_backup: bool,
+    },
+
+    /// Explain a rule: what it catches, how to fix it, how to suppress it.
+    #[command(after_help = "Examples:\n  \
+        kv-cli explain              list the rules\n  \
+        kv-cli explain KV002        show one rule's reference")]
+    Explain {
+        /// Rule code, e.g. KV002. Omit to list every rule.
+        code: Option<String>,
     },
 }
 
@@ -215,6 +252,7 @@ fn main() -> ExitCode {
             credentials_warned = fix.credentials_externalized > 0;
             fix.code
         }),
+        Command::Explain { code } => cmd_explain(code.as_deref()),
     };
 
     match code {
@@ -270,7 +308,7 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
 
     println!(
-        "{} wrote {}",
+        "{} {}",
         "created".green().bold(),
         target.display().to_string().bold()
     );
@@ -505,6 +543,35 @@ fn mark_defaults(effective: &str, written: Option<&serde_yaml::Value>) -> String
         out.push('\n');
     }
     out
+}
+
+fn cmd_explain(code: Option<&str>) -> Result<u8, String> {
+    let Some(code) = code else {
+        for (code, page) in RULES {
+            println!("{}  {}", code.bold(), rule_title(page));
+        }
+        println!(
+            "\n{}",
+            "run `kv-cli explain <code>` for what a rule checks and how to fix it".dimmed()
+        );
+        return Ok(EXIT_OK);
+    };
+    match RULES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)) {
+        Some((_, page)) => {
+            print!("{page}");
+            Ok(EXIT_OK)
+        }
+        None => Err(format!(
+            "unknown rule `{code}`; the rules are {}",
+            RULES.map(|(c, _)| c).join(", ")
+        )),
+    }
+}
+
+/// `# KV002: hardcoded credential` -> `hardcoded credential`.
+fn rule_title(page: &str) -> &str {
+    let heading = page.lines().next().unwrap_or_default();
+    heading.split_once(": ").map_or(heading, |(_, title)| title)
 }
 
 fn cmd_schema() -> Result<u8, String> {
@@ -1030,7 +1097,7 @@ fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
 
 fn print_text(findings: &[Finding], r: &RunReport) {
     let contract_label = match r.contract_path {
-        Some(p) => p.display().to_string(),
+        Some(p) => tidy_path(p).display().to_string(),
         None => "built-in defaults (run `kv-cli init`)".to_string(),
     };
     println!(
@@ -1208,7 +1275,37 @@ fn print_text(findings: &[Finding], r: &RunReport) {
         } else {
             println!("{} {summary}{gate_note}", "PASS".green().bold());
         }
+        if let Some(code) = findings.iter().map(|f| f.code).min() {
+            println!(
+                "{}",
+                format!("run `kv-cli explain {code}` for what a rule checks and how to fix it")
+                    .dimmed()
+            );
+        }
     }
+}
+
+/// `samples/../.kovallent.yaml` -> `.kovallent.yaml`, for display only.
+/// Discovery walks upward with `..`; the run itself keeps the path it found,
+/// since folding `a/..` lexically is wrong when `a` is a symlink.
+fn tidy_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            Component::CurDir if path.components().count() > 1 => {}
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// What a `fix` run tells `main` beyond its exit code.

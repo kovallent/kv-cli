@@ -11,8 +11,30 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`kv-cli explain [CODE]`** prints a rule's reference page: what it catches,
+  a bad and a fixed example, what it ignores, how to suppress it and which
+  contract keys tune it. With no code it lists the rules. The pages are
+  compiled in, so it works offline; they are also `docs/rules/KV00n.md`.
+- A run with findings ends with a pointer to `kv-cli explain` for the lowest
+  rule code it reported.
+- `--help` for `init`, `audit`, `fix` and `explain` shows examples.
+
 ### Changed
 
+- `init` prints `created ./.kovallent.yaml` (was `created wrote …`), and the
+  `audit` header shows the contract as `.kovallent.yaml` rather than
+  `samples/../.kovallent.yaml`. The JSON payload is unchanged.
+- `audit --help` says what is scanned: Python, notebooks and config files.
+- The README is now a first-visit guide: a per-platform quickstart, a
+  copy-paste GitHub Actions workflow that verifies the release checksum, and a
+  corrected binary pre-commit hook that covers every scanned file type. The
+  reference material moved to `docs/` (configuration, frameworks, contract
+  pinning, JSON payload, how it works, development). Tests keep the README's
+  pinned versions equal to `Cargo.toml` and every relative doc link alive.
+- Removed the unmeasured "~10ms on the bundled samples" figure; the measured
+  "~0.3s on 500 files (8 cores)" stays.
 - README "Stack compatibility" now states which Python syntax is parsed
   (Python 3 through 3.14) instead of "3.9, 3.10, 3.11, 3.12+", and names the
   one known gap: 3.13 type-parameter defaults (`def f[T = int]`).

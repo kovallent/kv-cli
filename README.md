@@ -3,158 +3,186 @@
 **Local contract guardrails for Python data pipelines.** Airflow, dbt, Databricks, Snowpark, Flink, Polars.
 
 [![CI](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kovallent/kv-cli/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kovallent/kv-cli)](https://github.com/kovallent/kv-cli/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)](https://github.com/kovallent/kv-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
-<p align="center">
-  <img src="docs/media/kv-cli-demo.svg" alt="kv-cli init writes ./.kovallent.yaml, reporting required parameters target_environment and dry_run, 9 secret name patterns and 7 value patterns, and six framework profiles. kv-cli audit --strict then reports DB_PASSWORD assigned a hardcoded literal at line 11 (KV002, value redacted) and deploy_service missing target_environment at line 20 (KV001), failing with 13 errors and 6 warnings. kv-cli fix adds the parameter, rewrites DB_PASSWORD to read os.environ[DB_PASSWORD], flags a hardcoded default on line 90 for manual review, and applies 18 changes across 1 file. After that one line is threaded by hand, audit --strict reports PASS, 2 files are compliant." width="800">
-</p>
+Some pipeline bugs are syntactically fine and pass their tests. They break only when the code runs somewhere other than the author's laptop. `kv-cli` catches three kinds before the code leaves the workstation:
 
-That is a real session against [`samples/deploy.py`](samples/deploy.py) in this repository — init, fail, fix, pass. Five things are worth noticing:
+| Rule | Catches | Severity |
+| --- | --- | --- |
+| [`KV001`](docs/rules/KV001.md) | A governed function missing a required parameter such as `target_environment` | per parameter |
+| [`KV002`](docs/rules/KV002.md) | A hardcoded credential, in code, notebooks or config | error |
+| [`KV003`](docs/rules/KV003.md) | Infrastructure pinned to one environment: a warehouse, bucket, cluster ID or endpoint | warning |
 
-- **`init` writes the contract and says what it enabled** — two required parameters, 21 secret detectors, six framework profiles auto-detected per file. The rules are visible before the first scan, not buried in defaults.
-- **`deploy_service` is missing `target_environment`.** The function runs fine and passes tests; in production it silently takes the dev default. No linter has a rule for this.
-- **The secret value is redacted in the output** — `value "s3…" (<redacted>, 20 chars)`. A tool that reports credentials in CI logs has moved the leak, not closed it.
-- **`fix` rewrites it rather than describing it**: `DB_PASSWORD` now reads `os.environ["DB_PASSWORD"]`, with `import os` inserted above the existing imports. 18 changes land automatically; the hardcoded *default* on line 90 is deliberately left as a `manual:` item, because `os.environ[...]` in a default binds once at import time rather than per call. Thread that one line yourself and the re-run reports `PASS`.
-- **The run states its own scope.** `10 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope` is the denominator behind the result — without it, a repository where every function is framework-owned looks identical to one that complies.
+It is a single binary with no runtime dependencies. It parses your code locally with tree-sitter, needs no account and makes no network call. Run `kv-cli explain KV002` for any rule's reference, offline.
 
 ---
 
-## Run it on your own code
+## What a run looks like
 
-No account, no clone, no config. The analysis path makes no network call.
+This is a real session against [`samples/deploy.py`](samples/deploy.py), shortened where marked `…`:
 
-```bash
-# 1. Get the binary — no toolchain, ~2MB, no runtime dependencies
-#    (pick your platform's archive from the Releases page)
-curl -sSL https://github.com/kovallent/kv-cli/releases/latest/download/kv-cli-x86_64-unknown-linux-gnu.tar.gz | tar xz
+```text
+$ kv-cli init
+created ./.kovallent.yaml
+  · required parameters: target_environment, dry_run
+  · secret detectors: 9 name patterns, 12 value patterns
+  · framework profiles: dbt, polars, flink, databricks, snowpark, airflow (auto-detected per file)
 
-# 2. Point it at a pipeline repository
-./kv-cli audit ~/your-pipeline-repo
+Next: kv-cli audit
+
+$ kv-cli audit --strict samples/deploy.py
+kv-cli audit  .kovallent.yaml  1 file
+  · contract a6edcff00199c1cf
+  · functions: 7 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope
+
+samples/deploy.py
+    11  error  KV002  `DB_PASSWORD` is assigned a hardcoded literal
+        value "s3…" (<redacted>, 20 chars) - load it from the environment or a secret store
+    20  error  KV001  `deploy_service` is missing contract parameter `target_environment`
+        expected signature to declare `target_environment: str = "dev"`
+        in scope: name matches applies_to.name_patterns "deploy*"
+    …
+FAIL 13 errors, 6 warnings (19 gating under --strict)
+
+$ kv-cli fix samples/deploy.py
+kv-cli fix
+
+samples/deploy.py
+  + added `target_environment` to deploy_service()
+  ~ `DB_PASSWORD` now reads os.environ["DB_PASSWORD"]
+    …
+
+  manual: samples/deploy.py:90 `password` has a hardcoded default; move the lookup into the body so it is read per call, not at import time
+FIXED applied 18 changes across 1 file
+    …
 ```
 
-Typical run: **about 10ms on the bundled samples, about 0.3s on a 500-file repository** (8 cores; files are scanned in parallel). Exit `0` if compliant, `1` if there are findings.
-
-### Or clone and run the bundled samples
-
-`samples/` ships pipelines that trip every rule, so you can read real output before trusting it on your own code:
-
-```bash
-git clone https://github.com/kovallent/kv-cli && cd kv-cli
-./kv-cli init                           # created wrote ./.kovallent.yaml
-./kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
-./kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
-./kv-cli audit samples/compliant.py     # PASS — must always be clean
-```
-
-`samples/deploy.py` exercises every detector and every suppression path. `samples/frameworks/` has one file per supported stack, each demonstrating both the signature exemption and that framework's own detectors. `samples/credentials.py` shows every form a hardcoded credential takes — subscripts, `getenv` fallbacks, comparisons, a token split across a concatenation, camelCase names — next to names that are *not* credentials (`secret_name`, `token_url`, `tokenizer`). `samples/configs/` covers `.env`, `airflow.cfg`, `secrets.toml` and camelCase JSON, with a `.env.example` that must stay clean; `samples/notebooks/` has a notebook whose saved output printed a token.
-
-The counts above are pinned by a test against the real output, so they cannot drift from what the tool reports.
-
-> If you build from source instead of downloading the binary, budget a few minutes for the first compile — `cargo` builds the tree-sitter grammar and needs a C compiler. `make demo` builds and then audits `samples/` in one step.
-
-### It found nothing. Is it working?
-
-Three common causes, all of them by design:
-
-1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only. A hardcoded relation in a `.sql` file is not seen.
-2. **No contract file, so defaults applied.** Run `kv-cli init` and enable the rules you want.
-3. **The framework owns your signatures.** Check the scope line in the output — if `in scope` is low relative to the total, that is the exemption working, not a miss. See [Framework support](#framework-support).
-
-If no file matched at all, that is not a pass: the run exits `2` with `no files to audit` and names the globs it tried.
+- **The secret is redacted** in the output. A tool that prints credentials into CI logs has moved the leak, not closed it.
+- **`fix` rewrites code rather than describing it.** It inserts missing parameters and moves credentials to `os.environ`. It leaves a hardcoded *default* as a `manual:` item, because `os.environ[...]` in a default is read once, at import time.
+- **The run states its scope.** `7 in scope, 0 framework-exempt, …` is the denominator behind the result. Without it, a repository where every function is framework-owned would look identical to one that complies.
 
 ---
 
-## What is kv-cli?
+## Quickstart
 
-`kv-cli` enforces parameter contracts across Python data pipelines: every governed function must declare the required schema arguments (e.g. `target_environment`), no credential may be hardcoded, and no infrastructure identifier may be pinned to one environment.
+**1. Install.** Download your platform's archive from the [latest release](https://github.com/kovallent/kv-cli/releases/latest) and unpack it:
 
-It parses your code locally with a `tree-sitter` AST — nothing is transmitted, no account is required, and there is no network call in the analysis path — to detect parameter contract breaks (`KV001`), hardcoded credentials (`KV002`), and pinned infrastructure identifiers (`KV003`) **before bad code leaves the developer workstation**.
-
-The class of bug it targets is the one linters miss: code that is syntactically fine, passes tests, and only breaks when it runs somewhere other than the author's laptop.
-
----
-
-## Install
-
-**Prebuilt binary — no toolchain required.** Download the archive for your platform from [Releases](https://github.com/kovallent/kv-cli/releases), then:
+| Platform | Archive |
+| --- | --- |
+| macOS, Apple silicon | `kv-cli-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `kv-cli-x86_64-apple-darwin.tar.gz` |
+| Linux x86-64 | `kv-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `kv-cli-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86-64 | `kv-cli-x86_64-pc-windows-msvc.tar.gz` (contains `kv-cli.exe`) |
 
 ```bash
-chmod +x kv-cli && sudo mv kv-cli /usr/local/bin/
+# macOS / Linux: set TARGET to the archive name for your platform, minus kv-cli- and .tar.gz
+TARGET=aarch64-apple-darwin
+curl -sSL "https://github.com/kovallent/kv-cli/releases/latest/download/kv-cli-$TARGET.tar.gz" | tar xz
+sudo mv kv-cli /usr/local/bin/
 kv-cli --version
 ```
 
-Each release ships `SHA256SUMS` for verification.
+On Windows 10 and later, unpack with the built-in `tar -xzf kv-cli-x86_64-pc-windows-msvc.tar.gz` and put `kv-cli.exe` on your `PATH`.
 
-**With Cargo:**
+Each release ships `SHA256SUMS`. To verify a download, run `grep "$TARGET" SHA256SUMS | shasum -a 256 -c` (or `sha256sum -c` on Linux).
+
+> **macOS says the app "cannot be opened"?** The binary is not notarized, and archives downloaded through a browser are quarantined. Run `xattr -d com.apple.quarantine kv-cli`. Downloads made with `curl`, as above, are not affected.
+
+**2. Run it on a pipeline repository.**
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli
+cd ~/your-pipeline-repo
+kv-cli audit            # works with built-in defaults
+kv-cli init             # optional: write .kovallent.yaml to tune the rules
 ```
 
-**From source:**
+Exit `0` means compliant and `1` means findings. A 500-file repository takes about 0.3s on 8 cores.
+
+### Try it on the bundled samples first
+
+`samples/` ships pipelines that trip every rule, so you can read real output before trusting the tool with your own code:
 
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
-make release          # -> target/release/kv-cli
+kv-cli init                           # created ./.kovallent.yaml
+kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
+kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
+kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
 
-> **Building from source needs a C compiler** for the tree-sitter grammar — Xcode Command Line Tools on macOS, `build-essential` or equivalent on Debian/Ubuntu, and in CI. This applies to `cargo install` and `make release`, not to the prebuilt binary, which has no runtime dependencies.
+`samples/deploy.py` exercises every detector and suppression. `samples/frameworks/` has one file per supported stack. `samples/credentials.py` shows every form a hardcoded credential takes, next to names that are *not* credentials. `samples/configs/` and `samples/notebooks/` cover `.env`, `airflow.cfg`, TOML, JSON and a notebook whose saved output printed a token. A test checks the counts above against the real output.
 
-There is currently **no PyPI or Homebrew distribution**. `pip install kv-cli` will not work.
+### It found nothing. Is it working?
 
----
+1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only.
+2. **Your functions are not governed.** By default, `KV001` covers functions named like `deploy*`, `run_*`, `*_pipeline`, `*_job` or `main`, or decorated with `@task`. Run `kv-cli init` and edit `applies_to`, or see [`KV001`](docs/rules/KV001.md).
+3. **A framework owns your signatures.** Check the scope line. A low `in scope` count with a high `framework-exempt` count means the exemption is working, not missing things. See [frameworks](docs/frameworks.md).
 
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `kv-cli init` | Write a default `.kovallent.yaml` contract and report what it enables — required parameters, secret detector counts, framework profiles. `--force` overwrites. Start here. |
-| `kv-cli audit [PATHS]` | Scan for violations. `--format json`, `--strict`, `--config`, `--expect-contract`. |
-| `kv-cli fix [PATHS]` | Apply standard fixes. `--dry-run`, `--no-backup`. |
-| `kv-cli frameworks` | Show the built-in profiles and what each contributes. |
-| `kv-cli schema` | Print the JSON payload schema this build emits. |
-| `kv-cli contract check` | Validate the contract without scanning: every problem, each as `file:line: field: message`. Exit `0` valid, `2` not. |
-| `kv-cli contract show` | Print the effective contract — your file plus every default, marked `# default` — and its fingerprint. |
-| `kv-cli contract schema` | Print the JSON Schema for `.kovallent.yaml`, for editor validation. |
+If no file matched at all, that is not a pass. The run exits `2` with `no files to audit` and names the patterns it tried.
 
 ---
 
-## Audit CI gate and exit codes
+## Use it in CI
 
-`audit` is the CI gate. Exit codes are a documented interface — each escalates to different people:
+Add this as `.github/workflows/kovallent.yml`. It installs a pinned release, verifies its checksum and fails the pull request on any finding:
+
+```yaml
+name: kovallent
+on: [pull_request]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kv-cli
+        env:
+          KV_VERSION: v0.6.1
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          cd "$RUNNER_TEMP"
+          base="https://github.com/kovallent/kv-cli/releases/download/$KV_VERSION"
+          curl -sSLO "$base/kv-cli-$TARGET.tar.gz"
+          curl -sSLO "$base/SHA256SUMS"
+          grep "kv-cli-$TARGET.tar.gz" SHA256SUMS | sha256sum -c -
+          tar -xzf "kv-cli-$TARGET.tar.gz"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: kv-cli audit --strict
+```
+
+`--strict` fails on warnings too, `KV003` included. Drop it to gate on errors only.
+
+Exit codes are a stable interface, and each one is a problem for a different owner:
 
 | Code | Meaning | Escalates to |
 | --- | --- | --- |
 | **0** | Compliant | — |
 | **1** | Findings | The pull-request author |
-| **2** | Tool error | Whoever operates the gate |
-| **3** | Contract drift | Whoever owns the contract |
+| **2** | Tool error, including "no files to audit" | Whoever operates the gate |
+| **3** | Contract drift (`--expect-contract`) | Whoever owns the contract |
 
-Resolution is first-match-wins in the order 2, 3, 1, 0. An unverifiable run never passes, and drift outranks findings — findings computed against the wrong contract are not a meaningful result. A run that resolves **no files to scan** is exit `2`: a wrong path or a mistyped `scan.include` glob would otherwise report `PASS 0 files are compliant`.
+To stop a pull request from quietly weakening the contract itself, pin its fingerprint. See [contract pinning](docs/contract-pinning.md). For machine-readable output, `--format json` emits a [documented payload](docs/json-payload.md).
 
-After a successful run, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. Because it is on stderr it shows in CI logs but never in stdout, and it is never printed alongside `--format json` or `schema` output or after a run that exits non-zero. It makes no network call.
+After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json`, or after a failing run, and it makes no network call.
 
 ---
 
-## Git pre-commit integration
-
-Add `kv-cli` to your `.pre-commit-config.yaml`:
+## Pre-commit
 
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.6.0
+    rev: v0.6.1
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
 ```
 
-`kv-cli-contract` runs `kv-cli contract check` on each changed `.kovallent.yaml`, without scanning code, so a broken contract is stopped at the commit that introduces it — with every problem and its line.
-
-The hook is declared with `language: rust`, so pre-commit builds the crate once in an isolated environment on first run. Each contributor therefore needs Rust and a C compiler, and waits through one compile. If that is not acceptable for your team, call the prebuilt binary directly instead:
+These hooks build kv-cli from source on first run (`language: rust`), so each contributor needs Rust and a C compiler and waits through one compile. To use an installed binary instead:
 
 ```yaml
 repos:
@@ -164,222 +192,54 @@ repos:
         name: kv-cli contract audit
         entry: kv-cli audit
         language: system
-        types_or: [python, yaml]
+        types: [text]
+        files: '(\.(py|ipynb|ya?ml|toml|ini|cfg|json|env)|(^|/)\.env(\.[^/]*)?)$'
 ```
 
-A hook is advisory by construction — `--no-verify` skips it, and a fresh clone installs none. It is where a finding is cheapest to fix, not where compliance is guaranteed. That is what the CI gate is for.
+A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It is where a finding is cheapest to fix. The CI gate is what guarantees compliance.
 
 ---
 
-## Diagnostics and rules
+## Commands
 
-* **`KV001` — Parameter contract violation (error).** A governed function is missing a contract parameter.
-* **`KV002` — Hardcoded secret (error).** A credential or API key written as a literal.
-* **`KV003` — Pinned infrastructure identifier (warning by default).** An infrastructure identifier pinned to one environment: a warehouse, catalog, cluster ID, bucket, or endpoint. Warning by default so adopting it does not break CI on day one; `fix` never rewrites these, because the right replacement is a deployment decision.
+| Command | Purpose |
+| --- | --- |
+| `kv-cli init` | Write a commented `.kovallent.yaml` and report what it enables. `--force` overwrites. |
+| `kv-cli audit [PATHS]` | Scan for violations. `--strict`, `--format json`, `--config`, `--expect-contract`. |
+| `kv-cli fix [PATHS]` | Apply the standard fixes, backing up each file to `.kvbak`. `--dry-run`, `--no-backup`. |
+| `kv-cli explain [CODE]` | Print a rule's reference: what it catches, how to fix it, how to suppress it. |
+| `kv-cli contract check` | Validate the contract without scanning code, listing every problem with its line. |
+| `kv-cli contract show` | Print the effective contract, with every default marked, and its fingerprint. |
+| `kv-cli contract schema` | Print the JSON Schema for `.kovallent.yaml`, for editor validation. |
+| `kv-cli frameworks` | Show the built-in framework profiles and what each contributes. |
+| `kv-cli schema` | Print the JSON Schema of the `--format json` payload. |
 
-### Auto-fixing behaviour
+Every command takes `--help`, with examples.
 
-`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`; an existing backup is never overwritten, so it always holds the source as it was before the first `fix`. When a credential is moved out of the source, `fix` lists the backups that still hold it in plaintext — add `*.kvbak` to `.gitignore` and delete them after review — and reminds you to rotate it: a value that was ever committed is in git history whatever the file says now.
-
-### Where each rule applies
-
-| Files | KV001 | KV002 | KV003 |
-| --- | --- | --- | --- |
-| Python (`.py`) | ✓ | ✓ | ✓ |
-| Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | |
-| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | |
-
-Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
-
-Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
-
-### How KV002 decides
-
-A literal is a credential when either rule says so:
-
-1. **Its shape** — a value pattern (AWS, GitHub, Stripe, Google, JWT, PEM, a URL with a password, …) matches it, under any name and anywhere in the file, comments and notebook outputs included — and across an implicit concatenation, so `"ghp_abc" "def"` is read as the one token it spells.
-2. **Its name** — it is assigned to, or compared against (`if password == "..."`), a name matching `secrets.key_patterns` (`*password*`, `*token*`, …), unless the name only *refers to* a credential (`secrets.exempt_key_patterns`: `secret_name`, `token_url`, `credentials_path`, …) or the value is a placeholder (`allow_values`, `placeholder_patterns`: `changeme`, `your-api-key-here`, `<token>`), a reference (`${VAR}`, `{{ var }}`, an f-string substitution) or shorter than `min_value_length`.
-
-Names are matched both as written (lowercased) and in `snake_case`, so `secretName` meets the `*_name` exemption and `privateKey` meets `*private_key*`. Exemptions and placeholders apply to the name rule only, so a real token is reported whatever it is called. A pattern that matches everything (`"*"`) is rejected: to turn a rule off, say so (`key_patterns: []`).
-
-### Suppressions
-
-Suppress a single line with a trailing `# kovallent:allow-secret`, or `# kovallent:allow-infra` for `KV003`. The marker counts only inside a comment — in a string literal it is data, not intent. JSON has no comments; exclude a fixture file with `scan.exclude` instead.
+To suppress one finding, add a trailing `# kovallent:allow-secret` (`KV002`) or `# kovallent:allow-infra` (`KV003`). To exempt a function from `KV001`, add its name to `applies_to.exempt_name_patterns`.
 
 ---
 
 ## Framework support
 
-Run `kv-cli frameworks` for the live list. Each profile is scoped to files that actually use the framework — detected from imports, or for dbt from the `model(dbt, session)` signature. That scoping is what makes aggressive rules safe: `account` and `warehouse` would be noisy globally, but in a file that imports `snowflake` they are precise.
+Each profile applies only to files that use the framework, detected from imports. That scoping is what makes aggressive rules safe: `warehouse` would be noisy everywhere, but in a file that imports `snowflake` it is precise.
 
 | Profile | Detected by | Contributes |
 | --- | --- | --- |
-| **dbt** | `def model(dbt, session)` | Owns the model signature; `profiles.yml` credential scanning |
-| **polars** | `import polars` | `storage_options` credentials; object-store path identifiers |
+| **dbt** | `def model(dbt, session)` | Owns the model signature; `profiles.yml` credentials |
+| **polars** | `import polars` | `storage_options` credentials; object-store paths |
 | **flink** | `import pyflink` | Owns `@udf`/`@udtf`/`@udaf`; broker and JDBC endpoints |
 | **databricks** | `import dlt` / `databricks` / `pyspark` | Owns `@dlt.table`/`@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths |
-| **snowpark** | `import snowflake` | Owns `@sproc`/`@udf`; session config account, warehouse, role |
+| **snowpark** | `import snowflake` | Owns `@sproc`/`@udf`; account, warehouse, role |
 | **airflow** | `import airflow` | Owns `@dag`/`@task_group`/`@setup`/`@teardown`; governs `@task` (report-only); Fernet keys; `conn_id`, pool, queue |
 
-**Signatures a framework owns are exempt from `KV001`.** A `@dlt.table` function takes no arguments because DLT calls it; `def model(dbt, session)` is fixed by dbt. Injecting `target_environment` there would break the pipeline, so the exemption overrides the user's own name patterns — a function called `daily_sales_job` matches `*_job`, but under `@dlt.table` it is left alone. Airflow's `@dag` is owned for the same reason: its parameters become DAG params shown in the UI and in `{{ params.* }}`, so adding them silently changes the DAG.
-
-User `exempt_name_patterns` still win over framework rules, so `@task def _internal_step()` stays out of scope.
-
-A profile can also work the other way: `governed_decorators` puts functions **into** `KV001` scope. Airflow's `@task` is the one case — TaskFlow tasks are called from your own DAG body, so the contract parameter can be threaded through at the call site. Declaring it on the profile means the behaviour no longer depends on your contract happening to list a decorator named `task`.
-
-Governed decorators can be report-only (`governed_auto_fix: false`), which Airflow's `@task` is. `audit` flags a missing parameter, but `fix` refuses to insert it and prints a `manual:` item instead — `extract_orders("s3://...")` would not pass the new argument, so an inserted default would read `"dev"` in every environment while looking correct. **An Airflow-heavy repository therefore cannot reach a clean audit from `fix` alone; you have to thread the parameter through the call site yourself.** This is scoped to the framework: ordinary functions in the same DAG file are still fixed normally.
-
-Select profiles explicitly in the contract if you prefer:
-
-```yaml
-frameworks:
-  enable: [auto]         # or [snowpark, dbt] to apply everywhere
-  disable: [databricks]  # never apply, even when detected
-```
-
-### dbt YAML and other config files
-
-`profiles.yml`, `dbt_project.yml` and every other scanned config file are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}`, `${VAR}` and INI `%(name)s` interpolation are recognised as correct and never flagged. A framework's own config file activates its profile: `profiles.yml` brings in dbt's credential keys, `airflow.cfg` brings in Airflow's (`fernet_key`, …). `KV003` is deliberately not applied: a per-target config file is exactly where environment-specific values belong.
-
----
+A signature the framework owns is exempt from `KV001`, because the framework calls it and adding a parameter would break the pipeline. [Frameworks](docs/frameworks.md) covers the details, including why Airflow's `@task` is reported but never auto-fixed.
 
 ## Stack compatibility
 
 * **Python:** source written for any Python 3 release through 3.14. `kv-cli` never runs Python; it parses source with tree-sitter, so no interpreter is needed and the version installed does not matter. Covered syntax includes `:=` and `/` parameters (3.8), `match` (3.10), `except*` (3.11), `type` aliases, generic `def f[T]` / `class C[T]` and nested-quote f-strings (3.12), and `t"…"` template strings and unparenthesised `except A, B:` (3.14).
   * **Known gap:** type-parameter defaults (`def f[T = int]`, 3.13) do not parse. Such a file is audited on a partial parse and listed as `syntax_error` (a warning; an error under `--strict`); findings elsewhere in the file are still reported, and `fix` will not rewrite it.
-* **dbt:** `def model(dbt, session)` model signatures; `profiles.yml` credential scanning.
-* **Apache Airflow:** `@dag`, `@task_group`, `@setup`, `@teardown`, `@task` governance; Fernet keys; `conn_id`, pool, queue.
-* **Databricks:** `@dlt.table`, `@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths.
-* **Snowpark:** `@sproc`, `@udf`; session config account, warehouse, role.
-* **Flink:** `@udf`, `@udtf`, `@udaf`; broker and JDBC endpoints via `pyflink`.
-* **Polars:** `storage_options` credentials and object-store path identifiers.
-
----
-
-## Contract configuration (`.kovallent.yaml`)
-
-`.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), and the secret detectors. Run `kv-cli init` for a fully commented template.
-
-Any key you leave out keeps its default, so a contract can be as small as the rules you change — `kv-cli contract show` prints the effective contract with every inherited default marked.
-
-### Feedback on the contract itself
-
-Mistakes in a contract are caught at three points, each before they can quietly change what is enforced:
-
-- **While you type.** `kv-cli init` writes a first line pointing editors at the JSON Schema for that release (`schema/contract.v1.json`): unknown keys, wrong types and invalid values are flagged as you type, and keys autocomplete with their documentation. It works in VS Code with the Red Hat YAML extension; in JetBrains IDEs, map the schema under *Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings*. For a contract written before 0.6, add the line yourself:
-
-  ```yaml
-  # yaml-language-server: $schema=https://raw.githubusercontent.com/kovallent/kv-cli/v<version>/schema/contract.v1.json
-  ```
-
-  **Offline or air-gapped?** kv-cli itself never fetches the schema, but your editor follows the link. Without a route to GitHub, keep a copy beside the contract and point at that instead — regenerate it when you upgrade kv-cli:
-
-  ```bash
-  kv-cli contract schema > .kovallent.schema.json
-  ```
-
-  ```yaml
-  # yaml-language-server: $schema=./.kovallent.schema.json
-  ```
-
-  The schema is JSON Schema draft-07, the version YAML editors support most widely.
-
-- **Before you commit.** `kv-cli contract check` validates the contract without scanning any code and lists every problem at once:
-
-  ```
-  .kovallent.yaml:4: parameters[0].default: "\"dev" is not a valid Python expression - a string default needs its quotes inside the YAML value, e.g. '"dev"'
-  .kovallent.yaml:5: parameters[1].name: "target-environment" is not a Python identifier, so no signature could declare it
-  .kovallent.yaml:19: frameworks.enable[0]: 'dbt' is both enabled and disabled; keep it in one list
-  3 problems in .kovallent.yaml
-  ```
-
-  It takes contract files by name too (`kv-cli contract check svc/.kovallent.yaml`), which is how the `kv-cli-contract` pre-commit hook runs it.
-
-- **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line), a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled.
-
-### How patterns match
-
-- **Paths** (`scan.include`, `scan.exclude`) follow `.gitignore` rules, relative to the folder holding the contract — whichever folder you scan, so `kv-cli audit src` and `kv-cli audit .` agree. `*` stays within one folder (`src/*.py` is not `src/deep/a.py`); `**` spans any number of folders; a pattern with no `/` matches the file name at any depth (`*.py`). Files named on the command line need no `include` match, but `exclude` applies to them.
-- **Names** — function names, decorators, secret and infrastructure keys — are matched ignoring case, with `*` and `?`. Key names are also tried in snake_case, so `*private_key*` matches `privateKey`.
-- **Why a function is governed** is stated on each KV001 finding: `in scope: name matches applies_to.name_patterns "deploy*"`, a decorator, `all_functions`, or a framework profile — the contract's own rules first.
-
-```yaml
-version: 1
-parameters:
-  - name: target_environment
-    annotation: str
-    default: '"dev"'
-    severity: error
-applies_to:
-  decorators: ["my_org.task"]
-scan:
-  exclude:
-    - "**/.venv/**"
-    - "tests/fixtures/**"
-infrastructure:
-  severity: error
-```
-
-**Upgrading to 0.6.0.** Fingerprints do not change. Two behaviours do: `*` in `scan.include` / `scan.exclude` no longer crosses folders (`src/*.py` means files directly in `src/`; write `src/**/*.py` for every depth), and a contract that fails validation is refused with exit `2` instead of loading. Run `kv-cli contract check` first — it lists anything to change, each with its line.
-
-**Upgrading to 0.5.0.** Every contract's fingerprint changes once: 0.5.0 adds `secrets.exempt_key_patterns`, `secrets.placeholder_patterns` and `infrastructure.exempt_key_patterns`, and a new field changes the serialized contract even where the file does not mention it (ADR 0001). If you pin `--expect-contract`, re-pin after upgrading — the run reports the new value at `run.contract_sha256`. The new fields take their defaults wherever a contract omits them, so every contract gets the name exemptions and placeholder shapes at once. `scan.include` and `secrets.value_patterns` are different: a contract written by an earlier `kv-cli init` spells them out in full, so it keeps its file types and detectors until you compare it with a fresh template (`kv-cli init --path /tmp/kv`) and copy what you want.
-
----
-
-## Contract distribution and verification
-
-The contract stays local. `audit --format json` emits a semantic fingerprint of it under `run.contract_sha256`, which a server compares against what is deployed for the repository; drift is reported as its own outcome rather than as a code failure. This keeps `audit` working offline, on the free local tier, and in air-gapped deployments — none of which survive a mandatory fetch.
-
-The hash covers the parsed contract, not the file bytes, so reformatting or editing a comment is not drift while editing a rule is. `run.contract_path` is `null` when the run used built-in defaults.
-
-### Enforcing the pin today
-
-No service is required. The expected hash has to live somewhere the developer opening the pull request cannot edit — an Actions organization variable is exactly that:
-
-```yaml
-- name: Kovallent gate
-  run: kv-cli audit --strict --format json --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}
-```
-
-On mismatch the run exits `3`, distinct from findings (`1`) and tool errors (`2`).
-
-Committing the expected hash to the repository instead is weaker — whoever weakens the contract can update the lock in the same commit.
-
-*Known gap:* anyone with write access can edit the workflow to drop the flag. Close it with `CODEOWNERS` on `.github/workflows/` plus branch protection, or an organization ruleset that requires the check. See [ADR 0001](docs/adr/) for rationale, rejected alternatives, and staging plans.
-
----
-
-## The JSON payload schema
-
-`schema/findings.v1.json` is generated from the Rust types by `kv-cli schema`; a test asserts the committed document matches and that a real run validates against it, so the two cannot drift.
-
-* **Version and identity.** `run` carries `schema_version` (bumped only on a breaking payload change, independent of `tool_version`), run identity (`repo`, `commit`, `branch`, `timestamp`), contract provenance, and a scope block. Identity is never guessed: `repo` and `commit` come from the CI environment (`GITHUB_REPOSITORY`, `CI_COMMIT_SHA`, …) or from `--repo` / `--commit` / `--branch`, and `identity_source` records which — `"flag"`, `"env:GITHUB_SHA"`, or absent.
-* **Severity reporting.** Severity is reported as emitted. `errors` and `warnings` count intrinsic severities regardless of `--strict`; the flag is emitted so a consumer can apply the policy itself. Otherwise a strict run reports every finding as an error and the payload cannot say how many were warnings.
-* **Completeness.** No file can vanish from the payload. Every file `kv-cli` resolves for scanning is either represented in `findings`/`files_scanned` or named in `run.skipped[]` as `{path, reason, severity, detail}`, reason being `"syntax_error"` or `"unreadable"`. A syntax error is a warning — matching how `KV003` was introduced, it does not fail CI by default and is promoted under `--strict`. An unreadable file is always an error, since there is no lenient reading of "the tool could not check this file."
-* **Scope block.** The scope block is the evidence behind a green result. Without it, a repository where every governed function is framework-owned looks identical to one that fully complies:
-
-```text
-functions: 10 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope
-```
-
-Framework ownership and the contract's `exempt_name_patterns` are counted separately — the first is ours, the second is the customer's choice.
-
----
-
-## How the AST scanner works
-
-`src/python.rs` parses each Python file with tree-sitter (`tree-sitter-python`) and reads everything off the parse tree. Nothing in the Python analysis is text matching.
-
-That matters most for `fix`, which rewrites source. The parser yields string literals already paired with what binds them, so `a, b = "x", "y"` pairs element-wise. An earlier text-scanning implementation walked backwards through bytes to guess the binding, and on that line it paired `b` with `"x"` — then rewrote the wrong literal, breaking `a` and leaving the secret in place. Bindings are recognised in five forms: assignment (including annotated and tuple targets), dict entries, keyword arguments, walrus expressions, and parameter defaults.
-
-Signatures come from the tree too, so multi-line parameter lists, `async def`, `lambda` defaults, `/` and `*` separators, and decorator calls spread across lines all work with no special cases.
-
-### Two deliberate limits
-
-1. A parameter default (`def f(password="...")`) is reported but never auto-fixed: `os.environ[...]` in a default is evaluated once at import time, not per call, so the rewrite would change behaviour. `fix` prints it as a `manual:` item.
-2. A file with syntax errors is audited on tree-sitter's partial parse and flagged in the output, but `fix` refuses to rewrite it.
-
-Config files are handled by line scanners rather than parsers — `src/yamlscan.rs` for YAML, `src/configscan.rs` for `.env`, INI, TOML and JSON — because the parsers give structure but not line numbers, and a finding without a line number is not actionable. The YAML scanner tracks block scalars so prose inside a `|` block is not mistaken for mapping keys; the JSON scanner tokenizes strings so a match never begins inside one. Notebooks (`src/notebook.rs`) join their code cells into one Python source — an import in the first cell still informs the fifth — and map each finding back to the line in the `.ipynb` file.
+* **Files:** Python gets all three rules. Notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) get `KV002`. Files must be UTF-8; anything else is reported as unreadable rather than guessed at.
 
 ---
 
@@ -389,52 +249,48 @@ Config files are handled by line scanners rather than parsers — `src/yamlscan.
 | --- | --- | --- | --- | --- |
 | Checks the code is **well-formed** | yes | — | partial | — |
 | Checks the code is **portable across environments** | no | no | no | **yes** |
-| Data-stack aware (Airflow, dbt, Spark, Snowpark) | no | no | no | **yes** |
+| Data-stack aware (Airflow, dbt, Databricks, Snowpark) | no | no | no | **yes** |
 | Enforces a **required-parameter contract** | no | no | no | **yes** |
 | Runs locally with nothing transmitted | yes | yes | usually not | **yes** |
-| Typical runtime | instant | instant | minutes | **~10ms on the bundled samples; ~0.3s on 500 files** |
 
-`detect-secrets` finds high-entropy strings; `KV002` finds a literal assigned to a name your contract forbids, which also catches `password = "dev"`. Neither has any concept of "this function must accept `target_environment`."
+`detect-secrets` finds high-entropy strings. `KV002` also finds a literal assigned to a name your contract forbids, which catches `password = "dev"`. Neither has any concept of "this function must accept `target_environment`."
 
 ---
 
-## Development
+## Documentation
+
+- **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), also available offline as `kv-cli explain <code>`.
+- [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
+- [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
+- [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
+- [JSON payload](docs/json-payload.md): the `--format json` schema.
+- [How it works](docs/how-it-works.md): the AST scanner, config scanners and what `fix` changes.
+- [Development](docs/development.md): building, testing and the labelled corpus.
+- [Architecture decisions](docs/adr/) and the [changelog](CHANGELOG.md).
+
+### Other ways to install
 
 ```bash
-make test     # unit, end-to-end and corpus tests
-make check    # fmt --check + clippy -D warnings + tests
-make corpus   # precision/recall report for the labelled corpus
-make demo     # build, then audit samples/ (exits 1 by design)
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.6.1
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same gate on every pull request and push to `main`: `cargo fmt --check` and `clippy -D warnings` on Linux, and the full test suite — corpus included — on Linux, macOS and Windows, the platforms the release ships for.
-
-`samples/compliant.py` must always audit clean.
-
-**The labelled corpus** (`tests/corpus/`) states what kv-cli *should* report, independently of what it does. Hand-written cases mark each expected finding with `expect: KV00n` on its line (or in a `<file>.expect` sidecar for JSON and notebooks); `matrix/names.tsv` and `matrix/values.tsv` hold labelled key names and values that are expanded across every syntactic form. Every disagreement is listed in `baseline.tsv` as a known false positive or miss, and the test fails when that list changes either way — so a regression fails, and so does an unrecorded improvement. After an intended change, run `KV_CORPUS_BLESS=1 cargo test --test corpus` and review the baseline diff. Cases write credentials as placeholders (`@@GITHUB_TOKEN@@`) that become fakes only in a temporary copy, so nothing token-shaped is committed. `cargo run --example dump <file.py>` prints the parse tree with field names — useful when adding a rule that needs a node kind you have not handled yet.
-
-### Dependency notes
-
-* **Build dependencies.** Building requires a C compiler (`cc`) for the tree-sitter grammar. The output is still a single binary with no runtime dependencies.
-* **serde_yaml.** Pinned at its final 0.9 release and no longer maintained upstream. Swapping it for `serde_norway` or `serde_yml` is a drop-in change; the contract fingerprint depends on it, so `golden_fingerprint` must stay green through the swap.
+Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI or Homebrew package, so `pip install kv-cli` will not work.
 
 ---
 
 ## Contributing
 
-Contributions are welcome — a new AST rule, a parsing improvement, a bug fix.
+Contributions are welcome: a new rule, a parsing improvement, a bug fix.
 
 1. Fork and branch (`git checkout -b feature/new-rule`).
 2. Open a thread in [Discussions](https://github.com/kovallent/kv-cli/discussions) if you want to talk it through first.
-3. Run `make check` and open a pull request.
+3. Run `make check` and open a pull request. [Development](docs/development.md) explains the test suite.
 
 Released under the [MIT License](LICENSE).
 
----
-
 ## Community
 
-* [Announcements](https://github.com/kovallent/kv-cli/discussions/categories/announcements) — release notes and roadmap.
-* [Ideas and feature requests](https://github.com/kovallent/kv-cli/discussions/categories/ideas-feature-requests) — propose a `KV` rule or a framework profile.
-* [Q&A](https://github.com/kovallent/kv-cli/discussions/categories/q-a) — setup, AST rules, custom configuration.
-* [Kovallent Enterprise waitlist](https://www.kovallent.com) — team-wide policy governance and scorecards.
+* [Announcements](https://github.com/kovallent/kv-cli/discussions/categories/announcements): release notes and roadmap.
+* [Ideas and feature requests](https://github.com/kovallent/kv-cli/discussions/categories/ideas-feature-requests): propose a rule or a framework profile.
+* [Q&A](https://github.com/kovallent/kv-cli/discussions/categories/q-a): setup, rules, custom configuration.
+* [Kovallent Enterprise waitlist](https://www.kovallent.com): team-wide policy governance and scorecards.
