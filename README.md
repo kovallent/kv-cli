@@ -165,9 +165,30 @@ Exit codes are a stable interface, and each one is a problem for a different own
 | **2** | Tool error, including "no files to audit" | Whoever operates the gate |
 | **3** | Contract drift (`--expect-contract`) | Whoever owns the contract |
 
-To stop a pull request from quietly weakening the contract itself, pin its fingerprint. See [contract pinning](docs/contract-pinning.md). For machine-readable output, `--format json` emits a [documented payload](docs/json-payload.md).
-
 After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json`, or after a failing run, and it makes no network call.
+
+### Stop a pull request from weakening the contract
+
+The contract is the policy, so a pull request that edits `.kovallent.yaml` could switch off the very checks meant to stop it. Pin the contract's fingerprint where pull-request authors can't edit it, and any change to a rule fails the gate with exit `3`, while reformatting or editing a comment does not.
+
+```diff
+ # .kovallent.yaml, changed in the pull request
+ secrets:
+-  enabled: true
++  enabled: false
+```
+
+```text
+$ kv-cli audit --expect-contract a6edcff00199c1cf
+…
+CONTRACT DRIFT the local contract is not the one this repository pins
+  expected  a6edcff00199c1cf
+  local     8e556afd14a4f728
+  findings above were computed against the local contract
+  this is not a code failure - it escalates to whoever owns the contract
+```
+
+In the workflow above, that is `kv-cli audit --strict --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}`, with the value from `kv-cli contract show` stored as an organization variable. [Contract pinning](docs/contract-pinning.md) covers why the pin must live outside the repository and how to close the remaining gaps. For machine-readable output, `--format json` emits a [documented payload](docs/json-payload.md), with `run.contract_drift` set on a mismatch.
 
 ---
 
