@@ -100,3 +100,29 @@ per tier and the tier is bought by a team. Revisit if pricing moves to org-level
 
 **No workspace level at all.** Sufficient for a single-team customer and fails immediately for
 the enterprise tier, whose stated value is per-team policy separation.
+
+## Amendment 2026-11-03
+
+Phase 1 review found a schema gap. This amendment adds to the decision above and reverses nothing
+in it; the status stays Accepted.
+
+**A repository is keyed by its provider and its provider id.** A numeric provider id is unique only
+within one provider: GitHub repository `8801` and GitLab repository `8801` are different
+repositories. `repository` gains a `provider` column, and `provider_repo_id` is no longer unique on
+its own; the pair is.
+
+```
+repository
+  id
+  workspace_id        NOT NULL   -- ownership; exactly one
+  provider            NOT NULL   -- the code host, e.g. 'github', 'gitlab'
+  provider_repo_id               -- numeric provider id, unique only within its provider
+  ...
+  UNIQUE (provider, provider_repo_id)
+```
+
+This ADR chose the numeric `provider_repo_id` over `owner/name` so that a rename cannot turn one
+repository into two, and namespacing it by provider keeps that guarantee across providers.
+
+Nothing else changes. Ownership is still singular, the quota check still counts `repository` rows,
+and `workspace_repository_grant` and `run` still reference `repository.id`, which is unaffected.

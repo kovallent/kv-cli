@@ -196,3 +196,39 @@ in the members list is not defensible in an invoice dispute.
 **Auto-granting the Member role on first contribution.** The obvious shortcut, and it hands read
 access to every finding in the workspace to anyone who lands a commit — including outside
 contributors to a public repository. Identity is created automatically; access never is.
+
+## Amendment 2026-11-03
+
+Phase 1 review found a schema gap. This amendment adds to the decision above and reverses nothing
+in it; the status stays Accepted.
+
+**A member's provider identity is the pair `(provider, provider_user_id)`.** A numeric user id is
+unique only within one provider: GitHub user `8801` and GitLab user `8801` are different people.
+`organization_member` gains a `provider` column, set exactly when `provider_user_id` is set:
+
+```
+organization_member
+  organization_id
+  user_id
+  status                          -- 'active' | 'invited' | 'deactivated'
+  source                          -- 'invited' | 'contribution'
+  provider             NULL       -- the code host, e.g. 'github'; set exactly when provider_user_id is
+  provider_user_id     NULL       -- numeric provider id, unique only within its provider
+  provider_subject     NULL       -- SSO subject, when federated
+  PRIMARY KEY (organization_id, user_id)
+```
+
+What this changes:
+
+- A member joins their `contribution_event` rows (ADR 0003) on `(provider, provider_user_id)`, not
+  on `provider_user_id` alone.
+- "An unrecognised provider identity" in decision 1 means that no member of the organization has
+  that pair. The first billable event from GitLab user `8801` provisions a member even when GitHub
+  user `8801` is already one.
+- An unresolved contribution event (`provider_user_id` null) still creates no member.
+
+`provider` names the code host that contributions come from. It has nothing to do with SSO:
+`provider_subject` still holds the identity provider's subject, and is unchanged.
+
+This ADR chose the numeric provider id over usernames and emails so that renames do not turn one
+person into two members, and namespacing it by provider keeps that guarantee across providers.
