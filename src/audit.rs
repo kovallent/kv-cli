@@ -3,6 +3,7 @@
 use crate::config::{self, Contract, Severity, FINGERPRINT_LEN};
 use crate::configscan::{self, ConfigKind};
 use crate::frameworks::{self, FrameworkProfile};
+use crate::jinja;
 use crate::notebook;
 use crate::python::{self, Analysis, Binding, BindingSource, FunctionDef};
 use regex::Regex;
@@ -436,22 +437,25 @@ impl Engine {
         // apply to them below.
         let key_rule = !(kind == ConfigKind::Env && configscan::is_env_template(Path::new(path)));
         for scalar in kind.scalars(source).into_iter().filter(|_| key_rule) {
-            // `{{ env_var(...) }}` and `${VAR}` are exactly what we want to see.
-            if kind.is_templated(&scalar.value) || scalar.value.is_empty() {
-                continue;
-            }
+            // `{{ env_var(...) }}` and `${VAR}` are exactly what we want to
+            // see. A Jinja template is judged by what it writes down, such as
+            // the fallback in `env_var('X', 's3cr3t')`.
+            let written = match jinja::literals(&scalar.value) {
+                Some(literals) => literals,
+                None if kind.is_templated(&scalar.value) || scalar.value.is_empty() => continue,
+                None => vec![scalar.value.clone()],
+            };
             let marked = !secrets.ignore_marker.is_empty()
                 && scalar.comment.contains(&secrets.ignore_marker);
-            if marked
-                || scalar.value.chars().count() < secrets.min_value_length
-                || is_placeholder(
-                    &scalar.value,
-                    &secrets.allow_values,
-                    &secrets.placeholder_patterns,
-                )
-            {
+            if marked {
                 continue;
             }
+            let Some(value) = written.into_iter().find(|v| {
+                v.chars().count() >= secrets.min_value_length
+                    && !is_placeholder(v, &secrets.allow_values, &secrets.placeholder_patterns)
+            }) else {
+                continue;
+            };
             let Some(fw) = ctx.matches_key(
                 &scalar.key,
                 |p| p.secret_keys,
@@ -479,7 +483,7 @@ impl Engine {
                 code: CODE_HARDCODED_SECRET,
                 severity: Severity::Error,
                 message: format!("`{}` holds a plaintext credential", scalar.key),
-                detail: Some(format!("value {} - {advice}", redact(&scalar.value))),
+                detail: Some(format!("value {} - {advice}", redact(&value))),
                 framework: fw,
                 kind: FindingKind::HardcodedSecret {
                     detector: "key_pattern".into(),
@@ -862,19 +866,18 @@ impl FileContext<'_> {
         filter: &ValueFilter,
     ) -> bool {
         let value = b.value.text(source);
-        if value.chars().count() < filter.min_len {
-            return false;
-        }
-        if is_placeholder(&value, filter.allow, filter.placeholders) {
-            return false;
-        }
         // An f-string with a substitution is computed, not hardcoded; a
-        // `${VAR}` or `{{ var }}` is a reference a renderer resolves, exactly
-        // as it is in a config file.
-        if b.value.has_interpolation || value.contains("${") || value.contains("{{") {
+        // `${VAR}` is a reference a renderer resolves, exactly as it is in a
+        // config file. A Jinja template is judged by what it writes down.
+        if b.value.has_interpolation || value.contains("${") {
             return false;
         }
-        !self.line_ignored(source, a, b.line, filter.marker)
+        let written = jinja::literals(&value).unwrap_or_else(|| vec![value]);
+        let hardcoded = written.iter().any(|v| {
+            v.chars().count() >= filter.min_len
+                && !is_placeholder(v, filter.allow, filter.placeholders)
+        });
+        hardcoded && !self.line_ignored(source, a, b.line, filter.marker)
     }
 
     /// Audit a parsed Python file.
@@ -2053,6 +2056,26 @@ mod tests {
         let src =
             "acme:\n  outputs:\n    prod:\n      password: \"{{ env_var('DBT_PASSWORD') }}\"\n";
         assert!(yaml("profiles.yml", src).is_empty());
+    }
+
+    /// Regression: any value containing `{{` was skipped, so a hardcoded
+    /// fallback inside the template passed. The fallback is as committed as a
+    /// plain value; a placeholder fallback is still fine.
+    #[test]
+    fn a_literal_inside_jinja_is_still_hardcoded() {
+        let profile =
+            |value: &str| format!("acme:\n  outputs:\n    prod:\n      password: {value}\n");
+        let hardcoded = profile("\"{{ env_var('DBT_PASSWORD', 's3cr3t-pw') }}\"");
+        assert_eq!(yaml("profiles.yml", &hardcoded).len(), 1);
+        let placeholder = profile("\"{{ env_var('DBT_PASSWORD', 'changeme') }}\"");
+        assert!(yaml("profiles.yml", &placeholder).is_empty());
+        // A broken template holds no credential.
+        assert!(yaml("profiles.yml", &profile("\"env_var('DBT_PASSWORD') }}\"")).is_empty());
+        // The same rule applies to a template in a Python string.
+        assert_eq!(
+            run("DB_PASSWORD = \"{{ env_var('DB_PASSWORD', 's3cr3t-pw') }}\"\n").len(),
+            1
+        );
     }
 
     /// A per-target config file is where environment-specific values belong,

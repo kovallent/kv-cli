@@ -11,6 +11,22 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A literal inside a Jinja template is reported.** Any value containing
+  `{{` used to be skipped as a reference, so a hardcoded fallback passed:
+  `password: "{{ env_var('DBT_PASSWORD', 's3cr3t') }}"`, `{{ 's3cr3t' }}`, or
+  a `{% if %}` branch holding the literal. A template is now judged by what
+  it writes down, in YAML, `.env`, TOML, JSON and Python strings alike;
+  `env_var('X')` alone, placeholder fallbacks such as `'changeme'`, and text
+  beside a reference (`Bearer {{ … }}`) are still clean. This can add KV002
+  findings to a profile that passed before.
+- A broken template such as `env_var('DBT_PASSWORD') }}` is no longer
+  reported as a hardcoded password.
+- YAML scalars are unescaped as YAML spells them: `''` inside single quotes,
+  `\"` and `\\` inside double quotes. An unquoted `{{ … }}` value is read as
+  the value it is, not as a flow mapping.
+
 ### Added
 
 - **`kv-cli explain [CODE]`** prints a rule's reference page: what it catches,
