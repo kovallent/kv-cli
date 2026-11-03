@@ -979,8 +979,13 @@ impl FileContext<'_> {
                 severity: Severity::Error,
                 message: format!("`{}` is assigned a hardcoded literal", b.key),
                 detail: Some(format!(
-                    "value {} - load it from the environment or a secret store",
-                    redact(&b.value.text(source))
+                    "value {} - load it from the environment or a secret store{}",
+                    redact(&b.value.text(source)),
+                    if b.source == BindingSource::Recovered {
+                        " (read from a line that does not parse)"
+                    } else {
+                        ""
+                    }
                 )),
                 framework,
                 kind: FindingKind::HardcodedSecret {
@@ -2076,6 +2081,16 @@ mod tests {
             run("DB_PASSWORD = \"{{ env_var('DB_PASSWORD', 's3cr3t-pw') }}\"\n").len(),
             1
         );
+    }
+
+    /// A credential after a syntax error is still reported, and says it was
+    /// read from a line that does not parse.
+    #[test]
+    fn a_credential_after_a_syntax_error_is_reported() {
+        let f = run("import os\n\ndef model(dbt, session)\n    dbt.config(materialized=\"table\")\n    orders = dbt.ref(\"orders\")\n    return orders\n\ndef run_backfill(days):\n    return days\n\npassword = \"s3cr3t-1234\"\n");
+        let hit = f.iter().find(|f| f.symbol == "password").expect("reported");
+        assert_eq!(hit.line, 11);
+        assert!(hit.detail.as_deref().unwrap().contains("does not parse"));
     }
 
     /// A per-target config file is where environment-specific values belong,

@@ -263,6 +263,11 @@ fn collect_secret_edits(
                 "is built up from a hardcoded literal; load the whole value from \
                  the environment instead",
             ),
+            // `fix` refuses a file that does not parse, so this is a backstop.
+            BindingSource::Recovered => Some(
+                "is in a part of the file that does not parse; fix the syntax \
+                 error, then re-run",
+            ),
             _ => None,
         };
         if let Some(why) = manual {
