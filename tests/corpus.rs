@@ -29,6 +29,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+#[path = "corpus/edge.rs"]
+mod edge;
 
 const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus");
 
@@ -125,6 +129,9 @@ fn code_of(s: &str) -> Option<&'static str> {
 }
 
 fn group_of(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("edge/") {
+        return format!("edge/{}", rest.split('/').next().unwrap_or(""));
+    }
     let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
     let ext = name.rsplit('.').next().unwrap_or("");
     if name == ".env" || name.starts_with(".env.") || ext == "env" {
@@ -417,6 +424,17 @@ fn materialize_matrix(root: &Path, cases: &mut Vec<Case>) {
     }
 }
 
+/// Write the generated edge cases into `root` and collect their labels.
+fn materialize_edge(root: &Path, cases: &mut Vec<Case>) {
+    let generated = edge::generate();
+    for file in &generated.files {
+        let dest = root.join(&file.path);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(dest, &file.bytes).unwrap();
+    }
+    cases.extend(generated.cases);
+}
+
 // --- running and comparing -------------------------------------------------
 
 /// `(path, line, code)` of every finding kv-cli reports for `root`, and the
@@ -537,15 +555,27 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
     let mut expected_skips = BTreeSet::new();
     materialize_cases(&root, &mut cases, &mut expected_skips);
     materialize_matrix(&root, &mut cases);
+    materialize_edge(&root, &mut cases);
     let (mut reported, skipped) = findings(&root);
-    let _ = std::fs::remove_dir_all(&root);
+    if std::env::var_os("KV_CORPUS_KEEP").is_some() {
+        println!("corpus kept at {}", root.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
-    // Skips are few and binary, so they are asserted outright rather than
-    // ratcheted: a file kv-cli could not analyse is never a known deviation.
+    // Hand-written skips are few and binary, so they are asserted outright: a
+    // file kv-cli could not analyse is never a known deviation there. Every
+    // generated edge file carries a skip label instead, scored like a finding.
+    let (edge_skips, skipped): (BTreeSet<_>, BTreeSet<_>) = skipped
+        .into_iter()
+        .partition(|(path, _)| path.starts_with("edge/"));
     assert_eq!(
         skipped, expected_skips,
         "skipped files differ from the `expect-skip:` labels"
     );
+    for (path, reason) in edge_skips {
+        reported.insert((path, 0, format!("skip:{reason}")));
+    }
 
     let mut ids = BTreeSet::new();
     for c in &cases {
@@ -634,4 +664,110 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
          If intended, rerun with KV_CORPUS_BLESS=1 and review the diff.",
         problems.join("\n")
     );
+}
+
+// --- speed -------------------------------------------------------------------
+
+/// How long one large generated file may take, audited on its own. Generous
+/// on purpose: tests run a debug build on shared CI runners, several times
+/// slower than a release build on a laptop. The budget catches a blowup (a
+/// quadratic pass turns a second into minutes), not a slow day. `make bench`
+/// measures the release build.
+const STRESS_BUDGET: Duration = Duration::from_secs(10);
+
+/// Writes the generated large files into a fresh directory with a defaults
+/// contract, returning it and their paths.
+fn stress_files(tag: &str) -> (PathBuf, Vec<String>) {
+    let root = std::env::temp_dir().join(format!("kvcli-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(".kovallent.yaml"), "version: 1\n").unwrap();
+    let mut paths = Vec::new();
+    for file in edge::generate().files.into_iter().filter(|f| f.stress) {
+        let dest = root.join(&file.path);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(dest, &file.bytes).unwrap();
+        paths.push(file.path);
+    }
+    (root, paths)
+}
+
+/// Wall-clock time of one `kv-cli audit <target>` run, process start included.
+fn time_audit(root: &Path, target: &str) -> Duration {
+    let start = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_kv-cli"))
+        .args(["audit", target, "--format", "json", "--config"])
+        .arg(root.join(".kovallent.yaml"))
+        .current_dir(root)
+        .output()
+        .expect("kv-cli runs");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "{target}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    elapsed
+}
+
+#[test]
+fn stress_files_stay_within_budget() {
+    let (root, paths) = stress_files("stress");
+    let slow: Vec<String> = paths
+        .iter()
+        .map(|p| (p, time_audit(&root, p)))
+        .filter(|(_, t)| *t > STRESS_BUDGET)
+        .map(|(p, t)| format!("{p}: {t:.2?}"))
+        .collect();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        slow.is_empty(),
+        "over the {STRESS_BUDGET:?} budget: {slow:#?}"
+    );
+}
+
+/// The timing report behind `make bench`: the median of several runs for each
+/// large file, and for every generated edge case at once.
+#[test]
+#[ignore = "timing report; run `make bench`"]
+fn bench() {
+    let median = |root: &Path, target: &str, runs: usize| {
+        let mut times: Vec<Duration> = (0..runs).map(|_| time_audit(root, target)).collect();
+        times.sort();
+        times[runs / 2]
+    };
+    let (root, paths) = stress_files("bench");
+    println!(
+        "\nkv-cli audit, wall clock including process start, median of 7 ({} build, {} threads)",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    );
+    for path in &paths {
+        let size = std::fs::metadata(root.join(path)).unwrap().len();
+        println!(
+            "  {path:<32} {:>7.2} MB  {:>8.1?}",
+            size as f64 / 1e6,
+            median(&root, path, 7)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    let root = std::env::temp_dir().join(format!("kvcli-bench-all-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(".kovallent.yaml"), "version: 1\n").unwrap();
+    let mut cases = Vec::new();
+    materialize_edge(&root, &mut cases);
+    let files = edge::generate().files.len();
+    println!(
+        "  {:<32} {:>10}  {:>8.1?}",
+        format!("edge/ ({files} files)"),
+        "",
+        median(&root, "edge", 7)
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

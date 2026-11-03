@@ -20,6 +20,10 @@ versions may carry breaking changes.
 - A run with findings ends with a pointer to `kv-cli explain` for the lowest
   rule code it reported.
 - `--help` for `init`, `audit`, `fix` and `explain` shows examples.
+- 1,212 generated edge cases in the labelled corpus: malformed dbt Python
+  models, Jinja in dbt YAML, deep nesting and large files. A budget test
+  catches a slowdown on large files, and `make bench` reports release-build
+  timings. Known gaps they found are recorded in `tests/corpus/baseline.tsv`.
 
 ### Changed
 

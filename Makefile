@@ -43,6 +43,10 @@ fmt: ## Format the source tree
 corpus: ## Labelled corpus: precision/recall report against tests/corpus
 	$(CARGO) test --test corpus -- --nocapture
 
+.PHONY: bench
+bench: ## Timing report: release build, large generated files and the full edge suite
+	$(CARGO) test --release --test corpus bench -- --ignored --nocapture
+
 .PHONY: demo
 demo: release ## Audit the bundled sample project (expected to fail)
 	@echo "--- kv-cli audit samples/ ---"
