@@ -12,4 +12,3 @@ FN	edge:edge/dbt_models/py2-print.py:file:skip:syntax_error
 FN	edge:edge/dbt_models/tabs-mixed.py:file:skip:syntax_error	
 FN	edge:edge/dbt_models/unclosed-docstring.py:after-name:KV002	
 FN	edge:edge/dbt_models/unexpected-indent.py:file:skip:syntax_error	
-FN	edge:edge/jinja/structure/dbt_project.yml:jinja-set-literal:KV002	

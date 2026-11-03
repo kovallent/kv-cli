@@ -23,6 +23,9 @@ versions may carry breaking changes.
   findings to a profile that passed before.
 - A broken template such as `env_var('DBT_PASSWORD') }}` is no longer
   reported as a hardcoded password.
+- A Jinja assignment on its own YAML line, `{% set db_password = 's3cr3t' %}`,
+  is read like `db_password: {{ 's3cr3t' }}`, so a literal is reported and
+  `{% set db_password = env_var('X') %}` is not.
 - YAML scalars are unescaped as YAML spells them: `''` inside single quotes,
   `\"` and `\\` inside double quotes. An unquoted `{{ … }}` value is read as
   the value it is, not as a flow mapping.
