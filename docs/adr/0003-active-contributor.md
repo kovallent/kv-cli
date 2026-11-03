@@ -119,7 +119,7 @@ Rejected on the recomputability argument above.
 
 This is a test fixture for `docs/adr/0003-active-contributor.md`. It covers one billing cycle in one monitored repository, with eight scenarios. Each scenario tests a different clause of the decision.
 
-This is fixture version 3. It follows the 2026-11-03 amendment below: every identity is namespaced by `provider`, and ingest writes at most one row per `(repository_id, event_type, source_ref)`.
+This is fixture version 4. It follows the 2026-11-03 amendment below: every identity is namespaced by `provider`, and ingest writes at most one row per `(repository_id, event_type, source_ref)`. Commits arrive the way GitHub delivers them, inside a `push` delivery with a `commits` array, so one delivery can carry many commits.
 
 - **Cycle:** 2026-09-01T00:00:00Z to 2026-09-30T23:59:59Z
 - **Repository:** `acme-corp/finance-marts`, provider `github`, `repository_id = 41`, monitored for the whole cycle
@@ -130,7 +130,7 @@ This is fixture version 3. It follows the 2026-11-03 amendment below: every iden
 
 ADR 0003 applies some rules when an event **arrives** (clauses 1–3: author not committer, opener counts, bots excluded by `user.type`). It applies the rest when billing **counts** (clause 5: distinct `(provider, provider_user_id)` pairs with a non-null id, over stored `contribution_event` rows). The `contribution_event` table has no column for account type, committer or trailers. So an ingest rule can only be tested by checking which rows ingest writes, not by looking at rows that are already stored.
 
-- **Stage 1, ingest.** `ingest_input` is a list of normalized events in delivery order. This is not GitHub's literal webhook payload; it is the subset of fields ADR 0003 refers to. Running ingest over it must produce exactly the rows in `expected_rows`.
+- **Stage 1, ingest.** `ingest_input` is a list of normalized deliveries in delivery order. Commits arrive inside `push` deliveries, each carrying a `commits` array. This is not GitHub's literal webhook payload; it is the subset of fields ADR 0003 refers to. Running ingest over it must produce exactly the rows in `expected_rows`.
 - **Stage 2, billing.** Counting over `expected_rows` must produce `expected`.
 
 A bot, a committer acting only as committer, a co-author named in a trailer, and a reviewer all produce **no row**. They are excluded at ingest, which is the only place the ADR can exclude them. A commit or pull request already stored for the repository also produces no row, whatever delivery it arrives in. A `provider_user_id: null` row means only *unresolved*. Bots must never be written that way, or they would be counted as unresolved authors.
@@ -139,7 +139,7 @@ A bot, a committer acting only as committer, a co-author named in a trailer, and
 
 | # | Scenario | Clause | Rows written | Billable |
 | --- | --- | --- | --- | --- |
-| 1 | **Squash merge.** `dana` (8801) pushed 3 commits to a branch. `priya` (8807) squash-merged the PR, so git records priya as committer and dana as author of the squashed commit. Priya does nothing else this cycle. | 1: author, not committer | 4 rows, all 8801 | 8801 |
+| 1 | **Squash merge.** `dana` (8801) pushed 3 commits to a branch in one push, `d-0001`. `priya` (8807) squash-merged the PR, so git records priya as committer and dana as author of the squashed commit. Priya does nothing else this cycle. | 1: author, not committer | 4 rows, all 8801: 3 from `d-0001`, 1 from `d-0004` | 8801 |
 | 2 | **Co-authored commit.** `mina` (8802) committed with `Co-authored-by: Sam Okafor <sam@acme.com>`. Sam is an invited member whose known email is `sam@acme.com` and whose provider id is 8803, so a trailer *could* be resolved by email. | 1: trailers count only the author | 1 row, 8802 | 8802 |
 | 3 | **Bot.** `dependabot[bot]` (49699333, `type: "Bot"`) pushed a commit and opened a PR. | 3: excluded by account type | none | — |
 | 4 | **PR opened by a non-committer.** `raj` (8804) opened PR #212, which carries only dana's commit. | 2: the opener counts | 2 rows: 8804 opener, 8801 author | 8804 (8801 already billable) |
@@ -148,9 +148,9 @@ A bot, a committer acting only as committer, a co-author named in a trailer, and
 | 7 | **Control.** `tomas` (8806) pushed an ordinary commit to `main`. | 1 | 1 row, 8806 | 8806 |
 | 8 | **Same commit in two deliveries.** tomas's commit from scenario 7 (same SHA) arrives a second time in `d-0013`, a new delivery, as part of a later push to `main`. | Amendment 2026-11-03: one row per commit | none (`d-0012`'s row stands) | — (8806 already billable) |
 
-Two kinds of duplicate arrive. `d-0004` is redelivered with the same `delivery_id` and the same SHA. tomas's commit arrives again in `d-0013`, with a new `delivery_id` and the same SHA as `d-0012`. Ingest must be idempotent on the contribution itself, `(repository_id, event_type, source_ref)`, not on `delivery_id`.
+Deliveries and commits do not match one to one, in three ways. `d-0001` carries three commits, so one delivery writes three rows. `d-0004` is redelivered with the same `delivery_id` and the same SHA. tomas's commit arrives again in `d-0013`, with a new `delivery_id` and the same SHA as `d-0012`. Ingest must key on the contribution itself, `(repository_id, event_type, source_ref)`, not on `delivery_id`.
 
-**Totals:** 14 deliveries in (13 unique `delivery_id` values, plus the redelivery of `d-0004`), 9 rows written. The rows have four distinct non-null `(provider, provider_user_id)` pairs, plus one null row.
+**Totals:** 12 deliveries in (11 unique `delivery_id` values, plus the redelivery of `d-0004`). The nine `push` deliveries carry 11 commits. 9 rows written. The rows have four distinct non-null `(provider, provider_user_id)` pairs, plus one null row.
 
 ## The four traps, and what each one catches
 
@@ -159,14 +159,19 @@ Each trap is set so that a specific wrong implementation produces a specific wro
 1. **Billing the committer.** Priya (8807) appears *only* as the committer of the squash commit. An implementation that writes a row for the committer bills her, so the count becomes 5 and 8807 appears.
 2. **Resolving co-author trailers.** Sam's email matches a known identity, so an implementation that resolves `Co-authored-by` by email can find him. If it does, 8803 appears and the count becomes 5. Under the ADR the trailer is free text and is never resolved.
 3. **Storing reviews, or excluding bots by name.** Lena (8805) billed means reviews were stored. Writing the bot's events produces either 49699333 in the count (count 5) or an extra unresolved row (`unresolved_event_count == 3` rather than 1). The bot's `login` deliberately ends in `[bot]` *and* its `type` is `"Bot"`, so a name rule and the type rule agree here. A separate assertion requires exclusion to key on `type`.
-4. **Not being idempotent on the contribution.** Two duplicates arrive: the redelivered `d-0004` (same `delivery_id`, same SHA), and tomas's commit in `d-0013` (new `delivery_id`, same SHA as `d-0012`). Correct ingest writes 9 rows. Ingest that is idempotent only on `delivery_id` skips the first duplicate but writes the second, so 10 rows; ingest with no idempotency writes 11. The billable count stays 4 in every case because it counts distinct pairs, which is exactly why the trap asserts the row count rather than the billable count.
+4. **Treating a delivery as a contribution.** Deliveries and commits do not match one to one, and the fixture breaks that assumption in all three ways:
+   - **A delivery redelivered.** `d-0004` arrives twice, with the same `delivery_id` and the same SHA.
+   - **One commit in several deliveries.** tomas's commit arrives in `d-0012` and again in `d-0013`.
+   - **Several commits in one delivery.** `d-0001` carries dana's three branch commits.
+
+   Ingest keyed on the contribution, `(repository_id, event_type, source_ref)`, writes 9 rows. Ingest that only skips a repeated `delivery_id` writes 10. Ingest that writes at most one row per delivery writes 8, and keeping that rule alongside the contribution key writes 7. Ingest with no idempotency writes 11. The billable count stays 4 in every case because it counts distinct pairs, which is exactly why the trap asserts the row count rather than the billable count.
 
 ## JSON fixture
 
 ```json
 {
   "fixture": "adr-0003-worked-example",
-  "version": 3,
+  "version": 4,
   "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
   "repository": { "repository_id": 41, "provider": "github", "full_name": "acme-corp/finance-marts" },
 
@@ -177,78 +182,95 @@ Each trap is set so that a specific wrong implementation produces a specific wro
   ],
 
   "ingest_input": [
-    { "delivery_id": "d-0001", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T09:14:22Z",
-      "sha": "1f6bc2fe1c50fdccb04974967035b6b02c00c244",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
-    { "delivery_id": "d-0002", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T09:41:07Z",
-      "sha": "dbb944b05b566469f3595662a47566a75426e4c0",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
-    { "delivery_id": "d-0003", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T10:05:51Z",
-      "sha": "497ebae0bb7c24246183227f26bf77e6869e8727",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
-    { "delivery_id": "d-0004", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T15:02:18Z",
-      "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e",
-      "note": "squash commit on main: author dana, committer priya",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0001", "scenario": 1, "event": "push",
+      "note": "one push to dana's branch carrying three commits; writes three rows, all with delivery_id d-0001",
+      "commits": [
+        { "sha": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "occurred_at": "2026-09-03T09:14:22Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+        { "sha": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+        { "sha": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] }
+      ] },
+    { "delivery_id": "d-0004", "scenario": 1, "event": "push",
+      "note": "push of the squash commit to main: author dana, committer priya",
+      "commits": [
+        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] }
+      ] },
 
-    { "delivery_id": "d-0005", "scenario": 2, "event": "commit", "occurred_at": "2026-09-08T14:02:55Z",
-      "sha": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e",
-      "author":    { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
-      "committer": { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
-      "trailers":  ["Co-authored-by: Sam Okafor <sam@acme.com>"] },
+    { "delivery_id": "d-0005", "scenario": 2, "event": "push",
+      "commits": [
+        { "sha": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "occurred_at": "2026-09-08T14:02:55Z",
+          "author":    { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
+          "committer": { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
+          "trailers":  ["Co-authored-by: Sam Okafor <sam@acme.com>"] }
+      ] },
 
-    { "delivery_id": "d-0006", "scenario": 3, "event": "commit", "occurred_at": "2026-09-11T02:00:31Z",
-      "sha": "cd3033592332f5789c65e84bea24a2c414067813",
-      "author":    { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" },
-      "committer": { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" }, "trailers": [] },
+    { "delivery_id": "d-0006", "scenario": 3, "event": "push",
+      "commits": [
+        { "sha": "cd3033592332f5789c65e84bea24a2c414067813", "occurred_at": "2026-09-11T02:00:31Z",
+          "author":    { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" },
+          "committer": { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" }, "trailers": [] }
+      ] },
     { "delivery_id": "d-0007", "scenario": 3, "event": "pull_request_opened", "occurred_at": "2026-09-11T02:00:44Z",
       "pr_number": 209,
       "sender":    { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" } },
 
-    { "delivery_id": "d-0008", "scenario": 4, "event": "commit", "occurred_at": "2026-09-17T10:58:13Z",
-      "sha": "0e8b588a68b2be41320a7150b7b110906824a5cd",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0008", "scenario": 4, "event": "push",
+      "commits": [
+        { "sha": "0e8b588a68b2be41320a7150b7b110906824a5cd", "occurred_at": "2026-09-17T10:58:13Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] }
+      ] },
     { "delivery_id": "d-0009", "scenario": 4, "event": "pull_request_opened", "occurred_at": "2026-09-17T11:20:09Z",
       "pr_number": 212,
-      "note": "PR #212, carrying only d-0008",
+      "note": "PR #212, carrying only the d-0008 commit",
       "sender":    { "provider": "github", "id": 8804, "login": "raj",   "type": "User" } },
 
     { "delivery_id": "d-0010", "scenario": 5, "event": "pull_request_review", "occurred_at": "2026-09-17T13:44:00Z",
       "state": "approved",
       "sender":    { "provider": "github", "id": 8805, "login": "lena",  "type": "User" } },
 
-    { "delivery_id": "d-0011", "scenario": 6, "event": "commit", "occurred_at": "2026-09-22T16:31:40Z",
-      "sha": "9f05106e0535e2f6967901417e65e41aa4d86d28",
-      "author":    { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" },
-      "committer": { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" }, "trailers": [] },
+    { "delivery_id": "d-0011", "scenario": 6, "event": "push",
+      "commits": [
+        { "sha": "9f05106e0535e2f6967901417e65e41aa4d86d28", "occurred_at": "2026-09-22T16:31:40Z",
+          "author":    { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" },
+          "committer": { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" }, "trailers": [] }
+      ] },
 
-    { "delivery_id": "d-0012", "scenario": 7, "event": "commit", "occurred_at": "2026-09-28T08:12:04Z",
-      "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb",
-      "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
-      "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0012", "scenario": 7, "event": "push",
+      "commits": [
+        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z",
+          "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
+          "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] }
+      ] },
 
-    { "delivery_id": "d-0004", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T15:02:18Z",
-      "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e",
+    { "delivery_id": "d-0004", "scenario": 1, "event": "push",
       "note": "provider redelivery of d-0004; must not write a second row",
-      "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
-      "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] },
+      "commits": [
+        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z",
+          "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
+          "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] }
+      ] },
 
-    { "delivery_id": "d-0013", "scenario": 8, "event": "commit", "occurred_at": "2026-09-28T08:12:04Z",
-      "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb",
-      "note": "tomas's d-0012 commit again, in a later push to main; same SHA, new delivery_id; must not write a second row",
-      "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
-      "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] }
+    { "delivery_id": "d-0013", "scenario": 8, "event": "push",
+      "note": "a later push to main carrying tomas's d-0012 commit again; same SHA, new delivery_id; must not write a second row",
+      "commits": [
+        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z",
+          "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
+          "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] }
+      ] }
   ],
 
   "expected_rows": [
     { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "occurred_at": "2026-09-03T09:14:22Z" },
-    { "delivery_id": "d-0002", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z" },
-    { "delivery_id": "d-0003", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z" },
+    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z" },
+    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z" },
     { "delivery_id": "d-0004", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z" },
     { "delivery_id": "d-0005", "repository_id": 41, "provider": "github", "provider_user_id": 8802, "event_type": "commit",              "source_ref": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "occurred_at": "2026-09-08T14:02:55Z" },
     { "delivery_id": "d-0008", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "0e8b588a68b2be41320a7150b7b110906824a5cd", "occurred_at": "2026-09-17T10:58:13Z" },
@@ -279,6 +301,7 @@ Each trap is set so that a specific wrong implementation produces a specific wro
     "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref)",
     "stage 1: rows_written == 9 — the redelivered d-0004 and the repeated commit in d-0013 write nothing",
     "stage 1: a commit SHA already stored for the repository writes no row, whatever its delivery_id",
+    "stage 1: a delivery carrying N commits writes N rows, all with the same delivery_id",
     "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 49699333)}",
     "stage 1: bot exclusion keys on author/sender type == 'Bot', never on login; a test that sets login to 'dependabot' (no [bot] suffix) with type 'Bot' must still write no row",
     "stage 1: no Co-authored-by trailer is resolved, even when its email matches known_identities",
@@ -304,7 +327,7 @@ Each needs its own fixture before Phase 5 ships, and each needs a decision the A
 
 Phase 1 review found two schema gaps. This amendment adds to the decision above and reverses
 nothing in it; the status stays Accepted. Where the schema below differs from the schema
-consequence above, this one applies. The worked example above is fixture version 3, which covers
+consequence above, this one applies. The worked example above covers
 both changes.
 
 ### 1. Identities are namespaced by provider
