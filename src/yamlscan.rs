@@ -223,6 +223,15 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
         if rest.is_empty() || rest.starts_with('#') {
             continue;
         }
+        if let Some((key, value)) = jinja_set(rest) {
+            out.push(Scalar {
+                key,
+                value,
+                line: idx + 1,
+                comment: comment.to_string(),
+            });
+            continue;
+        }
         // `- {user: svc, password: x}`: a flow mapping as the whole entry.
         if rest.starts_with('{') {
             push_flow_pairs(rest, idx + 1, comment, &mut out);
@@ -282,6 +291,24 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
     out
 }
 
+/// `{% set name = expr %}` on one line, read as `name: {{ expr }}`, so the
+/// expression is judged like any other template: a literal it writes down is
+/// a value, a lookup is not. Tuple targets and `{% set %}…{% endset %}` blocks
+/// are left alone.
+fn jinja_set(line: &str) -> Option<(String, String)> {
+    let body = line.strip_prefix("{%")?.trim_start_matches(['-', '+']);
+    let body = body[..body.find("%}")?].trim_end_matches(['-', '+']).trim();
+    let assignment = body.strip_prefix("set")?;
+    if !assignment.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (name, expr) = assignment.split_once('=')?;
+    let name = name.trim();
+    let expr = expr.trim();
+    let identifier = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    (identifier && !expr.is_empty()).then(|| (name.to_string(), format!("{{{{ {expr} }}}}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +328,24 @@ mod tests {
             find(&s, "password").unwrap().value,
             "{{ env_var('P', 'x') }}"
         );
+    }
+
+    /// A Jinja assignment is a key and a template, so the template rules
+    /// decide whether it holds a literal.
+    #[test]
+    fn jinja_set_lines_are_scalars() {
+        let s = scalars("{% set db_password = 's3cr3t' %}\n  {%- set token = env_var('T') -%}\n");
+        assert_eq!(find(&s, "db_password").unwrap().value, "{{ 's3cr3t' }}");
+        assert_eq!(find(&s, "db_password").unwrap().line, 1);
+        assert_eq!(find(&s, "token").unwrap().value, "{{ env_var('T') }}");
+        for src in [
+            "{% set a, b = 'x', 'y' %}\n",
+            "{% set body %}\n",
+            "{% setting = 'x' %}\n",
+            "{% if x == 'y' %}\n",
+        ] {
+            assert!(scalars(src).is_empty(), "{src}");
+        }
     }
 
     fn find<'a>(s: &'a [Scalar], key: &str) -> Option<&'a Scalar> {
