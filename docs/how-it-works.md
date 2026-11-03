@@ -11,7 +11,7 @@ Signatures come from the tree too, so multi-line parameter lists, `async def`, `
 ### Two deliberate limits
 
 1. A parameter default (`def f(password="...")`) is reported but never auto-fixed: `os.environ[...]` in a default is evaluated once at import time, not per call, so the rewrite would change behaviour. `fix` prints it as a `manual:` item.
-2. A file with syntax errors is audited on tree-sitter's partial parse and flagged in the output, but `fix` refuses to rewrite it.
+2. A file with syntax errors is audited on tree-sitter's partial parse and flagged in the output, but `fix` refuses to rewrite it. Error recovery can lose an assignment after the error: split across an `ERROR` node, or dropped after an unclosed `"""`. So on the lines the tree could not explain, and only those, simple assignments of a string literal (`name = "..."`, `"name": "..."`) are read from the text and judged like any other binding. Such a finding says it was read from a line that does not parse.
 
 Config files are handled by line scanners rather than parsers — `src/yamlscan.rs` for YAML, `src/configscan.rs` for `.env`, INI, TOML and JSON — because the parsers give structure but not line numbers, and a finding without a line number is not actionable. The YAML scanner tracks block scalars so prose inside a `|` block is not mistaken for mapping keys; the JSON scanner tokenizes strings so a match never begins inside one. Notebooks (`src/notebook.rs`) join their code cells into one Python source — an import in the first cell still informs the fifth — and map each finding back to the line in the `.ipynb` file.
 

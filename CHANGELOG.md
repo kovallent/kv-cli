@@ -11,7 +11,16 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A credential after a syntax error is reported.** tree-sitter's error
+  recovery could lose `password = "..."` on a line after the error - split
+  across an `ERROR` node, or dropped after an unclosed `"""` - so a
+  name-matched credential there went unreported (credential shapes were
+  already caught). On the lines the parse could not explain, and only those,
+  simple assignments of a string literal are now read from the text and
+  judged like any other binding; the finding says it was read from a line that
+  does not parse. Files that parse are unaffected.
 
 ---
 

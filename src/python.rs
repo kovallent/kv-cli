@@ -5,6 +5,10 @@
 //! `async def`, and decorators spread across lines), and string literals
 //! *correctly paired with what binds them* - which is what makes it safe for
 //! `kv-cli fix` to rewrite a value in place.
+//!
+//! The one exception is a file that does not parse: on the lines the tree
+//! could not explain, simple assignments are read from the text (see
+//! [`recover_bindings`]). `fix` never rewrites such a file.
 
 use std::ops::Range;
 use tree_sitter::{Node, Parser};
@@ -60,6 +64,9 @@ pub enum BindingSource {
     /// `password == "..."` or `"..." != self.token` - a literal the code
     /// checks a credential against is as hardcoded as one it assigns.
     Comparison,
+    /// `NAME = "..."` read from the text of a line the parser could not
+    /// explain, in a file with a syntax error. Never rewritten.
+    Recovered,
 }
 
 /// A string literal bound to a name. Tuple targets are paired element-wise,
@@ -182,6 +189,199 @@ impl Analysis {
     }
 }
 
+/// Assignments on the lines tree-sitter's error recovery could not explain.
+///
+/// After a syntax error the tree can lose an assignment outright: split
+/// across an `ERROR` node (`password =` inside it, the string outside),
+/// wrapped in one, or dropped after an unclosed `"""`, where the tree simply
+/// stops. A credential there is still committed. So on those lines only -
+/// any line an `ERROR` node touches, and any non-blank line no token covers -
+/// a simple `name = "..."` or `"name": "..."` is read from the text and
+/// judged like any other binding. Lines the tree did parse, comments and
+/// docstrings included, never get here.
+fn recover_bindings(source: &str, root: Node, line_starts: &[usize], bindings: &mut Vec<Binding>) {
+    let rows = line_starts.len();
+    let mut covered = vec![false; rows];
+    let mut broken = vec![false; rows];
+    let mut cursor = root.walk();
+    // For each node on the current path: is its parent an `ERROR`, or inside one?
+    let mut parent_broken = vec![false];
+    'walk: loop {
+        let node = cursor.node();
+        let in_error =
+            *parent_broken.last().unwrap_or(&false) || node.is_error() || node.is_missing();
+        if node.child_count() == 0 || node.is_error() {
+            let (start, end) = (node.start_position(), node.end_position());
+            // A node ending at column 0 stops at the end of the line before.
+            let last = if end.column == 0 && end.row > start.row {
+                end.row - 1
+            } else {
+                end.row
+            };
+            for row in start.row..=last.min(rows - 1) {
+                if in_error {
+                    broken[row] = true;
+                } else {
+                    covered[row] = true;
+                }
+            }
+        }
+        if cursor.goto_first_child() {
+            parent_broken.push(in_error);
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+            parent_broken.pop();
+        }
+    }
+
+    let known: std::collections::HashSet<(usize, String)> =
+        bindings.iter().map(|b| (b.line, b.key.clone())).collect();
+    for row in 0..rows {
+        let start = line_starts[row];
+        let end = line_starts.get(row + 1).map_or(source.len(), |&n| n);
+        let line = source[start..end].trim_end_matches(['\n', '\r']);
+        let unexplained = broken[row] || (!covered[row] && !line.trim().is_empty());
+        if !unexplained {
+            continue;
+        }
+        let Some(found) = assignment_on_line(line) else {
+            continue;
+        };
+        if known.contains(&(row + 1, found.key.clone())) {
+            continue;
+        }
+        let shift = |r: Range<usize>| r.start + start..r.end + start;
+        let content = shift(found.content);
+        bindings.push(Binding {
+            key: found.key,
+            value: StringLiteral {
+                span: shift(found.span),
+                content: content.clone(),
+                has_interpolation: found.has_interpolation,
+                parts: vec![content],
+            },
+            line: row + 1,
+            source: BindingSource::Recovered,
+        });
+    }
+}
+
+/// An assignment of one string literal, as written on one line.
+struct LineAssignment {
+    key: String,
+    /// The literal, prefix and quotes included, relative to the line.
+    span: Range<usize>,
+    /// Its body, relative to the line.
+    content: Range<usize>,
+    has_interpolation: bool,
+}
+
+/// `name = "..."`, `name: str = "..."`, `name := "..."`, `name="...",` or
+/// `"name": "..."` at the start of `line`, and nothing after the literal but
+/// a separator, a closing bracket or a comment.
+fn assignment_on_line(line: &str) -> Option<LineAssignment> {
+    let indent = line.len() - line.trim_start().len();
+    let mut at = indent;
+    let bytes = line.as_bytes();
+    let skip_ws = |mut i: usize| {
+        while bytes.get(i).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            i += 1;
+        }
+        i
+    };
+
+    let key;
+    if matches!(bytes.get(at), Some(b'"' | b'\'')) {
+        // `"name": "..."`, a dict entry.
+        let (_, body, end) = quoted(line, at)?;
+        key = line[body].to_string();
+        at = skip_ws(end);
+        if bytes.get(at) != Some(&b':') {
+            return None;
+        }
+        at += 1;
+    } else {
+        let name_end = line[at..]
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .map_or(line.len(), |n| at + n);
+        let name = &line[at..name_end];
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return None;
+        }
+        key = name.to_string();
+        at = skip_ws(name_end);
+        match (bytes.get(at), bytes.get(at + 1)) {
+            (Some(b':'), Some(b'=')) => at += 2,
+            (Some(b'='), next) if next != Some(&b'=') => at += 1,
+            // An annotation: everything up to the assignment's `=`.
+            (Some(b':'), _) => {
+                let eq = line[at..].find('=').map(|n| at + n)?;
+                if bytes.get(eq + 1) == Some(&b'=') {
+                    return None;
+                }
+                at = eq + 1;
+            }
+            _ => return None,
+        }
+    }
+
+    let literal_start = skip_ws(at);
+    let (prefix, content, end) = quoted(line, literal_start)?;
+    let rest = line[end..].trim_start();
+    if !(rest.is_empty() || rest.starts_with([',', ')', ']', '}', ';', '#'])) {
+        return None;
+    }
+    let body = &line[content.clone()];
+    let has_interpolation =
+        prefix.to_ascii_lowercase().contains('f') && body.replace("{{", "").contains('{');
+    Some(LineAssignment {
+        key,
+        span: literal_start..end,
+        content,
+        has_interpolation,
+    })
+}
+
+/// A string literal starting at `at`: its prefix (`r`, `f`, `rb`, ...), the
+/// body's range and the offset just past the closing quote. The literal must
+/// close on the same line.
+fn quoted(line: &str, at: usize) -> Option<(&str, Range<usize>, usize)> {
+    let bytes = line.as_bytes();
+    let mut i = at;
+    while i < at + 2 && bytes.get(i).is_some_and(|b| b"rRbBuUfF".contains(b)) {
+        i += 1;
+    }
+    let prefix = &line[at..i];
+    let quote = *bytes.get(i).filter(|b| **b == b'"' || **b == b'\'')?;
+    let delimiter = if bytes.get(i + 1) == Some(&quote) && bytes.get(i + 2) == Some(&quote) {
+        3
+    } else {
+        1
+    };
+    let body_start = i + delimiter;
+    let mut j = body_start;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b if b == quote
+                && j + delimiter <= bytes.len()
+                && bytes[j..j + delimiter].iter().all(|c| *c == quote) =>
+            {
+                return Some((prefix, body_start..j, j + delimiter));
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 fn line_starts(source: &str) -> Vec<usize> {
     let mut v = vec![0usize];
     for (i, b) in source.bytes().enumerate() {
@@ -239,6 +439,9 @@ pub fn analyze(source: &str) -> Analysis {
         concatenations,
         ..
     } = ctx;
+    if analysis.has_error {
+        recover_bindings(source, root, &analysis.line_starts, &mut bindings);
+    }
     functions.sort_by_key(|f| f.start);
     bindings.sort_by_key(|b| b.value.span.start);
     comments.sort_by_key(|c| c.start);
@@ -979,6 +1182,90 @@ mod tests {
     fn syntax_errors_are_reported_not_fatal() {
         let a = analyze("def broken(:\n    pass\n");
         assert!(a.has_error);
+    }
+
+    fn recovered(src: &str) -> Vec<(String, usize, String)> {
+        analyze(src)
+            .bindings
+            .iter()
+            .filter(|b| b.source == BindingSource::Recovered)
+            .map(|b| (b.key.clone(), b.line, b.value.text(src)))
+            .collect()
+    }
+
+    /// Regression: after a syntax error, tree-sitter split `password = "..."`
+    /// across an `ERROR` node, or dropped it after an unclosed docstring, so
+    /// the credential was never bound.
+    #[test]
+    fn assignments_lost_to_a_syntax_error_are_recovered() {
+        // Whether the parser loses the line depends on context: this file
+        // reproduces it, a shorter one recovers cleanly.
+        let missing_colon = "import os\n\ndef model(dbt, session)\n    dbt.config(materialized=\"table\")\n    orders = dbt.ref(\"orders\")\n    return orders\n\ndef run_backfill(days):\n    return days\n\npassword = \"s3cr3t-1234\"\n";
+        assert_eq!(
+            recovered(missing_colon),
+            [("password".into(), 11, "s3cr3t-1234".into())]
+        );
+
+        // After an unclosed docstring the tree stops: the line is in no node.
+        let unclosed = "import os\n\ndef model(dbt, session):\n    orders = dbt.ref(\"orders\")\n    \"\"\"docstring never closed\n    return orders\n\npassword = \"s3cr3t-1234\"\n";
+        assert_eq!(
+            recovered(unclosed),
+            [("password".into(), 8, "s3cr3t-1234".into())]
+        );
+    }
+
+    /// The fallback reads only lines the tree could not explain: never a
+    /// file that parses, and never a docstring the tree did parse.
+    #[test]
+    fn recovery_leaves_parsed_lines_alone() {
+        assert!(recovered("password = \"s3cr3t-1234\"\n").is_empty());
+        let src = "def f():\n    \"\"\"Example:\n    password = \"hunter2\"\n    \"\"\"\n    return 1\n\nx = (\n";
+        assert!(analyze(src).has_error);
+        assert!(recovered(src).is_empty(), "{:?}", recovered(src));
+    }
+
+    #[test]
+    fn line_assignments_are_simple_ones_only() {
+        let key = |l: &str| assignment_on_line(l).map(|a| (a.key, l[a.content].to_string()));
+        assert_eq!(
+            key("    password = \"x1\""),
+            Some(("password".into(), "x1".into()))
+        );
+        assert_eq!(
+            key("self.token: str = r'x1'"),
+            Some(("self.token".into(), "x1".into()))
+        );
+        assert_eq!(
+            key("    password=\"x1\","),
+            Some(("password".into(), "x1".into()))
+        );
+        assert!(key("(token := \"x1\")").is_none());
+        assert_eq!(key("token := \"x1\""), Some(("token".into(), "x1".into())));
+        assert_eq!(
+            key("    \"api_key\": \"x1\",  # c"),
+            Some(("api_key".into(), "x1".into()))
+        );
+        assert_eq!(key("k = \"\"\"x1\"\"\""), Some(("k".into(), "x1".into())));
+        for line in [
+            "if password == \"x1\":",
+            "password = \"x1\" + suffix",
+            "password = \"unterminated",
+            "k = \"\"\"x1\"",
+            "1abc = \"x1\"",
+            "password = get()",
+        ] {
+            assert!(assignment_on_line(line).is_none(), "{line}");
+        }
+        assert!(
+            assignment_on_line("t = f\"{x}\"")
+                .unwrap()
+                .has_interpolation
+        );
+        assert!(
+            !assignment_on_line("t = f\"{{x}}\"")
+                .unwrap()
+                .has_interpolation
+        );
     }
 
     /// Pins the README's "Stack compatibility" Python line: every syntax it
