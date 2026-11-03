@@ -68,7 +68,15 @@ FIXED applied 18 changes across 1 file
 
 ## Quickstart
 
-**1. Install.** Download your platform's archive from the [latest release](https://github.com/kovallent/kv-cli/releases/latest) and unpack it:
+**1. Install.** On macOS or Linux with Homebrew:
+
+```bash
+brew install kovallent/tap/kv-cli
+```
+
+It installs the prebuilt binary, with no Rust toolchain needed, and `brew upgrade kv-cli` picks up new releases.
+
+Without Homebrew, download your platform's archive from the [latest release](https://github.com/kovallent/kv-cli/releases/latest) and unpack it:
 
 | Platform | Archive |
 | --- | --- |
@@ -295,7 +303,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 cargo install --git https://github.com/kovallent/kv-cli --tag v0.6.1
 ```
 
-Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI or Homebrew package, so `pip install kv-cli` will not work.
+Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI package, so `pip install kv-cli` will not work.
 
 ---
 
