@@ -1,0 +1,102 @@
+{
+  "fixture": "adr-0003-worked-example",
+  "version": 2,
+  "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
+  "repository": { "repository_id": 41, "full_name": "acme-corp/finance-marts" },
+
+  "known_identities": [
+    { "provider_user_id": 8803, "login": "sokafor", "email": "sam@acme.com",
+      "member_source": "invited",
+      "note": "pre-existing invited member; present so a trailer COULD be resolved by email" }
+  ],
+
+  "ingest_input": [
+    { "delivery_id": "d-0001", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T09:14:22Z",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0002", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T09:41:07Z",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0003", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T10:05:51Z",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0004", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T15:02:18Z",
+      "note": "squash commit on main: author dana, committer priya",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8807, "login": "priya", "type": "User" }, "trailers": [] },
+
+    { "delivery_id": "d-0005", "scenario": 2, "event": "commit", "occurred_at": "2026-09-08T14:02:55Z",
+      "author":    { "id": 8802, "login": "mina",  "type": "User" },
+      "committer": { "id": 8802, "login": "mina",  "type": "User" },
+      "trailers":  ["Co-authored-by: Sam Okafor <sam@acme.com>"] },
+
+    { "delivery_id": "d-0006", "scenario": 3, "event": "commit", "occurred_at": "2026-09-11T02:00:31Z",
+      "author":    { "id": 49699333, "login": "dependabot[bot]", "type": "Bot" },
+      "committer": { "id": 49699333, "login": "dependabot[bot]", "type": "Bot" }, "trailers": [] },
+    { "delivery_id": "d-0007", "scenario": 3, "event": "pull_request_opened", "occurred_at": "2026-09-11T02:00:44Z",
+      "sender":    { "id": 49699333, "login": "dependabot[bot]", "type": "Bot" } },
+
+    { "delivery_id": "d-0008", "scenario": 4, "event": "commit", "occurred_at": "2026-09-17T10:58:13Z",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
+    { "delivery_id": "d-0009", "scenario": 4, "event": "pull_request_opened", "occurred_at": "2026-09-17T11:20:09Z",
+      "note": "PR #212, carrying only d-0008",
+      "sender":    { "id": 8804, "login": "raj",   "type": "User" } },
+
+    { "delivery_id": "d-0010", "scenario": 5, "event": "pull_request_review", "occurred_at": "2026-09-17T13:44:00Z",
+      "state": "approved",
+      "sender":    { "id": 8805, "login": "lena",  "type": "User" } },
+
+    { "delivery_id": "d-0011", "scenario": 6, "event": "commit", "occurred_at": "2026-09-22T16:31:40Z",
+      "author":    { "id": null, "login": null, "type": null, "email": "noreply@localhost" },
+      "committer": { "id": null, "login": null, "type": null, "email": "noreply@localhost" }, "trailers": [] },
+
+    { "delivery_id": "d-0012", "scenario": 7, "event": "commit", "occurred_at": "2026-09-28T08:12:04Z",
+      "author":    { "id": 8806, "login": "tomas", "type": "User" },
+      "committer": { "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] },
+
+    { "delivery_id": "d-0004", "scenario": 1, "event": "commit", "occurred_at": "2026-09-03T15:02:18Z",
+      "note": "provider redelivery of d-0004; must not write a second row",
+      "author":    { "id": 8801, "login": "dana",  "type": "User" },
+      "committer": { "id": 8807, "login": "priya", "type": "User" }, "trailers": [] }
+  ],
+
+  "expected_rows": [
+    { "delivery_id": "d-0001", "repository_id": 41, "provider_user_id": 8801, "event_type": "commit",              "occurred_at": "2026-09-03T09:14:22Z" },
+    { "delivery_id": "d-0002", "repository_id": 41, "provider_user_id": 8801, "event_type": "commit",              "occurred_at": "2026-09-03T09:41:07Z" },
+    { "delivery_id": "d-0003", "repository_id": 41, "provider_user_id": 8801, "event_type": "commit",              "occurred_at": "2026-09-03T10:05:51Z" },
+    { "delivery_id": "d-0004", "repository_id": 41, "provider_user_id": 8801, "event_type": "commit",              "occurred_at": "2026-09-03T15:02:18Z" },
+    { "delivery_id": "d-0005", "repository_id": 41, "provider_user_id": 8802, "event_type": "commit",              "occurred_at": "2026-09-08T14:02:55Z" },
+    { "delivery_id": "d-0008", "repository_id": 41, "provider_user_id": 8801, "event_type": "commit",              "occurred_at": "2026-09-17T10:58:13Z" },
+    { "delivery_id": "d-0009", "repository_id": 41, "provider_user_id": 8804, "event_type": "pull_request_opened", "occurred_at": "2026-09-17T11:20:09Z" },
+    { "delivery_id": "d-0011", "repository_id": 41, "provider_user_id": null, "event_type": "commit",              "occurred_at": "2026-09-22T16:31:40Z" },
+    { "delivery_id": "d-0012", "repository_id": 41, "provider_user_id": 8806, "event_type": "commit",              "occurred_at": "2026-09-28T08:12:04Z" }
+  ],
+
+  "expected": {
+    "rows_written": 9,
+    "billable_count": 4,
+    "billable_provider_user_ids": [8801, 8802, 8804, 8806],
+    "unresolved_event_count": 1,
+    "not_billed": [
+      { "provider_user_id": 8807,     "reason": "committer_only",                   "excluded_at": "ingest" },
+      { "provider_user_id": 8803,     "reason": "co_author_trailer_not_resolved",   "excluded_at": "ingest" },
+      { "provider_user_id": 49699333, "reason": "account_type_bot",                 "excluded_at": "ingest" },
+      { "provider_user_id": 8805,     "reason": "review_only",                      "excluded_at": "ingest" }
+    ]
+  },
+
+  "assertions": [
+    "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider_user_id + event_type)",
+    "stage 1: rows_written == 9 — the redelivered d-0004 writes nothing",
+    "stage 1: no row has provider_user_id in {8803, 8805, 8807, 49699333}",
+    "stage 1: bot exclusion keys on author/sender type == 'Bot', never on login; a test that sets login to 'dependabot' (no [bot] suffix) with type 'Bot' must still write no row",
+    "stage 1: no Co-authored-by trailer is resolved, even when its email matches known_identities",
+    "stage 2: billable_count == count(DISTINCT provider_user_id) over expected_rows WHERE provider_user_id IS NOT NULL == 4",
+    "stage 2: set(billable) == {8801, 8802, 8804, 8806}",
+    "stage 2: 8801 has 5 rows and counts once",
+    "stage 2: unresolved_event_count == 1",
+    "ADR 0004: each of 8801, 8802, 8804, 8806 has an organization_member row with source = 'contribution' and NO workspace_role",
+    "ADR 0004: 8803 keeps its existing member row with source = 'invited'; ingest creates no second member row and grants no role"
+  ]
+}
