@@ -29,3 +29,9 @@ Credentials are labelled as reported wherever they sit, broken code included; on
 
 * **Build dependencies.** Building requires a C compiler (`cc`) for the tree-sitter grammar. The output is still a single binary with no runtime dependencies.
 * **serde_yaml.** Pinned at its final 0.9 release and no longer maintained upstream. Swapping it for `serde_norway` or `serde_yml` is a drop-in change; the contract fingerprint depends on it, so `golden_fingerprint` must stay green through the swap.
+
+## Releasing
+
+Push a tag `vX.Y.Z` matching `Cargo.toml`. The release workflow builds the five archives, publishes them with `SHA256SUMS`, and then updates the Homebrew tap: `packaging/homebrew/formula.sh` writes `Formula/kv-cli.rb` from those checksums and pushes it to [kovallent/homebrew-tap](https://github.com/kovallent/homebrew-tap). A prerelease tag (`v0.7.0-rc.1`) skips the tap.
+
+The tap update needs a repository secret, `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token limited to `kovallent/homebrew-tap`, with **Contents: Read and write**. Without it, the release still publishes, but the `homebrew` job fails and brew users stay on the previous version. Fine-grained tokens expire, so renew it before the expiry date you chose.

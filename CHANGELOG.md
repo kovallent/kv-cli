@@ -32,6 +32,9 @@ versions may carry breaking changes.
 
 ### Added
 
+- **Homebrew:** `brew install kovallent/tap/kv-cli` installs the prebuilt
+  binary on macOS (Apple silicon and Intel) and Linux (x86-64 and ARM64). The
+  release workflow updates the tap after each stable release.
 - **`kv-cli explain [CODE]`** prints a rule's reference page: what it catches,
   a bad and a fixed example, what it ignores, how to suppress it and which
   contract keys tune it. With no code it lists the rules. The pages are
