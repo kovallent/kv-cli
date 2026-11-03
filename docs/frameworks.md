@@ -29,4 +29,4 @@ frameworks:
 
 ## dbt YAML and other config files
 
-`profiles.yml`, `dbt_project.yml` and every other scanned config file are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}`, `${VAR}` and INI `%(name)s` interpolation are recognised as correct and never flagged. A framework's own config file activates its profile: `profiles.yml` brings in dbt's credential keys, `airflow.cfg` brings in Airflow's (`fernet_key`, …). `KV003` is deliberately not applied: a per-target config file is exactly where environment-specific values belong.
+`profiles.yml`, `dbt_project.yml` and every other scanned config file are checked for plaintext credentials only. `{{ env_var('DBT_PASSWORD') }}`, `${VAR}` and INI `%(name)s` interpolation are recognised as correct and never flagged, but a literal written into a template is: `{{ env_var('DBT_PASSWORD', 's3cr3t') }}` falls back to a hardcoded password. A framework's own config file activates its profile: `profiles.yml` brings in dbt's credential keys, `airflow.cfg` brings in Airflow's (`fernet_key`, …). `KV003` is deliberately not applied: a per-target config file is exactly where environment-specific values belong.

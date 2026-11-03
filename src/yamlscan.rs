@@ -98,13 +98,30 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+/// The scalar a quoted value spells: `''` is one quote inside single quotes;
+/// `\"` and `\\` are escapes inside double quotes.
 fn unquote(value: &str) -> String {
     let v = value.trim();
     let bytes = v.as_bytes();
     if v.len() >= 2 {
         let (first, last) = (bytes[0], bytes[v.len() - 1]);
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return v[1..v.len() - 1].to_string();
+        let inner = &v[1..v.len() - 1];
+        if first == b'\'' && last == b'\'' {
+            return inner.replace("''", "'");
+        }
+        if first == b'"' && last == b'"' {
+            let mut out = String::with_capacity(inner.len());
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                match (c, chars.clone().next()) {
+                    ('\\', Some(next @ ('"' | '\\'))) => {
+                        out.push(next);
+                        chars.next();
+                    }
+                    _ => out.push(c),
+                }
+            }
+            return out;
         }
     }
     v.to_string()
@@ -248,7 +265,9 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
             continue;
         }
         // `creds: {user: svc, password: x}`: judge the pairs, not the braces.
-        if value.starts_with('{') {
+        // An unquoted `{{ … }}` or `{% … %}` is a template - invalid YAML,
+        // but a person reads it as the value, credential and all.
+        if value.starts_with('{') && !value.starts_with("{{") && !value.starts_with("{%") {
             push_flow_pairs(value, idx + 1, comment, &mut out);
             continue;
         }
@@ -266,6 +285,23 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_scalars_are_unescaped() {
+        assert_eq!(unquote("'it''s'"), "it's");
+        assert_eq!(unquote(r#""say \"hi\" \\ bye""#), r#"say "hi" \ bye"#);
+        assert_eq!(unquote(r#""C:\temp""#), r#"C:\temp"#);
+    }
+
+    /// Unquoted Jinja is invalid YAML, but it is a value, not a flow mapping.
+    #[test]
+    fn unquoted_jinja_is_one_scalar() {
+        let s = scalars("password: {{ env_var('P', 'x') }}\n");
+        assert_eq!(
+            find(&s, "password").unwrap().value,
+            "{{ env_var('P', 'x') }}"
+        );
+    }
 
     fn find<'a>(s: &'a [Scalar], key: &str) -> Option<&'a Scalar> {
         s.iter().find(|x| x.key == key)

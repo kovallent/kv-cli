@@ -5,6 +5,7 @@ mod config;
 mod configscan;
 mod fix;
 mod frameworks;
+mod jinja;
 mod notebook;
 mod payload;
 mod python;
