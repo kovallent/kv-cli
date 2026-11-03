@@ -149,7 +149,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.6.1
+          KV_VERSION: v0.7.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -205,7 +205,7 @@ In the workflow above, that is `kv-cli audit --strict --expect-contract ${{ vars
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.6.1
+    rev: v0.7.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -300,7 +300,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.6.1
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.7.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI package, so `pip install kv-cli` will not work.

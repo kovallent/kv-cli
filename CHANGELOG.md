@@ -11,6 +11,28 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.7.0] — 2026-11-03
+
+Credentials hidden in Jinja templates are now found, `kv-cli explain` puts each
+rule's reference in the terminal, and kv-cli installs with Homebrew.
+Fingerprints are unchanged; one behaviour is not, so read "Upgrading" first.
+
+### Upgrading from 0.6.x
+
+- **A dbt profile with a hardcoded fallback can now fail.** A value such as
+  `password: "{{ env_var('DBT_PASSWORD', 's3cr3t') }}"` used to pass as a
+  reference; the fallback is now reported as KV002. Remove the fallback, or
+  use a placeholder (`'changeme'`) if the template needs one. Plain
+  references such as `{{ env_var('DBT_PASSWORD') }}` are unaffected.
+- No fingerprint changes: the contract's fields are unchanged, so a pinned
+  `--expect-contract` value stays valid.
+- `init` now prints `created <path>` instead of `created wrote <path>`, in
+  case a script matches that line.
+
 ### Fixed
 
 - **A literal inside a Jinja template is reported.** Any value containing
