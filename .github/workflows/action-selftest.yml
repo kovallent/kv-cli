@@ -2,8 +2,9 @@ name: Action self-test
 
 # Runs this repository's composite Action (`uses: ./`) the way a customer's
 # workflow would, on each OS the release ships for. samples/ must exit 1
-# (findings) and samples/compliant.py must exit 0. Two more runs pin the
-# gate's other outcomes: an empty expect-contract exits 2, a wrong one exits 3.
+# (findings) and samples/compliant.py must exit 0. More runs pin the gate's
+# other outcomes: an empty expect-contract exits 2, a wrong one exits 3, and
+# strict: false still runs on every shell (exit 0).
 
 on:
   pull_request:
@@ -88,6 +89,18 @@ jobs:
           paths: samples/compliant.py
           expect-contract: '0000000000000000'
 
+      # strict: false leaves the --strict argument array empty, which is the
+      # case bash 3.2 (macOS /bin/bash) mishandles under `set -u` if unguarded.
+      - name: strict false (expect exit 0)
+        id: lenient
+        uses: ./
+        continue-on-error: true
+        with:
+          version: ${{ env.KV_VERSION }}
+          paths: samples/compliant.py
+          expect-contract: ${{ env.SAMPLES_CONTRACT }}
+          strict: 'false'
+
       - name: Check each run's outcome and exit code
         shell: bash
         env:
@@ -95,6 +108,7 @@ jobs:
           COMPLIANT: ${{ steps.compliant.outcome }}/${{ steps.compliant.outputs.exit-code }}
           UNSET: ${{ steps.unset.outcome }}/${{ steps.unset.outputs.exit-code }}
           DRIFT: ${{ steps.drift.outcome }}/${{ steps.drift.outputs.exit-code }}
+          LENIENT: ${{ steps.lenient.outcome }}/${{ steps.lenient.outputs.exit-code }}
         run: |
           fail=0
           check() {
@@ -109,4 +123,5 @@ jobs:
           check "samples/compliant.py" "$COMPLIANT" "success/0"
           check "empty expect-contract" "$UNSET" "failure/2"
           check "wrong expect-contract" "$DRIFT" "failure/3"
+          check "strict false" "$LENIENT" "success/0"
           exit "$fail"
