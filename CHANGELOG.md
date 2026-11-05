@@ -11,6 +11,18 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **A GitHub Action.** `uses: kovallent/kv-cli@<tag>` installs the release
+  binary for the runner, checks it against the release's `SHA256SUMS` before
+  extracting, runs `kv-cli audit --format json`, annotates each finding on the
+  pull request, writes a job summary with the scope block, and exits with
+  kv-cli's exit code unchanged. An optional `upload-url` posts the JSON report
+  with a GitHub Actions OIDC token (audience `kovallent`); the upload is
+  best-effort and never changes the result. See [CI with the GitHub
+  Action](docs/ci.md). The first tag that contains the Action is the next
+  release; earlier tags cannot be used in `uses:`.
+
 ### Fixed
 
 - **A credential after a syntax error is reported.** tree-sitter's error
