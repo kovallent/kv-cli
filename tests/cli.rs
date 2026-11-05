@@ -1171,6 +1171,7 @@ fn readme_snippets_pin_this_release() {
     for (what, prefix) in [
         ("pre-commit rev", "rev: v"),
         ("Actions KV_VERSION", "KV_VERSION: v"),
+        ("GitHub Action uses", "kovallent/kv-cli@v"),
         ("cargo install --tag", "--tag v"),
     ] {
         let pins: Vec<&str> = readme
