@@ -1,6 +1,6 @@
 {
   "fixture": "adr-0003-worked-example",
-  "version": 4,
+  "version": 5,
   "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
   "repository": { "repository_id": 41, "provider": "github", "full_name": "acme-corp/finance-marts" },
 
@@ -14,27 +14,27 @@
     { "delivery_id": "d-0001", "scenario": 1, "event": "push",
       "note": "one push to dana's branch carrying three commits; writes three rows, all with delivery_id d-0001",
       "commits": [
-        { "sha": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "occurred_at": "2026-09-03T09:14:22Z",
+        { "sha": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "parents": 1, "occurred_at": "2026-09-03T09:14:22Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
-        { "sha": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z",
+        { "sha": "dbb944b05b566469f3595662a47566a75426e4c0", "parents": 1, "occurred_at": "2026-09-03T09:41:07Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] },
-        { "sha": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z",
+        { "sha": "497ebae0bb7c24246183227f26bf77e6869e8727", "parents": 1, "occurred_at": "2026-09-03T10:05:51Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] }
       ] },
     { "delivery_id": "d-0004", "scenario": 1, "event": "push",
       "note": "push of the squash commit to main: author dana, committer priya",
       "commits": [
-        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z",
+        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "parents": 1, "occurred_at": "2026-09-03T15:02:18Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] }
       ] },
 
     { "delivery_id": "d-0005", "scenario": 2, "event": "push",
       "commits": [
-        { "sha": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "occurred_at": "2026-09-08T14:02:55Z",
+        { "sha": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "parents": 1, "occurred_at": "2026-09-08T14:02:55Z",
           "author":    { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
           "committer": { "provider": "github", "id": 8802, "login": "mina",  "type": "User" },
           "trailers":  ["Co-authored-by: Sam Okafor <sam@acme.com>"] }
@@ -42,7 +42,7 @@
 
     { "delivery_id": "d-0006", "scenario": 3, "event": "push",
       "commits": [
-        { "sha": "cd3033592332f5789c65e84bea24a2c414067813", "occurred_at": "2026-09-11T02:00:31Z",
+        { "sha": "cd3033592332f5789c65e84bea24a2c414067813", "parents": 1, "occurred_at": "2026-09-11T02:00:31Z",
           "author":    { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" },
           "committer": { "provider": "github", "id": 49699333, "login": "dependabot[bot]", "type": "Bot" }, "trailers": [] }
       ] },
@@ -52,7 +52,7 @@
 
     { "delivery_id": "d-0008", "scenario": 4, "event": "push",
       "commits": [
-        { "sha": "0e8b588a68b2be41320a7150b7b110906824a5cd", "occurred_at": "2026-09-17T10:58:13Z",
+        { "sha": "0e8b588a68b2be41320a7150b7b110906824a5cd", "parents": 1, "occurred_at": "2026-09-17T10:58:13Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8801, "login": "dana",  "type": "User" }, "trailers": [] }
       ] },
@@ -67,22 +67,22 @@
 
     { "delivery_id": "d-0011", "scenario": 6, "event": "push",
       "commits": [
-        { "sha": "9f05106e0535e2f6967901417e65e41aa4d86d28", "occurred_at": "2026-09-22T16:31:40Z",
+        { "sha": "9f05106e0535e2f6967901417e65e41aa4d86d28", "parents": 1, "occurred_at": "2026-09-22T16:31:40Z",
           "author":    { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" },
           "committer": { "provider": "github", "id": null, "login": null, "type": null, "email": "noreply@localhost" }, "trailers": [] }
       ] },
 
     { "delivery_id": "d-0012", "scenario": 7, "event": "push",
       "commits": [
-        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z",
+        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "parents": 1, "occurred_at": "2026-09-28T08:12:04Z",
           "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
           "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] }
       ] },
 
     { "delivery_id": "d-0004", "scenario": 1, "event": "push",
-      "note": "provider redelivery of d-0004; must not write a second row",
+      "note": "manual redelivery of d-0004 (GitHub does not redeliver automatically); must not write a second row",
       "commits": [
-        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z",
+        { "sha": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "parents": 1, "occurred_at": "2026-09-03T15:02:18Z",
           "author":    { "provider": "github", "id": 8801, "login": "dana",  "type": "User" },
           "committer": { "provider": "github", "id": 8807, "login": "priya", "type": "User" }, "trailers": [] }
       ] },
@@ -90,9 +90,17 @@
     { "delivery_id": "d-0013", "scenario": 8, "event": "push",
       "note": "a later push to main carrying tomas's d-0012 commit again; same SHA, new delivery_id; must not write a second row",
       "commits": [
-        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z",
+        { "sha": "426aef09650301f8ec905fbc4d889fbfaa358adb", "parents": 1, "occurred_at": "2026-09-28T08:12:04Z",
           "author":    { "provider": "github", "id": 8806, "login": "tomas", "type": "User" },
           "committer": { "provider": "github", "id": 8806, "login": "tomas", "type": "User" }, "trailers": [] }
+      ] },
+
+    { "delivery_id": "d-0014", "scenario": 9, "event": "push",
+      "note": "push to main carrying a merge commit made with the merge button (two parents); writes no row",
+      "commits": [
+        { "sha": "68340b6fe5370dc3512f732794f440c1602afcf7", "parents": 2, "occurred_at": "2026-09-29T09:30:12Z",
+          "author":    { "provider": "github", "id": 8808, "login": "nadia", "type": "User" },
+          "committer": { "provider": "github", "id": 8808, "login": "nadia", "type": "User" }, "trailers": [] }
       ] }
   ],
 
@@ -122,16 +130,18 @@
       { "provider": "github", "provider_user_id": 8807,     "reason": "committer_only",                   "excluded_at": "ingest" },
       { "provider": "github", "provider_user_id": 8803,     "reason": "co_author_trailer_not_resolved",   "excluded_at": "ingest" },
       { "provider": "github", "provider_user_id": 49699333, "reason": "account_type_bot",                 "excluded_at": "ingest" },
-      { "provider": "github", "provider_user_id": 8805,     "reason": "review_only",                      "excluded_at": "ingest" }
+      { "provider": "github", "provider_user_id": 8805,     "reason": "review_only",                      "excluded_at": "ingest" },
+      { "provider": "github", "provider_user_id": 8808,     "reason": "merge_commit",                     "excluded_at": "ingest" }
     ]
   },
 
   "assertions": [
     "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref)",
-    "stage 1: rows_written == 9 — the redelivered d-0004 and the repeated commit in d-0013 write nothing",
+    "stage 1: rows_written == 9 — the redelivered d-0004, the repeated commit in d-0013 and the merge commit in d-0014 write nothing",
     "stage 1: a commit SHA already stored for the repository writes no row, whatever its delivery_id",
     "stage 1: a delivery carrying N commits writes N rows, all with the same delivery_id",
-    "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 49699333)}",
+    "stage 1: a commit with more than one parent writes no row, whoever authored it",
+    "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 8808), (github, 49699333)}",
     "stage 1: bot exclusion keys on author/sender type == 'Bot', never on login; a test that sets login to 'dependabot' (no [bot] suffix) with type 'Bot' must still write no row",
     "stage 1: no Co-authored-by trailer is resolved, even when its email matches known_identities",
     "stage 2: billable_count == count(DISTINCT (provider, provider_user_id)) over expected_rows WHERE provider_user_id IS NOT NULL == 4",
