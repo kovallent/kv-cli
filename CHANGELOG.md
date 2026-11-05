@@ -11,17 +11,40 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.7.1] — 2026-11-05
+
+kv-cli runs as a GitHub Action, and a credential on a line after a syntax error
+is now reported. Fingerprints are unchanged; one behaviour is not, so read
+"Upgrading" first.
+
+### Upgrading from 0.7.0
+
+- **A file with a syntax error can now fail.** A credential assigned on a line
+  after the error, such as `password = "s3cr3t"`, used to go unreported; it is
+  now KV002, and its detail says it was read from a line that does not parse.
+  Load the value from the environment as for any KV002. Fixing only the syntax
+  error does not clear it: the file then parses and the credential is found
+  the usual way. Files that parse are unaffected.
+- No fingerprint changes: the contract's fields are unchanged, so a pinned
+  `--expect-contract` value stays valid, and existing findings keep their
+  fingerprints.
+- The GitHub Action needs `v0.7.1` or later in `uses:`. `v0.7.0` and earlier
+  tags hold no `action.yml`.
+
 ### Added
 
-- **A GitHub Action.** `uses: kovallent/kv-cli@<tag>` installs the release
+- **A GitHub Action.** `uses: kovallent/kv-cli@v0.7.1` installs the release
   binary for the runner, checks it against the release's `SHA256SUMS` before
   extracting, runs `kv-cli audit --format json`, annotates each finding on the
   pull request, writes a job summary with the scope block, and exits with
   kv-cli's exit code unchanged. An optional `upload-url` posts the JSON report
   with a GitHub Actions OIDC token (audience `kovallent`); the upload is
   best-effort and never changes the result. See [CI with the GitHub
-  Action](docs/ci.md). The first tag that contains the Action is the next
-  release; earlier tags cannot be used in `uses:`.
+  Action](docs/ci.md).
 
 ### Fixed
 

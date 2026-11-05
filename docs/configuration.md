@@ -64,6 +64,8 @@ infrastructure:
 
 ## Upgrading
 
+**Upgrading to 0.7.1.** Fingerprints do not change. A credential assigned on a line after a syntax error, such as `password = "s3cr3t"`, is now reported as KV002; its detail says it was read from a line that does not parse. Load the value from the environment as for any KV002. Fixing only the syntax error does not clear it, because the file then parses and the credential is found the usual way.
+
 **Upgrading to 0.7.0.** Fingerprints do not change. A literal inside a Jinja template is now reported: `{{ env_var('DBT_PASSWORD', 's3cr3t') }}` falls back to a hardcoded password, so it is KV002. Remove the fallback, or use a placeholder such as `'changeme'`.
 
 **Upgrading to 0.6.0.** Fingerprints do not change. Two behaviours do: `*` in `scan.include` / `scan.exclude` no longer crosses folders (`src/*.py` means files directly in `src/`; write `src/**/*.py` for every depth), and a contract that fails validation is refused with exit `2` instead of loading. Run `kv-cli contract check` first — it lists anything to change, each with its line.

@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@vX.Y.Z
+      - uses: kovallent/kv-cli@v0.7.1
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -37,18 +37,18 @@ jobs:
           # upload-url: https://…
 ```
 
-Replace `vX.Y.Z` with a kv-cli release that includes the Action. The Action was added after v0.7.0, so `v0.7.0` and earlier tags cannot be used in `uses:`; they hold no `action.yml`. The binary is a separate choice: the `version` input can still select an older release, such as `version: v0.6.1`.
+The Action is available from `v0.7.1`. `v0.7.0` and earlier tags hold no `action.yml`, so they cannot be used in `uses:`. The binary is a separate choice: the `version` input can still select an older release, such as `version: v0.6.1`.
 
 Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your contract's fingerprint: `kv-cli contract show` prints it, and every `kv-cli audit --format json` run reports it as `run.contract_sha256`. If the variable is unset, the expression is empty, the Action passes the empty value through, and kv-cli exits `2`. That is deliberate: a gate whose pin was never configured fails rather than passes.
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@vX.Y.Z` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.7.1` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # vX.Y.Z
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.7.1
         with:
-          version: vX.Y.Z
+          version: v0.7.1
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 
