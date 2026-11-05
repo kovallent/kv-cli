@@ -1,0 +1,112 @@
+name: Action self-test
+
+# Runs this repository's composite Action (`uses: ./`) the way a customer's
+# workflow would, on each OS the release ships for. samples/ must exit 1
+# (findings) and samples/compliant.py must exit 0. Two more runs pin the
+# gate's other outcomes: an empty expect-contract exits 2, a wrong one exits 3.
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - action/**
+      - samples/**
+      - .github/workflows/action-selftest.yml
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - action/**
+      - samples/**
+      - .github/workflows/action-selftest.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The compliant run exercises the best-effort upload, which requests an
+  # OIDC token. Fork pull requests get none; the upload then warns and skips.
+  id-token: write
+
+concurrency:
+  group: action-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The release the Action installs. `uses: ./` has no tag to default to.
+  KV_VERSION: v0.7.0
+  # Fingerprint of kv-cli's built-in default contract, which samples/ uses
+  # because no .kovallent.yaml sits above it. Adding one changes this value.
+  SAMPLES_CONTRACT: a6edcff00199c1cf
+
+jobs:
+  selftest:
+    name: Action on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: samples/ (expect exit 1, findings)
+        id: findings
+        uses: ./
+        continue-on-error: true
+        with:
+          version: ${{ env.KV_VERSION }}
+          paths: samples/
+          expect-contract: ${{ env.SAMPLES_CONTRACT }}
+
+      - name: samples/compliant.py (expect exit 0), with an upload that cannot succeed
+        id: compliant
+        uses: ./
+        continue-on-error: true
+        with:
+          version: ${{ env.KV_VERSION }}
+          paths: samples/compliant.py
+          expect-contract: ${{ env.SAMPLES_CONTRACT }}
+          # .invalid never resolves (RFC 2606), so the token never leaves the
+          # runner. The upload must warn and leave the result at 0.
+          upload-url: https://upload.kovallent.invalid/v1/runs
+
+      - name: Empty expect-contract (expect exit 2, tool error)
+        id: unset
+        uses: ./
+        continue-on-error: true
+        with:
+          version: ${{ env.KV_VERSION }}
+          paths: samples/compliant.py
+          expect-contract: ''
+
+      - name: Wrong expect-contract (expect exit 3, contract drift)
+        id: drift
+        uses: ./
+        continue-on-error: true
+        with:
+          version: ${{ env.KV_VERSION }}
+          paths: samples/compliant.py
+          expect-contract: '0000000000000000'
+
+      - name: Check each run's outcome and exit code
+        shell: bash
+        env:
+          FINDINGS: ${{ steps.findings.outcome }}/${{ steps.findings.outputs.exit-code }}
+          COMPLIANT: ${{ steps.compliant.outcome }}/${{ steps.compliant.outputs.exit-code }}
+          UNSET: ${{ steps.unset.outcome }}/${{ steps.unset.outputs.exit-code }}
+          DRIFT: ${{ steps.drift.outcome }}/${{ steps.drift.outputs.exit-code }}
+        run: |
+          fail=0
+          check() {
+            if [ "$2" = "$3" ]; then
+              echo "ok    $1: $2"
+            else
+              echo "::error title=Action self-test::$1: expected $3 (outcome/exit-code), got $2"
+              fail=1
+            fi
+          }
+          check "samples/" "$FINDINGS" "failure/1"
+          check "samples/compliant.py" "$COMPLIANT" "success/0"
+          check "empty expect-contract" "$UNSET" "failure/2"
+          check "wrong expect-contract" "$DRIFT" "failure/3"
+          exit "$fail"

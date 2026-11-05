@@ -136,6 +136,32 @@ If no file matched at all, that is not a pass. The run exits `2` with `no files 
 
 ## Use it in CI
 
+### With the GitHub Action
+
+`uses: kovallent/kv-cli@<tag>` installs the release binary for the runner, verifies it against the release's `SHA256SUMS`, annotates each finding on the pull request, writes a job summary with the scope block, and exits with kv-cli's exit code. The gate is that exit code, computed on the runner, so it works without any Kovallent service:
+
+```yaml
+name: kovallent
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    name: Kovallent gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: kovallent/kv-cli@vX.Y.Z # a release that includes the Action (after v0.7.0)
+        with:
+          expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
+```
+
+To upload the JSON report, set `upload-url`. The Action authenticates with a GitHub Actions OIDC token, so **the calling workflow needs `permissions: id-token: write`**. The upload is best-effort and never changes the result. [CI with the GitHub Action](docs/ci.md) covers every input, making the job a required status check, and protecting `.github/workflows/` with `CODEOWNERS`.
+
+### Without the Action
+
 Add this as `.github/workflows/kovallent.yml`. It installs a pinned release, verifies its checksum and fails the pull request on any finding:
 
 ```yaml
@@ -196,7 +222,7 @@ CONTRACT DRIFT the local contract is not the one this repository pins
   this is not a code failure - it escalates to whoever owns the contract
 ```
 
-In the workflow above, that is `kv-cli audit --strict --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}`, with the value from `kv-cli contract show` stored as an organization variable. [Contract pinning](docs/contract-pinning.md) covers why the pin must live outside the repository and how to close the remaining gaps. For machine-readable output, `--format json` emits a [documented payload](docs/json-payload.md), with `run.contract_drift` set on a mismatch.
+With the Action, that is the `expect-contract` input; in the workflow without it, `kv-cli audit --strict --expect-contract ${{ vars.KOVALLENT_CONTRACT_SHA }}`. Either way the value comes from `kv-cli contract show` and is stored as an organization variable. [Contract pinning](docs/contract-pinning.md) covers why the pin must live outside the repository and how to close the remaining gaps. For machine-readable output, `--format json` emits a [documented payload](docs/json-payload.md), with `run.contract_drift` set on a mismatch.
 
 ---
 
@@ -291,6 +317,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 - **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), also available offline as `kv-cli explain <code>`.
 - [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
 - [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
+- [CI with the GitHub Action](docs/ci.md): the Action's inputs, required status checks, protecting the workflow, uploading with OIDC.
 - [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
 - [JSON payload](docs/json-payload.md): the `--format json` schema.
 - [How it works](docs/how-it-works.md): the AST scanner, config scanners and what `fix` changes.

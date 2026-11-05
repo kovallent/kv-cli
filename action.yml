@@ -1,0 +1,114 @@
+name: Kovallent kv-cli gate
+description: Gate a pull request on kv-cli's exit code, with annotations, a job summary and an optional report upload.
+author: Kovallent
+
+branding:
+  icon: shield
+  color: blue
+
+# The gate is kv-cli's own exit code, computed on the runner from the
+# repository's contract. No server is consulted, so the gate keeps working
+# when the Kovallent service is down or absent. See docs/ci.md.
+
+inputs:
+  version:
+    description: >
+      kv-cli release to run, e.g. v0.7.0. Defaults to the tag this Action is
+      used at (`uses: kovallent/kv-cli@<tag>`). Required when the Action is
+      referenced by commit SHA, branch or local path.
+    required: false
+    default: ''
+  paths:
+    description: Files or directories to audit, separated by spaces or newlines, relative to working-directory.
+    required: false
+    default: '.'
+  expect-contract:
+    description: >
+      Fingerprint the contract must have, normally an organization variable
+      such as `vars.KOVALLENT_CONTRACT_SHA`. Passed through even when empty: an
+      empty value makes kv-cli exit 2, so a gate whose variable was never set
+      fails instead of passing.
+    required: true
+  strict:
+    description: Treat warnings as gating (`--strict`). `true` or `false`.
+    required: false
+    default: 'true'
+  upload-url:
+    description: >
+      HTTPS endpoint to POST the JSON report to, authenticated with a GitHub
+      Actions OIDC token (audience `kovallent`). Needs `permissions: id-token: write`.
+      Best-effort: a failed upload warns and never changes the result.
+    required: false
+    default: ''
+  working-directory:
+    description: Directory to run kv-cli in.
+    required: false
+    default: '.'
+
+outputs:
+  exit-code:
+    description: "kv-cli's exit code: 0 compliant, 1 findings, 2 tool error, 3 contract drift."
+    value: ${{ steps.audit.outputs.exit-code }}
+  verdict:
+    description: 'compliant, findings, tool-error or contract-drift.'
+    value: ${{ steps.audit.outputs.verdict }}
+  report:
+    description: Path to the JSON report. Empty file when kv-cli exited before writing one.
+    value: ${{ steps.audit.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install kv-cli
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        # github.action_ref is only reliable in a composite action through env.
+        ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/action/install.sh"
+
+    - name: Run kv-cli audit
+      id: audit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        KV_BIN: ${{ steps.install.outputs.binary }}
+        INPUT_EXPECT_CONTRACT: ${{ inputs.expect-contract }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_PATHS: ${{ inputs.paths }}
+      run: bash "$GITHUB_ACTION_PATH/action/audit.sh"
+
+    - name: Annotate findings
+      shell: bash
+      env:
+        REPORT: ${{ steps.audit.outputs.report }}
+        WORKDIR: ${{ steps.audit.outputs.workdir }}
+        FIRST_PATH: ${{ steps.audit.outputs.first-path }}
+      run: bash "$GITHUB_ACTION_PATH/action/annotate.sh"
+
+    - name: Write job summary
+      shell: bash
+      env:
+        REPORT: ${{ steps.audit.outputs.report }}
+        EXIT_CODE: ${{ steps.audit.outputs.exit-code }}
+        KV_VERSION: ${{ steps.install.outputs.version }}
+      run: bash "$GITHUB_ACTION_PATH/action/summary.sh"
+
+    - name: Upload report
+      if: inputs.upload-url != ''
+      shell: bash
+      env:
+        UPLOAD_URL: ${{ inputs.upload-url }}
+        REPORT: ${{ steps.audit.outputs.report }}
+      run: bash "$GITHUB_ACTION_PATH/action/upload.sh"
+
+    - name: Gate on kv-cli's exit code
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.audit.outputs.exit-code }}
+      run: |
+        case "$EXIT_CODE" in
+          ''|*[!0-9]*) echo "::error title=kv-cli::kv-cli did not report an exit code"; exit 2 ;;
+        esac
+        exit "$EXIT_CODE"
