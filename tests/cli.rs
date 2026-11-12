@@ -1222,3 +1222,53 @@ fn documentation_links_resolve() {
     }
     assert!(dead.is_empty(), "dead links: {dead:#?}");
 }
+
+/// The workflow `docs/ci.md` documents, exactly as kovallent/gate-test ran it
+/// (a2f6b46, `id-token: write` uncommented), failed its own gate with KV002 on
+/// `id-token`. Audited both ways a repository runs kv-cli: the Action's
+/// `audit .`, and pre-commit naming the file - where, with no contract, the
+/// project root is `.github/workflows` itself and the path is `kovallent.yml`.
+#[test]
+fn the_documented_workflow_passes_its_own_gate() {
+    let dir = tempdir("documented-workflow");
+    std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+    write(
+        &dir,
+        ".github/workflows/kovallent.yml",
+        include_str!("fixtures/gate-test-kovallent.yml"),
+    );
+
+    let kv002 = |payload: &serde_json::Value| -> Vec<serde_json::Value> {
+        payload["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "KV002")
+            .cloned()
+            .collect()
+    };
+
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(
+        kv002(&payload),
+        Vec::<serde_json::Value>::new(),
+        "{payload:#}"
+    );
+    assert_eq!(payload["run"]["files_scanned"], 1, "{payload:#}");
+    assert_eq!(code, Some(0), "{payload:#}");
+
+    let out = Command::new(bin())
+        .args([
+            "audit",
+            ".github/workflows/kovallent.yml",
+            "--format",
+            "json",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("kv-cli runs");
+    let named: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(kv002(&named), Vec::<serde_json::Value>::new(), "{named:#}");
+    assert_eq!(out.status.code(), Some(0), "{named:#}");
+}

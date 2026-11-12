@@ -9,6 +9,8 @@
 //! not actionable. Only the shapes that can carry a secret are handled -
 //! `key: value` scalars, including inside block sequences.
 
+use std::path::Path;
+
 /// One `key: value` scalar found in a YAML document.
 #[derive(Debug, Clone)]
 pub struct Scalar {
@@ -18,6 +20,43 @@ pub struct Scalar {
     /// The line's comment, if any, for ignore-marker checks. Only the comment
     /// counts: a marker inside the value is data, not intent.
     pub comment: String,
+    /// The keys of the mappings this scalar is nested in, outermost first:
+    /// `["jobs", "build", "permissions"]` for a job's permission. Sequence
+    /// entries add no key. Empty for formats other than YAML.
+    pub parents: Vec<String>,
+}
+
+/// True when `path` is a GitHub Actions workflow: a `.yml` or `.yaml` file
+/// directly inside a `.github/workflows` folder.
+pub fn is_workflow_file(path: &Path) -> bool {
+    let mut parts = path.components().rev().map(|c| c.as_os_str());
+    let (Some(file), Some(dir), Some(github)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let yaml = Path::new(file)
+        .extension()
+        .is_some_and(|e| e == "yml" || e == "yaml");
+    yaml && dir == "workflows" && github == ".github"
+}
+
+/// True when `scalar` is a GitHub Actions permission set to one of the three
+/// values GitHub defines for it - `read`, `write` or `none`, in any case -
+/// under `permissions:` at workflow level or in a job.
+///
+/// None of those values can be a credential, yet `id-token: write` matches the
+/// default key pattern `*token*`. Any other value under `permissions` is not
+/// a permission GitHub accepts, and is judged like any other scalar.
+pub fn is_workflow_permission(scalar: &Scalar) -> bool {
+    let parents: Vec<&str> = scalar.parents.iter().map(String::as_str).collect();
+    let under_permissions = matches!(
+        parents.as_slice(),
+        ["permissions"] | ["jobs", _, "permissions"]
+    );
+    under_permissions
+        && matches!(
+            scalar.value.trim().to_ascii_lowercase().as_str(),
+            "read" | "write" | "none"
+        )
 }
 
 /// True when the value is supplied at render time rather than written down:
@@ -127,22 +166,30 @@ fn unquote(value: &str) -> String {
     v.to_string()
 }
 
-fn push_flow_pairs(text: &str, line: usize, comment: &str, out: &mut Vec<Scalar>) {
-    for (key, value) in flow_pairs(text).unwrap_or_default() {
+fn push_flow_pairs(
+    text: &str,
+    line: usize,
+    comment: &str,
+    parents: &[String],
+    out: &mut Vec<Scalar>,
+) {
+    for (inner, key, value) in flow_pairs(text).unwrap_or_default() {
         out.push(Scalar {
             key,
             value,
             line,
             comment: comment.to_string(),
+            parents: parents.iter().cloned().chain(inner).collect(),
         });
     }
 }
 
 /// The `key: value` pairs of a flow mapping written on one line, nested
-/// mappings included. Sequences hold no keys and are skipped. A flow mapping
+/// mappings included, each with the keys of the flow mappings it is nested in
+/// within this one. Sequences hold no keys and are skipped. A flow mapping
 /// continued onto later lines yields nothing here; the value patterns still
 /// read it.
-fn flow_pairs(text: &str) -> Option<Vec<(String, String)>> {
+fn flow_pairs(text: &str) -> Option<Vec<(Vec<String>, String, String)>> {
     let inner = text.trim().strip_prefix('{')?.strip_suffix('}')?;
     let mut out = Vec::new();
     for part in split_top_level(inner, ',') {
@@ -155,7 +202,10 @@ fn flow_pairs(text: &str) -> Option<Vec<(String, String)>> {
         let key = unquote(&part[..at]);
         let value = strip_node_properties(part[at + 1..].trim());
         if value.starts_with('{') {
-            out.extend(flow_pairs(value).unwrap_or_default());
+            for (mut inner, k, v) in flow_pairs(value).unwrap_or_default() {
+                inner.insert(0, key.clone());
+                out.push((inner, k, v));
+            }
             continue;
         }
         if key.is_empty() || key.contains(char::is_whitespace) || value.starts_with('[') {
@@ -163,7 +213,7 @@ fn flow_pairs(text: &str) -> Option<Vec<(String, String)>> {
         }
         let value = unquote(value);
         if !value.is_empty() {
-            out.push((key, value));
+            out.push((Vec::new(), key, value));
         }
     }
     Some(out)
@@ -198,6 +248,9 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
     let mut out = Vec::new();
     // Indent of the key that opened a literal block, while inside one.
     let mut block: Option<usize> = None;
+    // The block mappings enclosing the current line: each key that opened
+    // one, with the column that key starts at.
+    let mut open: Vec<(usize, String)> = Vec::new();
 
     for (idx, raw_line) in source.lines().enumerate() {
         let indent = raw_line.len() - raw_line.trim_start().len();
@@ -211,11 +264,15 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
 
         let (line, comment) = split_comment(raw_line);
         let mut rest = line.trim_start();
+        // The column the line's content starts at, past any `- ` markers.
+        let mut column = indent;
 
         // Block sequence entries: `- key: value`, possibly nested `- - `.
         while let Some(stripped) = rest.strip_prefix('-') {
             if stripped.starts_with(' ') || stripped.is_empty() {
-                rest = stripped.trim_start();
+                let entry = stripped.trim_start();
+                column += rest.len() - entry.len();
+                rest = entry;
             } else {
                 break;
             }
@@ -223,18 +280,24 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
         if rest.is_empty() || rest.starts_with('#') {
             continue;
         }
+        // Content at or left of a mapping's key closes that mapping.
+        while open.last().is_some_and(|(at, _)| *at >= column) {
+            open.pop();
+        }
+        let parents: Vec<String> = open.iter().map(|(_, key)| key.clone()).collect();
         if let Some((key, value)) = jinja_set(rest) {
             out.push(Scalar {
                 key,
                 value,
                 line: idx + 1,
                 comment: comment.to_string(),
+                parents,
             });
             continue;
         }
         // `- {user: svc, password: x}`: a flow mapping as the whole entry.
         if rest.starts_with('{') {
-            push_flow_pairs(rest, idx + 1, comment, &mut out);
+            push_flow_pairs(rest, idx + 1, comment, &parents, &mut out);
             continue;
         }
 
@@ -271,13 +334,16 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
             continue;
         }
         if is_empty_value(value) {
+            open.push((column, key));
             continue;
         }
         // `creds: {user: svc, password: x}`: judge the pairs, not the braces.
         // An unquoted `{{ … }}` or `{% … %}` is a template - invalid YAML,
         // but a person reads it as the value, credential and all.
         if value.starts_with('{') && !value.starts_with("{{") && !value.starts_with("{%") {
-            push_flow_pairs(value, idx + 1, comment, &mut out);
+            let mut within = parents;
+            within.push(key);
+            push_flow_pairs(value, idx + 1, comment, &within, &mut out);
             continue;
         }
 
@@ -286,6 +352,7 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
             value: unquote(value),
             line: idx + 1,
             comment: comment.to_string(),
+            parents,
         });
     }
     out
@@ -481,5 +548,96 @@ mod tests {
         // An empty value opens structure, not a literal block.
         let s = scalars("outputs:\n  prod:\n    password: hunter2\n");
         assert_eq!(find(&s, "password").unwrap().value, "hunter2");
+    }
+
+    /// Each scalar knows the mappings it sits in; sequence entries add no
+    /// key, and a comment line closes nothing.
+    #[test]
+    fn scalars_know_the_mappings_they_are_nested_in() {
+        let src = "\
+permissions:
+  contents: read
+  # a comment at the mapping's own indent
+  id-token: write
+jobs:
+  build:
+    permissions:
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: abc
+top: level
+";
+        let s = scalars(src);
+        assert_eq!(find(&s, "contents").unwrap().parents, ["permissions"]);
+        assert_eq!(find(&s, "id-token").unwrap().parents, ["permissions"]);
+        assert_eq!(
+            find(&s, "checks").unwrap().parents,
+            ["jobs", "build", "permissions"]
+        );
+        assert_eq!(
+            find(&s, "uses").unwrap().parents,
+            ["jobs", "build", "steps"]
+        );
+        assert_eq!(
+            find(&s, "token").unwrap().parents,
+            ["jobs", "build", "steps", "with"]
+        );
+        assert!(find(&s, "top").unwrap().parents.is_empty());
+
+        let s = scalars("permissions: {id-token: write, nested: {k: v}}\n");
+        assert_eq!(find(&s, "id-token").unwrap().parents, ["permissions"]);
+        assert_eq!(find(&s, "k").unwrap().parents, ["permissions", "nested"]);
+    }
+
+    #[test]
+    fn workflow_files_are_recognised_by_location() {
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/ci.yaml",
+            "sub/.github/workflows/ci.yml",
+            "/abs/repo/.github/workflows/kovallent.yml",
+        ] {
+            assert!(is_workflow_file(Path::new(path)), "{path}");
+        }
+        for path in [
+            "config/app.yml",
+            ".github/ci.yml",
+            ".github/workflows/nested/ci.yml",
+            ".github/workflows/ci.json",
+            "workflows/ci.yml",
+            "ci.yml",
+        ] {
+            assert!(!is_workflow_file(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn workflow_permissions_are_the_three_values_at_workflow_or_job_level() {
+        let perm =
+            |src: &str| -> Vec<bool> { scalars(src).iter().map(is_workflow_permission).collect() };
+        assert_eq!(
+            perm("permissions:\n  id-token: write\n  contents: READ\n  pages: None\n"),
+            [true, true, true]
+        );
+        assert_eq!(
+            perm("jobs:\n  b:\n    permissions:\n      id-token: \"write\"\n"),
+            [true]
+        );
+        // Not one of the three values: judged like any other scalar.
+        assert_eq!(
+            perm("permissions:\n  id-token: hunter2hunter2\n  contents: write-all\n"),
+            [false, false]
+        );
+        // `permissions` anywhere else is not GitHub's permissions block.
+        assert_eq!(
+            perm("jobs:\n  b:\n    steps:\n      - with:\n          permissions:\n            id-token: write\n"),
+            [false]
+        );
+        assert_eq!(
+            perm("deploy:\n  permissions:\n    id-token: write\n"),
+            [false]
+        );
     }
 }
