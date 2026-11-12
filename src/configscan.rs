@@ -109,6 +109,7 @@ fn line_scalars(source: &str, parse: fn(&str) -> Option<(String, String, &str)>)
                 value,
                 line: i + 1,
                 comment: comment.to_string(),
+                parents: Vec::new(),
             })
         })
         .collect()
@@ -291,6 +292,7 @@ fn json_scalars(source: &str) -> Vec<Scalar> {
                 value: value.to_string(),
                 line,
                 comment: String::new(),
+                parents: Vec::new(),
             });
         }
     }

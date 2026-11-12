@@ -6,6 +6,7 @@ use crate::frameworks::{self, FrameworkProfile};
 use crate::jinja;
 use crate::notebook;
 use crate::python::{self, Analysis, Binding, BindingSource, FunctionDef};
+use crate::yamlscan;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -418,14 +419,26 @@ impl Engine {
 
     #[cfg(test)]
     pub fn audit_yaml(&self, path: &str, source: &str) -> Vec<Finding> {
-        self.audit_config(path, source, ConfigKind::Yaml)
+        self.audit_config(path, source, ConfigKind::Yaml, None)
     }
 
     /// Audit a config file - YAML, `.env`, INI, TOML, JSON - for credentials.
     ///
+    /// `path` is the file's project-relative path, as findings report it.
+    /// `location` is the file on disk, when there is one: it identifies a
+    /// GitHub Actions workflow even when the project root is not the
+    /// repository root, as when pre-commit names only a workflow file and
+    /// no contract is found.
+    ///
     /// KV003 is deliberately not applied: a per-environment config file is
     /// exactly where environment-specific values belong.
-    pub fn audit_config(&self, path: &str, source: &str, kind: ConfigKind) -> Vec<Finding> {
+    pub fn audit_config(
+        &self,
+        path: &str,
+        source: &str,
+        kind: ConfigKind,
+        location: Option<&Path>,
+    ) -> Vec<Finding> {
         let ctx = self.config_context(Path::new(path));
         let mut out = Vec::new();
         let secrets = &self.contract.secrets;
@@ -436,7 +449,21 @@ impl Engine {
         // `.env` templates hold placeholders by design; value patterns still
         // apply to them below.
         let key_rule = !(kind == ConfigKind::Env && configscan::is_env_template(Path::new(path)));
+        // In a GitHub Actions workflow, `permissions:` values are `read`,
+        // `write` or `none`, never a credential - but `id-token: write`
+        // matches `*token*`. The key rule skips exactly those scalars; value
+        // patterns still read every line below. Fixed here rather than in the
+        // contract defaults, which would change every default contract's
+        // fingerprint (ADR 0001).
+        let workflow = kind == ConfigKind::Yaml
+            && (yamlscan::is_workflow_file(Path::new(path))
+                || location
+                    .and_then(|f| f.canonicalize().ok())
+                    .is_some_and(|f| yamlscan::is_workflow_file(&f)));
         for scalar in kind.scalars(source).into_iter().filter(|_| key_rule) {
+            if workflow && yamlscan::is_workflow_permission(&scalar) {
+                continue;
+            }
             // `{{ env_var(...) }}` and `${VAR}` are exactly what we want to
             // see. A Jinja template is judged by what it writes down, such as
             // the fallback in `env_var('X', 's3cr3t')`.
@@ -1572,6 +1599,16 @@ mod tests {
         assert_eq!(fp.len(), FINGERPRINT_LEN);
     }
 
+    /// Every repository on the built-in defaults pins this value. Changing a
+    /// default (`allow_values`, `exempt_key_patterns`, …) changes it, and every
+    /// one of those repositories then fails `--expect-contract` with exit 3
+    /// on upgrade - a breaking event under ADR 0001. A false positive is fixed
+    /// in the scanner instead.
+    #[test]
+    fn the_default_contract_fingerprint_is_unchanged() {
+        assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
+    }
+
     /// Adding an import shifts every line in the file. If the line number were
     /// part of the identity, that single edit would retire every finding in the
     /// file and create an equal number of new ones.
@@ -2156,11 +2193,114 @@ mod tests {
         .is_empty());
     }
 
+    // --- GitHub Actions workflow permissions -----------------------------
+
+    /// The workflow `docs/ci.md` documents, exactly as kovallent/gate-test ran
+    /// it in a2f6b46 with `id-token: write` uncommented. It failed its own gate:
+    /// KV002 on `id-token`, exit 1.
+    const GATE_TEST_WORKFLOW: &str = include_str!("../tests/fixtures/gate-test-kovallent.yml");
+
+    /// `ghp_` and 36 alphanumerics: what the `github_token` value pattern finds.
+    fn ghp() -> String {
+        format!("ghp_{}", &"a1B2c3D4e5".repeat(4)[..36])
+    }
+
+    fn kv002(findings: &[Finding]) -> Vec<(usize, String, String)> {
+        findings
+            .iter()
+            .filter(|f| f.code == CODE_HARDCODED_SECRET)
+            .map(|f| (f.line, f.symbol.clone(), f.subject.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn the_documented_workflow_passes_its_own_gate() {
+        assert_eq!(
+            kv002(&yaml(".github/workflows/kovallent.yml", GATE_TEST_WORKFLOW)),
+            []
+        );
+        // The same file as a non-workflow is still judged: `id-token: write`.
+        assert_eq!(
+            kv002(&yaml("config/kovallent.yml", GATE_TEST_WORKFLOW)),
+            [(11, "id-token".into(), "key_pattern".into())]
+        );
+    }
+
+    #[test]
+    fn job_level_permissions_are_not_credentials() {
+        let src = "\
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+";
+        assert_eq!(kv002(&yaml(".github/workflows/ci.yaml", src)), []);
+    }
+
+    /// A token pasted under `permissions` is still reported. The key rule
+    /// runs first and a line is reported once, so `id-token: ghp_…` is reported
+    /// by the key rule (not one of the three values); `contents: ghp_…`, whose
+    /// key no key pattern matches, shows the value pattern still applies
+    /// there.
+    #[test]
+    fn a_credential_under_workflow_permissions_is_still_reported() {
+        let token = ghp();
+        let path = ".github/workflows/ci.yml";
+        assert_eq!(
+            kv002(&yaml(path, &format!("permissions:\n  id-token: {token}\n"))),
+            [(2, "id-token".into(), "key_pattern".into())]
+        );
+        let by_value = yaml(path, &format!("permissions:\n  contents: {token}\n"));
+        assert_eq!(by_value.len(), 1);
+        assert_eq!(by_value[0].line, 2);
+        assert_eq!(by_value[0].subject, "github_token");
+        assert_eq!(
+            kv002(&yaml(path, "permissions:\n  id-token: hunter2hunter2\n")),
+            [(2, "id-token".into(), "key_pattern".into())]
+        );
+        assert_eq!(
+            kv002(&yaml(
+                path,
+                "jobs:\n  b:\n    permissions:\n      id-token: hunter2hunter2\n"
+            )),
+            [(4, "id-token".into(), "key_pattern".into())]
+        );
+    }
+
+    #[test]
+    fn permissions_outside_a_workflow_are_judged_as_before() {
+        let src = "permissions:\n  id-token: write\n";
+        for path in [
+            "config/app.yml",
+            "profiles.yml",
+            ".github/workflows/nested/ci.yml",
+        ] {
+            assert_eq!(
+                kv002(&yaml(path, src)),
+                [(2, "id-token".into(), "key_pattern".into())],
+                "{path}"
+            );
+        }
+        // In a workflow, only workflow- and job-level `permissions` count.
+        assert_eq!(
+            kv002(&yaml(
+                ".github/workflows/ci.yml",
+                "jobs:\n  b:\n    steps:\n      - uses: x\n        with:\n          permissions:\n            id-token: write\n"
+            )),
+            [(7, "id-token".into(), "key_pattern".into())]
+        );
+    }
+
     // --- other config files and notebooks --------------------------------
 
     fn config(name: &str, src: &str) -> Vec<Finding> {
         let kind = ConfigKind::of(Path::new(name)).expect("a config file name");
-        engine().audit_config(name, src, kind)
+        engine().audit_config(name, src, kind, None)
     }
 
     #[test]

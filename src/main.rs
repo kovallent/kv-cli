@@ -965,7 +965,7 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
         FileKind::Python => {}
         FileKind::Config(kind) => {
             return FileOutcome {
-                findings: engine.audit_config(&rel, &src, kind),
+                findings: engine.audit_config(&rel, &src, kind, Some(file)),
                 ..Default::default()
             }
         }
@@ -1365,7 +1365,7 @@ fn cmd_fix(
         let manual = match file_kind(file) {
             FileKind::Python => None,
             FileKind::Config(kind) => Some((
-                engine.audit_config(&shown, &src, kind),
+                engine.audit_config(&shown, &src, kind, Some(file.as_path())),
                 format!(
                     "credential in {} - move it to the environment or a secret store by hand",
                     kind.label()

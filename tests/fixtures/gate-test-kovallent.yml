@@ -1,0 +1,26 @@
+name: Kovallent
+
+on:
+  pull_request:
+  push:
+    branches: [main] # your default branch
+
+permissions:
+  contents: read
+  # Only needed with upload-url, below.
+  id-token: write
+
+jobs:
+  kovallent:
+    # This name is what you make a required status check.
+    name: kovallent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: kovallent/kv-cli@v0.7.1
+        with:
+          # An organization variable: pull-request authors cannot edit it.
+          expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
+          # Optional: upload the JSON report. Needs `id-token: write` above.
+          upload-url: https://platform-app-ik1p.onrender.com/v1/runs

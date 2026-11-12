@@ -20,6 +20,7 @@ permissions:
   contents: read
   # Only needed with upload-url, below.
   # id-token: write
+  # v0.7.1 and earlier report this as KV002; add "# kovallent:allow-secret" to the line, or upgrade to v0.7.2.
 
 jobs:
   gate:
@@ -29,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.7.1
+      - uses: kovallent/kv-cli@v0.7.2
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -43,12 +44,12 @@ Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your cont
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@v0.7.1` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.7.2` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # v0.7.1
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.7.2
         with:
-          version: v0.7.1
+          version: v0.7.2
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 

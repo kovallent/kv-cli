@@ -15,6 +15,30 @@ Nothing yet.
 
 ---
 
+## [0.7.2] — 2026-11-12
+
+The documented GitHub Action setup passes its own gate. Contract fingerprints
+are unchanged, so a pinned `--expect-contract` value stays valid.
+
+### Fixed
+
+- **The documented OIDC upload setup failed its own gate with KV002 on
+  `id-token`.** `upload-url` needs `permissions: id-token: write` in the
+  workflow, and `kv-cli audit .` scans `.github/workflows/*.yml`, where
+  `id-token` matched the default key pattern `*token*` and `write` was read as
+  a plaintext credential. In a `.yml` or `.yaml` file directly inside
+  `.github/workflows`, the key rule now skips a scalar under `permissions:` at
+  workflow or job level when its value is `read`, `write` or `none` (any
+  case): GitHub defines those three values, and none of them can be a
+  credential. Any other value under `permissions` is still reported, value
+  patterns such as `github_token` still apply on every line, and YAML outside
+  `.github/workflows` is judged as before. Fixed in the scanner rather than in
+  the contract defaults, which would have changed every default contract's
+  fingerprint (ADR 0001). On 0.7.1 and earlier, add `# kovallent:allow-secret`
+  to the `id-token: write` line.
+
+---
+
 ## [0.7.1] — 2026-11-05
 
 kv-cli runs as a GitHub Action, and a credential on a line after a syntax error
