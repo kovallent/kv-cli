@@ -64,6 +64,13 @@ pub struct Finding {
     /// Framework profile that contributed the rule, when one did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
+    /// KV001 only. True when the function is governed but report-only (counted in functions_report_only); false when it is enforced. Absent on other codes.
+    //
+    // Set from the same `classify()` decision that emits the finding and that
+    // `scope()` tallies, so the flag and `functions_report_only` cannot
+    // disagree. Never derive it from `framework` or `detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_only: Option<bool>,
     #[serde(flatten)]
     pub kind: FindingKind,
 }
@@ -512,6 +519,7 @@ impl Engine {
                 message: format!("`{}` holds a plaintext credential", scalar.key),
                 detail: Some(format!("value {} - {advice}", redact(&value))),
                 framework: fw,
+                report_only: None,
                 kind: FindingKind::HardcodedSecret {
                     detector: "key_pattern".into(),
                     key: Some(scalar.key.clone()),
@@ -623,6 +631,7 @@ impl Engine {
                     message: format!("hardcoded credential detected ({name})"),
                     detail: Some(format!("matched {}", redact(mat.as_str()))),
                     framework,
+                    report_only: None,
                     kind: FindingKind::HardcodedSecret {
                         detector: name.clone(),
                         key: None,
@@ -928,9 +937,15 @@ impl FileContext<'_> {
 
     fn check_parameters(&self, path: &str, a: &Analysis, out: &mut Vec<Finding>) {
         for f in &a.functions {
-            if !self.governs(f) {
-                continue;
-            }
+            // One decision both selects the function and says whether it is
+            // report-only - the same `classify()` that `scope()` tallies.
+            let report_only = match self.classify(f) {
+                ScopeDecision::Governed => false,
+                ScopeDecision::GovernedReportOnly => true,
+                ScopeDecision::ExemptFramework
+                | ScopeDecision::ExemptUser
+                | ScopeDecision::OutOfScope => continue,
+            };
             let framework = self.governing_framework(f);
             let reason = self
                 .selection_reason(f)
@@ -961,6 +976,7 @@ impl FileContext<'_> {
                         render_param(required)
                     )),
                     framework,
+                    report_only: Some(report_only),
                     kind: FindingKind::MissingParameter {
                         function: f.name.clone(),
                         parameter: required.name.clone(),
@@ -1015,6 +1031,7 @@ impl FileContext<'_> {
                     }
                 )),
                 framework,
+                report_only: None,
                 kind: FindingKind::HardcodedSecret {
                     detector: "key_pattern".into(),
                     key: Some(b.key.clone()),
@@ -1047,6 +1064,7 @@ impl FileContext<'_> {
                     message: format!("hardcoded credential detected ({name})"),
                     detail: Some(format!("matched {}", redact(mat.as_str()))),
                     framework,
+                    report_only: None,
                     kind: FindingKind::HardcodedSecret {
                         detector: name.clone(),
                         key: None,
@@ -1116,6 +1134,7 @@ impl FileContext<'_> {
                     redact(mat.as_str())
                 )),
                 framework,
+                report_only: None,
                 kind: FindingKind::HardcodedSecret {
                     detector: name.clone(),
                     key: None,
@@ -1161,6 +1180,7 @@ impl FileContext<'_> {
                     "this should vary by environment - derive it from target_environment".into(),
                 ),
                 framework,
+                report_only: None,
                 kind: FindingKind::HardcodedInfrastructure {
                     detector: "key_pattern".into(),
                     key: Some(b.key.clone()),
@@ -1202,6 +1222,7 @@ impl FileContext<'_> {
                         truncate(mat.as_str())
                     )),
                     framework,
+                    report_only: None,
                     kind: FindingKind::HardcodedInfrastructure {
                         detector: name.clone(),
                         key: None,
@@ -1607,6 +1628,83 @@ mod tests {
     #[test]
     fn the_default_contract_fingerprint_is_unchanged() {
         assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
+    }
+
+    // --- report_only on KV001 ------------------------------------------------
+
+    /// The bundled Airflow DAG: two `@task` functions, governed but report-only.
+    const AIRFLOW_DAG: &str = include_str!("../samples/frameworks/airflow_dag.py");
+
+    /// Every KV001 finding's `report_only` is the `classify()` decision for its
+    /// function, and no other code carries the flag. The distinct report-only
+    /// functions never outnumber `scope().functions_report_only`.
+    #[test]
+    fn kv001_report_only_follows_the_classify_decision() {
+        let e = engine();
+        let mut seen = [false; 2];
+        for (path, src) in [
+            ("frameworks/airflow_dag.py", AIRFLOW_DAG),
+            (
+                "jobs/deploy.py",
+                "def deploy_service(name):\n    return name\n",
+            ),
+        ] {
+            let a = python::analyze(src);
+            let ctx = e.context(&a);
+            let findings = ctx.audit(path, src, &a);
+            let mut report_only_fns = std::collections::BTreeSet::new();
+            for f in findings.iter().filter(|f| f.code == CODE_MISSING_PARAM) {
+                let function = a
+                    .functions
+                    .iter()
+                    .find(|d| d.name == f.symbol && d.line == f.line)
+                    .expect("the finding's function");
+                let expected = match ctx.classify(function) {
+                    ScopeDecision::Governed => false,
+                    ScopeDecision::GovernedReportOnly => true,
+                    other => panic!("KV001 on a function classified {other:?}"),
+                };
+                assert_eq!(f.report_only, Some(expected), "{path}: {}", f.symbol);
+                seen[usize::from(expected)] = true;
+                if expected {
+                    report_only_fns.insert((f.path.clone(), f.symbol.clone(), f.line));
+                }
+            }
+            assert!(
+                report_only_fns.len() <= ctx.scope(&a).functions_report_only,
+                "{path}: {report_only_fns:?}"
+            );
+            for f in findings.iter().filter(|f| f.code != CODE_MISSING_PARAM) {
+                assert_eq!(f.report_only, None, "{path}: {} {}", f.code, f.symbol);
+            }
+        }
+        assert_eq!(seen, [true, true], "an enforced and a report-only KV001");
+    }
+
+    /// The case that motivated the field: an Airflow `@task` selected by the
+    /// default contract's `applies_to.decorators: ["task"]`. Its `detail` names
+    /// that rule and says nothing about report-only, so only the flag does.
+    #[test]
+    fn an_airflow_task_selected_by_a_default_decorator_is_report_only() {
+        let a = python::analyze(AIRFLOW_DAG);
+        let findings = engine()
+            .context(&a)
+            .audit("frameworks/airflow_dag.py", AIRFLOW_DAG, &a);
+        let f = findings
+            .iter()
+            .find(|f| {
+                f.code == CODE_MISSING_PARAM
+                    && f.symbol == "extract_orders"
+                    && f.subject == "target_environment"
+            })
+            .expect("KV001 on extract_orders");
+        let detail = f.detail.as_deref().unwrap();
+        assert!(
+            detail.ends_with("in scope: decorator @task matches applies_to.decorators \"task\""),
+            "{detail}"
+        );
+        assert!(!detail.contains("never auto-fixed"), "{detail}");
+        assert_eq!(f.report_only, Some(true));
     }
 
     /// Adding an import shifts every line in the file. If the line number were

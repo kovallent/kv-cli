@@ -15,6 +15,25 @@ Nothing yet.
 
 ---
 
+## [0.8.0] — 2026-11-12
+
+KV001 findings say whether their function is report-only. `schema_version`
+stays 1 and contract fingerprints are unchanged.
+
+### Added
+
+- **`report_only` on KV001 findings**: true when the function is governed but
+  never auto-fixed (Airflow `@task` today). Lets consumers compute compliance
+  over the enforced set without inferring it from `framework` or `detail`.
+  It comes from the same scope decision that counts
+  `run.scope.functions_report_only`, so the two cannot disagree. KV002 and
+  KV003 findings omit the key. The field is optional in
+  `schema/findings.v1.json`, so `schema_version` stays 1 and payloads from
+  earlier releases still validate. Contract fingerprints are unchanged, so a
+  pinned `--expect-contract` value stays valid. Text output is unchanged.
+
+---
+
 ## [0.7.2] — 2026-11-12
 
 The documented GitHub Action setup passes its own gate. Contract fingerprints

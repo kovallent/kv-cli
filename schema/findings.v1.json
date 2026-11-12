@@ -102,6 +102,13 @@
           "description": "Repository-relative, forward-slashed. Normalized before hashing so the\nsame file yields the same identity however the scan was invoked.",
           "type": "string"
         },
+        "report_only": {
+          "description": "KV001 only. True when the function is governed but report-only (counted in functions_report_only); false when it is enforced. Absent on other codes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "severity": {
           "description": "Intrinsic severity, as emitted. `--strict` is a gating policy applied\nby the consumer, not folded into this value or into the counts.",
           "type": "string"
