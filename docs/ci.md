@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.7.2
+      - uses: kovallent/kv-cli@v0.8.0
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -44,12 +44,12 @@ Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your cont
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@v0.7.2` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.8.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # v0.7.2
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.8.0
         with:
-          version: v0.7.2
+          version: v0.8.0
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 

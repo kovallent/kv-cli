@@ -12,3 +12,5 @@ functions: 10 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope
 ```
 
 Framework ownership and the contract's `exempt_name_patterns` are counted separately — the first is ours, the second is the customer's choice.
+
+* **Report-only KV001 findings.** Every KV001 finding carries `report_only`: `true` when its function is governed but never auto-fixed (Airflow `@task` today), and so counted in `functions_report_only`; `false` when it is enforced. It comes from the same scope decision that the scope block counts, so the two cannot disagree. KV002 and KV003 findings omit the key, because report-only is a decision about a function. The field arrived in 0.8.0 and is optional in the schema, so `schema_version` stays `1` and earlier payloads still validate; a KV001 finding without it comes from an earlier release.

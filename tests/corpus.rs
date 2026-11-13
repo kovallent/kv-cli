@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod common;
+
 #[path = "corpus/edge.rs"]
 mod edge;
 
@@ -463,6 +465,7 @@ fn findings(root: &Path) -> Outcome {
             String::from_utf8_lossy(&out.stderr)
         )
     });
+    common::check_report_only(&payload);
     let findings = payload["findings"]
         .as_array()
         .unwrap()

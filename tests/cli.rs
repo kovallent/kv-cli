@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_kv-cli")
 }
@@ -40,6 +42,7 @@ fn run_json(dir: &Path, extra_args: &[&str]) -> (Option<i32>, serde_json::Value)
             String::from_utf8_lossy(&out.stderr)
         )
     });
+    common::check_report_only(&payload);
     (out.status.code(), payload)
 }
 
@@ -290,6 +293,7 @@ fn star_cta_follows_a_passing_run_on_stderr() {
     // JSON output is parsed, so the line appears on neither stream.
     let (code, stdout, stderr) = audit_streams(&dir, &["audit", ".", "--format", "json"]);
     assert_eq!(code, Some(0));
+    common::check_report_only(&serde_json::from_str(&stdout).expect("JSON payload"));
     assert!(!stdout.contains("a star helps") && !stderr.contains("a star helps"));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -728,6 +732,7 @@ fn the_contract_applies_to_files_named_at_the_top_level() {
         .output()
         .expect("kv-cli runs");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    common::check_report_only(&payload);
     assert_eq!(
         payload["run"]["contract_path"], "./.kovallent.yaml",
         "{payload:#}"
@@ -798,6 +803,7 @@ fn a_file_named_twice_is_audited_once() {
         .output()
         .expect("kv-cli runs");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    common::check_report_only(&payload);
     assert_eq!(payload["run"]["files_scanned"], 2, "{payload:#}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -861,7 +867,9 @@ fn the_readme_sample_counts_are_true() {
             .current_dir(repo)
             .output()
             .expect("kv-cli runs");
-        serde_json::from_slice(&out.stdout).expect("JSON payload")
+        let payload = serde_json::from_slice(&out.stdout).expect("JSON payload");
+        common::check_report_only(&payload);
+        payload
     };
     let counts = |p: &serde_json::Value| {
         (
@@ -1084,6 +1092,7 @@ fn scan_patterns_follow_gitignore_rules_from_the_project_root() {
             .output()
             .unwrap();
         let p: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        common::check_report_only(&p);
         p["run"]["files_scanned"].as_u64().unwrap()
     };
     // src/a.py and jobs/daily/c.py; not src/deep/b.py.
@@ -1268,7 +1277,85 @@ fn the_documented_workflow_passes_its_own_gate() {
         .output()
         .expect("kv-cli runs");
     let named: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
+    common::check_report_only(&named);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(kv002(&named), Vec::<serde_json::Value>::new(), "{named:#}");
     assert_eq!(out.status.code(), Some(0), "{named:#}");
+}
+
+/// Validation errors for `payload` against the schema this build emits.
+fn payload_schema_errors(payload: &serde_json::Value) -> Vec<String> {
+    let out = Command::new(bin())
+        .arg("schema")
+        .output()
+        .expect("kv-cli schema runs");
+    let schema: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    validator
+        .iter_errors(payload)
+        .map(|e| e.to_string())
+        .collect()
+}
+
+/// `report_only` in the JSON, on the bundled samples: on KV001 only, `true`
+/// for the Airflow `@task` functions, `false` for enforced ones, absent on
+/// KV002 and KV003. `extract_orders` is the case that motivated the field:
+/// the default contract's `applies_to.decorators: ["task"]` selects it, so
+/// its `detail` names that rule and carries no report-only marker.
+#[test]
+fn kv001_findings_say_whether_they_are_report_only() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(bin())
+        .args(["audit", "samples/", "--format", "json"])
+        .current_dir(repo)
+        .output()
+        .expect("kv-cli runs");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
+    common::check_report_only(&payload);
+    let findings = payload["findings"].as_array().unwrap();
+
+    let task = findings
+        .iter()
+        .find(|f| {
+            f["code"] == "KV001"
+                && f["symbol"] == "extract_orders"
+                && f["subject"] == "target_environment"
+        })
+        .expect("KV001 on the Airflow @task extract_orders");
+    assert!(
+        task["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("in scope: decorator @task matches applies_to.decorators \"task\""),
+        "{task:#}"
+    );
+    assert_eq!(task["report_only"], true, "{task:#}");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "KV001" && f["report_only"] == false),
+        "samples/ has an enforced KV001"
+    );
+    for code in ["KV002", "KV003"] {
+        let of_code: Vec<_> = findings.iter().filter(|f| f["code"] == code).collect();
+        assert!(!of_code.is_empty(), "samples/ has {code} findings");
+        for f in of_code {
+            assert!(f.get("report_only").is_none(), "{f:#}");
+        }
+    }
+    assert_eq!(payload_schema_errors(&payload), Vec::<String>::new());
+}
+
+/// A payload emitted by v0.7.2, before `report_only` existed, still validates:
+/// the field is optional, which is why `schema_version` stays 1.
+#[test]
+fn a_v0_7_2_payload_still_validates_against_the_schema() {
+    let old: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/payload-v0.7.2.json")).unwrap();
+    assert_eq!(old["run"]["tool_version"], "0.7.2");
+    assert_eq!(old["run"]["schema_version"], 1);
+    let findings = old["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["code"] == "KV001"));
+    assert!(findings.iter().all(|f| f.get("report_only").is_none()));
+    assert_eq!(payload_schema_errors(&old), Vec::<String>::new());
 }
