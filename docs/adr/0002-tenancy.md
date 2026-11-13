@@ -126,3 +126,48 @@ repository into two, and namespacing it by provider keeps that guarantee across 
 
 Nothing else changes. Ownership is still singular, the quota check still counts `repository` rows,
 and `workspace_repository_grant` and `run` still reference `repository.id`, which is unaffected.
+
+## Amendment 2026-11-13: grants stay inside one organization
+
+This amendment adds to the decision above and reverses nothing in it; the status stays Accepted.
+
+**A `workspace_repository_grant` may only grant a repository to a workspace in the same
+organization as the repository's owning workspace.**
+
+The organization is the tenant boundary. A grant across organizations would show one tenant's
+findings, which include file paths, symbols and redacted credential details, to another tenant's
+members. [ADR 0004](0004-membership-and-roles.md) makes every member of the granted workspace a
+reader, so a single bad grant would expose a whole workspace.
+
+**The database enforces the rule, not application code.** No code creates grants yet, and the
+first code that does should not have to remember the rule. Each grant row names one organization,
+and two composite foreign keys require both the granted workspace and the repository to belong to
+it, so no code path can write a grant across organizations:
+
+```
+workspace
+  id
+  organization_id     NOT NULL
+  UNIQUE (id, organization_id)
+
+repository
+  ...
+  organization_id     NOT NULL   -- the owning workspace's organization
+  FOREIGN KEY (workspace_id, organization_id) REFERENCES workspace (id, organization_id)
+  UNIQUE (id, organization_id)
+
+workspace_repository_grant
+  workspace_id
+  repository_id
+  organization_id     NOT NULL
+  PRIMARY KEY (workspace_id, repository_id)
+  FOREIGN KEY (workspace_id, organization_id)  REFERENCES workspace (id, organization_id)
+  FOREIGN KEY (repository_id, organization_id) REFERENCES repository (id, organization_id)
+```
+
+The same keys hold through a transfer (decision above): a repository with grants cannot move to a
+workspace in another organization until those grants are revoked. A transfer within one
+organization is unaffected.
+
+**Sharing between organizations**, if it is ever needed, is a new decision with its own ADR. It is
+not a relaxation of this rule.
