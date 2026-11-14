@@ -1,6 +1,6 @@
 {
   "fixture": "adr-0003-worked-example",
-  "version": 5,
+  "version": 6,
   "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
   "repository": { "repository_id": 41, "provider": "github", "full_name": "acme-corp/finance-marts" },
 
@@ -8,6 +8,10 @@
     { "provider": "github", "provider_user_id": 8803, "login": "sokafor", "email": "sam@acme.com",
       "member_source": "invited",
       "note": "pre-existing invited member; present so a trailer COULD be resolved by email" }
+  ],
+
+  "agent_accounts": [
+    { "provider": "github", "provider_user_id": 81847, "login": "claude" }
   ],
 
   "ingest_input": [
@@ -101,54 +105,123 @@
         { "sha": "68340b6fe5370dc3512f732794f440c1602afcf7", "parents": 2, "occurred_at": "2026-09-29T09:30:12Z",
           "author":    { "provider": "github", "id": 8808, "login": "nadia", "type": "User" },
           "committer": { "provider": "github", "id": 8808, "login": "nadia", "type": "User" }, "trailers": [] }
+      ] },
+
+    { "delivery_id": "d-0015", "scenario": 10, "event": "push",
+      "note": "the agent pushes a branch carrying one commit, before any pull request exists; writes an agent row",
+      "commits": [
+        { "sha": "a6aef49d74d1fa723ab920ebc194f214a0d5f385", "parents": 1, "occurred_at": "2026-09-29T10:02:11Z",
+          "author":    { "provider": "github", "id": 81847, "login": "claude", "type": "User" },
+          "committer": { "provider": "github", "id": 81847, "login": "claude", "type": "User" }, "trailers": [] }
+      ] },
+    { "delivery_id": "d-0016", "scenario": 10, "event": "pull_request_opened", "occurred_at": "2026-09-29T10:41:37Z",
+      "pr_number": 301, "commit_shas": ["a6aef49d74d1fa723ab920ebc194f214a0d5f385"],
+      "note": "ines opens PR #301 from the agent's branch; writes ines's opener row, and credits the agent commit to ines, dated at this opening",
+      "sender":    { "provider": "github", "id": 8809, "login": "ines",  "type": "User" } },
+
+    { "delivery_id": "d-0017", "scenario": 11, "event": "push",
+      "note": "the agent pushes a branch carrying one commit, before any pull request exists; writes an agent row",
+      "commits": [
+        { "sha": "9a8b17fc98fa4210e308bab1c4f0cdf039571488", "parents": 1, "occurred_at": "2026-09-29T11:15:20Z",
+          "author":    { "provider": "github", "id": 81847, "login": "claude", "type": "User" },
+          "committer": { "provider": "github", "id": 81847, "login": "claude", "type": "User" }, "trailers": [] }
+      ] },
+    { "delivery_id": "d-0018", "scenario": 11, "event": "pull_request_opened", "occurred_at": "2026-09-29T11:16:02Z",
+      "pr_number": 302, "commit_shas": ["9a8b17fc98fa4210e308bab1c4f0cdf039571488"],
+      "note": "the agent opens PR #302 from its branch; writes an agent row; nobody to credit yet",
+      "sender":    { "provider": "github", "id": 81847, "login": "claude", "type": "User" } },
+    { "delivery_id": "d-0019", "scenario": 11, "event": "push", "pr_number": 302,
+      "note": "the agent pushes a second commit to PR #302's branch; writes an agent row",
+      "commits": [
+        { "sha": "58a7f5adde968d24cc776ab73a56a5d8941f9f96", "parents": 1, "occurred_at": "2026-09-29T11:38:45Z",
+          "author":    { "provider": "github", "id": 81847, "login": "claude", "type": "User" },
+          "committer": { "provider": "github", "id": 81847, "login": "claude", "type": "User" }, "trailers": [] }
+      ] },
+    { "delivery_id": "d-0020", "scenario": 11, "event": "pull_request_review", "occurred_at": "2026-09-29T14:07:33Z",
+      "pr_number": 302, "state": "approved",
+      "note": "the earliest human approval of the agent's PR #302; credits both of its agent commits to omar, dated at this review",
+      "sender":    { "provider": "github", "id": 8810, "login": "omar",  "type": "User" } },
+    { "delivery_id": "d-0021", "scenario": 11, "event": "pull_request_review", "occurred_at": "2026-09-30T14:20:05Z",
+      "pr_number": 302, "state": "approved",
+      "note": "a second approval, a day later; credits nobody and writes no row",
+      "sender":    { "provider": "github", "id": 8811, "login": "kenji", "type": "User" } },
+
+    { "delivery_id": "d-0022", "scenario": 12, "event": "push",
+      "note": "the agent pushes a commit straight to main, with no pull request; writes an agent row; nobody to credit",
+      "commits": [
+        { "sha": "2a18c2caa647cab420e448e1d97982726dbc9760", "parents": 1, "occurred_at": "2026-09-30T16:44:58Z",
+          "author":    { "provider": "github", "id": 81847, "login": "claude", "type": "User" },
+          "committer": { "provider": "github", "id": 81847, "login": "claude", "type": "User" }, "trailers": [] }
       ] }
   ],
 
   "expected_rows": [
-    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "occurred_at": "2026-09-03T09:14:22Z" },
-    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z" },
-    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z" },
-    { "delivery_id": "d-0004", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z" },
-    { "delivery_id": "d-0005", "repository_id": 41, "provider": "github", "provider_user_id": 8802, "event_type": "commit",              "source_ref": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "occurred_at": "2026-09-08T14:02:55Z" },
-    { "delivery_id": "d-0008", "repository_id": 41, "provider": "github", "provider_user_id": 8801, "event_type": "commit",              "source_ref": "0e8b588a68b2be41320a7150b7b110906824a5cd", "occurred_at": "2026-09-17T10:58:13Z" },
-    { "delivery_id": "d-0009", "repository_id": 41, "provider": "github", "provider_user_id": 8804, "event_type": "pull_request_opened", "source_ref": "212",                                      "occurred_at": "2026-09-17T11:20:09Z" },
-    { "delivery_id": "d-0011", "repository_id": 41, "provider": "github", "provider_user_id": null, "event_type": "commit",              "source_ref": "9f05106e0535e2f6967901417e65e41aa4d86d28", "occurred_at": "2026-09-22T16:31:40Z" },
-    { "delivery_id": "d-0012", "repository_id": 41, "provider": "github", "provider_user_id": 8806, "event_type": "commit",              "source_ref": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z" }
+    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801,  "event_type": "commit",              "source_ref": "1f6bc2fe1c50fdccb04974967035b6b02c00c244", "occurred_at": "2026-09-03T09:14:22Z", "agent": false },
+    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801,  "event_type": "commit",              "source_ref": "dbb944b05b566469f3595662a47566a75426e4c0", "occurred_at": "2026-09-03T09:41:07Z", "agent": false },
+    { "delivery_id": "d-0001", "repository_id": 41, "provider": "github", "provider_user_id": 8801,  "event_type": "commit",              "source_ref": "497ebae0bb7c24246183227f26bf77e6869e8727", "occurred_at": "2026-09-03T10:05:51Z", "agent": false },
+    { "delivery_id": "d-0004", "repository_id": 41, "provider": "github", "provider_user_id": 8801,  "event_type": "commit",              "source_ref": "8e228f3f501bf47f6ebf61a7235a7b6b763b894e", "occurred_at": "2026-09-03T15:02:18Z", "agent": false },
+    { "delivery_id": "d-0005", "repository_id": 41, "provider": "github", "provider_user_id": 8802,  "event_type": "commit",              "source_ref": "786ad9038828af19ef2f12c88dfcbb3f1ec66a7e", "occurred_at": "2026-09-08T14:02:55Z", "agent": false },
+    { "delivery_id": "d-0008", "repository_id": 41, "provider": "github", "provider_user_id": 8801,  "event_type": "commit",              "source_ref": "0e8b588a68b2be41320a7150b7b110906824a5cd", "occurred_at": "2026-09-17T10:58:13Z", "agent": false },
+    { "delivery_id": "d-0009", "repository_id": 41, "provider": "github", "provider_user_id": 8804,  "event_type": "pull_request_opened", "source_ref": "212",                                      "occurred_at": "2026-09-17T11:20:09Z", "agent": false },
+    { "delivery_id": "d-0011", "repository_id": 41, "provider": "github", "provider_user_id": null,  "event_type": "commit",              "source_ref": "9f05106e0535e2f6967901417e65e41aa4d86d28", "occurred_at": "2026-09-22T16:31:40Z", "agent": false },
+    { "delivery_id": "d-0012", "repository_id": 41, "provider": "github", "provider_user_id": 8806,  "event_type": "commit",              "source_ref": "426aef09650301f8ec905fbc4d889fbfaa358adb", "occurred_at": "2026-09-28T08:12:04Z", "agent": false },
+    { "delivery_id": "d-0015", "repository_id": 41, "provider": "github", "provider_user_id": 81847, "event_type": "commit",              "source_ref": "a6aef49d74d1fa723ab920ebc194f214a0d5f385", "occurred_at": "2026-09-29T10:02:11Z", "agent": true },
+    { "delivery_id": "d-0016", "repository_id": 41, "provider": "github", "provider_user_id": 8809,  "event_type": "pull_request_opened", "source_ref": "301",                                      "occurred_at": "2026-09-29T10:41:37Z", "agent": false },
+    { "delivery_id": "d-0016", "repository_id": 41, "provider": "github", "provider_user_id": 8809,  "event_type": "agent_credit",        "source_ref": "a6aef49d74d1fa723ab920ebc194f214a0d5f385", "occurred_at": "2026-09-29T10:41:37Z", "agent": false },
+    { "delivery_id": "d-0017", "repository_id": 41, "provider": "github", "provider_user_id": 81847, "event_type": "commit",              "source_ref": "9a8b17fc98fa4210e308bab1c4f0cdf039571488", "occurred_at": "2026-09-29T11:15:20Z", "agent": true },
+    { "delivery_id": "d-0018", "repository_id": 41, "provider": "github", "provider_user_id": 81847, "event_type": "pull_request_opened", "source_ref": "302",                                      "occurred_at": "2026-09-29T11:16:02Z", "agent": true },
+    { "delivery_id": "d-0019", "repository_id": 41, "provider": "github", "provider_user_id": 81847, "event_type": "commit",              "source_ref": "58a7f5adde968d24cc776ab73a56a5d8941f9f96", "occurred_at": "2026-09-29T11:38:45Z", "agent": true },
+    { "delivery_id": "d-0020", "repository_id": 41, "provider": "github", "provider_user_id": 8810,  "event_type": "agent_credit",        "source_ref": "9a8b17fc98fa4210e308bab1c4f0cdf039571488", "occurred_at": "2026-09-29T14:07:33Z", "agent": false },
+    { "delivery_id": "d-0020", "repository_id": 41, "provider": "github", "provider_user_id": 8810,  "event_type": "agent_credit",        "source_ref": "58a7f5adde968d24cc776ab73a56a5d8941f9f96", "occurred_at": "2026-09-29T14:07:33Z", "agent": false },
+    { "delivery_id": "d-0022", "repository_id": 41, "provider": "github", "provider_user_id": 81847, "event_type": "commit",              "source_ref": "2a18c2caa647cab420e448e1d97982726dbc9760", "occurred_at": "2026-09-30T16:44:58Z", "agent": true }
   ],
 
   "expected": {
-    "rows_written": 9,
-    "billable_count": 4,
+    "rows_written": 18,
+    "billable_count": 6,
     "billable_identities": [
       { "provider": "github", "provider_user_id": 8801 },
       { "provider": "github", "provider_user_id": 8802 },
       { "provider": "github", "provider_user_id": 8804 },
-      { "provider": "github", "provider_user_id": 8806 }
+      { "provider": "github", "provider_user_id": 8806 },
+      { "provider": "github", "provider_user_id": 8809 },
+      { "provider": "github", "provider_user_id": 8810 }
     ],
     "unresolved_event_count": 1,
+    "uncredited_agent_commits": 1,
     "not_billed": [
       { "provider": "github", "provider_user_id": 8807,     "reason": "committer_only",                   "excluded_at": "ingest" },
       { "provider": "github", "provider_user_id": 8803,     "reason": "co_author_trailer_not_resolved",   "excluded_at": "ingest" },
       { "provider": "github", "provider_user_id": 49699333, "reason": "account_type_bot",                 "excluded_at": "ingest" },
       { "provider": "github", "provider_user_id": 8805,     "reason": "review_only",                      "excluded_at": "ingest" },
-      { "provider": "github", "provider_user_id": 8808,     "reason": "merge_commit",                     "excluded_at": "ingest" }
+      { "provider": "github", "provider_user_id": 8808,     "reason": "merge_commit",                     "excluded_at": "ingest" },
+      { "provider": "github", "provider_user_id": 81847,    "reason": "agent_account",                    "excluded_at": "billing" },
+      { "provider": "github", "provider_user_id": 8811,     "reason": "later_approval",                   "excluded_at": "ingest" }
     ]
   },
 
   "assertions": [
-    "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref)",
-    "stage 1: rows_written == 9 — the redelivered d-0004, the repeated commit in d-0013 and the merge commit in d-0014 write nothing",
+    "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref + agent)",
+    "stage 1: rows_written == 18 — the redelivered d-0004, the repeated commit in d-0013, the merge commit in d-0014 and the later approval in d-0021 write nothing",
     "stage 1: a commit SHA already stored for the repository writes no row, whatever its delivery_id",
     "stage 1: a delivery carrying N commits writes N rows, all with the same delivery_id",
     "stage 1: a commit with more than one parent writes no row, whoever authored it",
-    "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 8808), (github, 49699333)}",
+    "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 8808), (github, 8811), (github, 49699333)}",
     "stage 1: bot exclusion keys on author/sender type == 'Bot', never on login; a test that sets login to 'dependabot' (no [bot] suffix) with type 'Bot' must still write no row",
     "stage 1: no Co-authored-by trailer is resolved, even when its email matches known_identities",
-    "stage 2: billable_count == count(DISTINCT (provider, provider_user_id)) over expected_rows WHERE provider_user_id IS NOT NULL == 4",
-    "stage 2: set(billable) == {(github, 8801), (github, 8802), (github, 8804), (github, 8806)}",
+    "stage 1: a row has agent = true exactly when its commit author or pull request opener is in agent_accounts, matched on (provider, provider_user_id), never on login; it is set at ingest and never recomputed. 5 rows have agent = true: 81847's four commits and PR #302",
+    "stage 1: an agent commit in a pull request opened by a human writes one agent_credit row for that pull request's author, dated at its opening: d-0016 credits (github, 8809) at 2026-09-29T10:41:37Z, not at the commit's time",
+    "stage 1: an agent commit in a pull request opened by an agent writes one agent_credit row for the earliest human approval, dated at its submission: d-0020 credits (github, 8810) for both of PR #302's commits at 2026-09-29T14:07:33Z; d-0021's later approval writes nothing",
+    "stage 1: credit does not depend on delivery order: the agent's commits in d-0015 and d-0017 arrive before their pull requests open, and d-0019's arrives after; all three are credited",
+    "stage 1: an agent commit with no human to credit (d-0022, pushed straight to main) still writes its agent row, and no agent_credit row",
+    "stage 2: billable_count == count(DISTINCT (provider, provider_user_id)) over expected_rows WHERE provider_user_id IS NOT NULL AND NOT agent == 6",
+    "stage 2: set(billable) == {(github, 8801), (github, 8802), (github, 8804), (github, 8806), (github, 8809), (github, 8810)}",
     "stage 2: (github, 8801) has 5 rows and counts once",
     "stage 2: unresolved_event_count == 1",
-    "ADR 0004: each of (github, 8801), (github, 8802), (github, 8804), (github, 8806) has an organization_member row with source = 'contribution' and NO workspace_role",
-    "ADR 0004: (github, 8803) keeps its existing member row with source = 'invited'; ingest creates no second member row and grants no role"
+    "stage 2: uncredited_agent_commits == count of commit rows with agent = true and no agent_credit row for their source_ref == 1 (d-0022)",
+    "stage 2: (github, 81847) is not billable; necessary but not sufficient, since (github, 8810) must be billable too",
+    "ADR 0004: each of (github, 8801), (github, 8802), (github, 8804), (github, 8806), (github, 8809), (github, 8810) has an organization_member row with source = 'contribution' and NO workspace_role",
+    "ADR 0004: (github, 8803) keeps its existing member row with source = 'invited'; ingest creates no second member row and grants no role",
+    "ADR 0004: (github, 81847) and (github, 8811) get no organization_member row"
   ]
 }
