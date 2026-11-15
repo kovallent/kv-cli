@@ -1,6 +1,6 @@
 # 0005 — API tokens
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-14
 - **Deciders:** platform
 - **Supersedes:** none
@@ -225,3 +225,81 @@ later, like ADR 0004's roles; taking one away from tokens already issued is not.
 **kv-cli fetching or storing a token (`kv-cli login`).** It would make the CLI depend on an account
 and a network, which ADR 0001 and ADR 0004 rule out, and it would put a credential where an agent
 running kv-cli could read it.
+
+## Amendment 2026-11-15
+
+This amendment corrects two statements above and adds four rules. The text above is unchanged;
+where the two disagree, this amendment applies.
+
+### 1. An attributed run takes its organization from its repository
+
+An attributed run doesn't store `organization_id`. It reaches its organization through its
+repository, so the fact is stored once, and a repository transfer moves the run's history with it
+(ADR 0002). `migrations/0004`'s `CHECK (repository_id IS NULL OR organization_id IS NULL)` stays.
+
+This corrects the schema consequence above, which says `run.organization_id` is "null only on the
+dev-only unauthenticated path". It is also null on every attributed run:
+
+```
+run
+  id
+  organization_id      NULL       -- set only on an unattributed run whose organization is known
+  repository_id        NULL       -- null = unattributed (ADR 0002)
+  api_token_id         NULL       -- the token that uploaded it; null for OIDC
+  ...
+  CHECK (repository_id IS NULL OR organization_id IS NULL)   -- migrations/0004
+```
+
+An unattributed run's organization, when it has one, comes from the token, or from the GitHub App
+installation linked to the account named in the OIDC token's `repository_owner_id` claim.
+
+### 2. Not every stored run has an organization
+
+This corrects the consequence above, "Every stored run has an authenticated organization". An OIDC
+upload from an unmonitored repository, whose owner has no linked installation, may be stored with no
+organization.
+
+What holds is narrower: when a run has an organization, it was authenticated. It comes from the
+run's repository, from the token, or from the installation linked to the OIDC token's owner, and
+never from a header the caller chose. Two kinds of run have none:
+
+- runs from the dev-only unauthenticated path (section 3);
+- OIDC uploads from an unmonitored repository whose owner has no linked installation.
+
+No tenant sees a run with no organization, and ADR 0002's count of unattributed runs per
+organization doesn't include it. An OIDC upload keeps its owner claim, so its organization can be
+derived once an installation is linked.
+
+### 3. The dev-only path, and no identity headers
+
+The dev-only unauthenticated path stays behind `KOVALLENT_ALLOW_UNAUTHENTICATED_INGEST`, off by
+default, and stores runs with no organization and no repository.
+
+`X-Kovallent-Provider-Repo-Id` is removed, as `X-Kovallent-Organization-Id` is (decision 7). No
+header names an organization or a repository on any path, so an unauthenticated run can't be
+attributed to either.
+
+### 4. A token has a name
+
+```
+api_token
+  ...                             -- as in the schema consequence above, plus:
+  name                 text NOT NULL   -- given by the person when they make the token
+```
+
+The name and `display_prefix` are how people tell their tokens apart.
+
+### 5. 404 for anything a token can't read
+
+A token gets 404 for anything it can't read, including other organizations' resources and ids that
+don't exist, the same as a session. A response never shows whether something exists outside what
+the token can read.
+
+401 is only for a missing, malformed, expired or revoked token. A token that lacks the `read`
+scope, or whose member is deactivated, can't read anything, so it gets 404 on every read, not 401.
+
+### 6. Only OIDC uploads count as scans
+
+Only OIDC uploads update `repository.last_scanned_at`, the column ADR 0002's quota check counts. A
+token upload never does, even when it's attributed, so a local run can't make a repository count
+against the quota (ADR 0002).
