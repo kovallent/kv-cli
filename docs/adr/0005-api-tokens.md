@@ -289,14 +289,19 @@ api_token
 
 The name and `display_prefix` are how people tell their tokens apart.
 
-### 5. 404 for anything a token can't read
+### 5. 401, 403 and 404 for tokens
 
-A token gets 404 for anything it can't read, including other organizations' resources and ids that
-don't exist, the same as a session. A response never shows whether something exists outside what
-the token can read.
+A refusal uses one of three codes, checked in this order:
 
-401 is only for a missing, malformed, expired or revoked token. A token that lacks the `read`
-scope, or whose member is deactivated, can't read anything, so it gets 404 on every read, not 401.
+- **401** for a missing, malformed, expired or revoked token, and for a token whose member is
+  deactivated. This matches sessions, which get 401 once every one of the signed-in person's
+  memberships is deactivated; a token belongs to only one.
+- **403** for a token that lacks the scope the request needs: `read` for any `/v1/` read, `upload`
+  for posting a run. The scope is checked before anything the request names is looked up, so the
+  response is the same for every id, whether it exists or not. A rejected upload is not stored.
+- **404** for anything else the token can't read, including other organizations' resources and ids
+  that don't exist, the same as a session. A response never shows whether something exists outside
+  what the token can read.
 
 ### 6. Only OIDC uploads count as scans
 
