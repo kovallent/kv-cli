@@ -395,12 +395,12 @@ Each trap is set so that a specific wrong implementation produces a specific wro
     "stage 1: no row has (provider, provider_user_id) in {(github, 8803), (github, 8805), (github, 8807), (github, 8808), (github, 8811), (github, 49699333)}",
     "stage 1: bot exclusion keys on author/sender type == 'Bot', never on login; a test that sets login to 'dependabot' (no [bot] suffix) with type 'Bot' must still write no row",
     "stage 1: no Co-authored-by trailer is resolved, even when its email matches known_identities",
-    "stage 1: a row has agent = true exactly when its commit author or pull request opener is in agent_accounts, matched on (provider, provider_user_id), never on login; it is set at ingest and never recomputed. 5 rows have agent = true: 81847's four commits and PR #302",
+    "stage 1: a row has agent = true exactly when its commit author or pull request opener is in agent_accounts, matched on (provider, provider_user_id), never on login; it is set at ingest and never recomputed, and it decides credit and uncredited_agent_commits. 5 rows have agent = true: 81847's four commits and PR #302",
     "stage 1: an agent commit in a pull request opened by a human writes one agent_credit row for that pull request's author, dated at its opening: d-0016 credits (github, 8809) at 2026-09-29T10:41:37Z, not at the commit's time",
     "stage 1: an agent commit in a pull request opened by an agent writes one agent_credit row for the earliest human approval, dated at its submission: d-0020 credits (github, 8810) for both of PR #302's commits at 2026-09-29T14:07:33Z; d-0021's later approval writes nothing",
     "stage 1: credit does not depend on delivery order: the agent's commits in d-0015 and d-0017 arrive before their pull requests open, and d-0019's arrives after; all three are credited",
     "stage 1: an agent commit with no human to credit (d-0022, pushed straight to main) still writes its agent row, and no agent_credit row",
-    "stage 2: billable_count == count(DISTINCT (provider, provider_user_id)) over expected_rows WHERE provider_user_id IS NOT NULL AND NOT agent == 6",
+    "stage 2: billable_count == count(DISTINCT (provider, provider_user_id)) over expected_rows WHERE provider_user_id IS NOT NULL AND NOT agent AND (provider, provider_user_id) NOT IN agent_accounts, the list as it stands when the count runs (amendment 2026-11-17) == 6",
     "stage 2: set(billable) == {(github, 8801), (github, 8802), (github, 8804), (github, 8806), (github, 8809), (github, 8810)}",
     "stage 2: (github, 8801) has 5 rows and counts once",
     "stage 2: unresolved_event_count == 1",
@@ -631,3 +631,60 @@ commit rows with no `agent_credit` row for their SHA. Like every count here it i
 falls when a later approval credits the work. Under ADR 0004 an agent is never provisioned as an
 organization member, since it has no billable event; a human credited for agent work is, from their
 first credit row.
+
+## Amendment 2026-11-17: the agent list applies at count time
+
+This amendment adds to the decision and to the amendments above, and supersedes two statements in
+the 2026-11-14 amendment, quoted in section 1. The status stays Accepted.
+
+### 1. The billable count applies the agent list as it stands when the count runs
+
+The billable count excludes any `(provider, provider_user_id)` on the agent list as it stands when
+the count runs. Billable contributors are the distinct `(provider, provider_user_id)` pairs among
+the period's rows that have a non-null `provider_user_id`, have `agent` false, and whose pair is not
+on the agent list when the count runs.
+
+This supersedes the 2026-11-14 statements that setting the agent flag at ingest stops a list change
+from re-billing a past cycle:
+
+> A commit is judged against the list as it stood when the commit was ingested; adding an agent
+> later doesn't re-bill past cycles.
+
+> `agent` is set once, at ingest, and never recomputed, which is what keeps a later change to the
+> list from re-billing a past cycle.
+
+The flag is still set that way (section 2), but it no longer decides who is billed. Adding an agent
+takes it out of the count for every cycle not yet invoiced, past cycles included. Section 3 is what
+protects the cycles already invoiced.
+
+### 2. The agent flag decides credit and the uncredited-agent count
+
+The `agent` flag stays set at ingest and is never recomputed. It decides credit and the
+uncredited-agent count only. It no longer protects past cycles. The one place billing still reads
+it is section 4: after an identity leaves the list, its rows marked `agent` stay out of the count.
+
+So an identity added to the list after it already has commits keeps `agent` false on those commits.
+While it's listed, they don't count (section 1). Nobody is credited for them, and they aren't
+counted as uncredited agent work.
+
+### 3. Issued invoices are frozen
+
+Issued invoices are protected by being frozen, not by the flag. Phase 5 stores each invoice's
+billable identities when it's issued, and an issued invoice is never recomputed from live data. A
+list change only affects cycles not yet invoiced.
+
+This is consistent with clause 5. The stored identities are a record of what was charged, not a
+running counter, and the rows they came from stay stored. So a disputed invoice can still be
+recomputed from the rows and compared with what it charged.
+
+### 4. Leaving the list
+
+Removing someone from the list makes their unflagged rows billable again in cycles not yet invoiced.
+Their rows marked `agent`, ingested while they were listed, stay marked: they still don't count, and
+the credits written for them stand. Cycles already invoiced don't change (section 3).
+
+### Fixture
+
+Fixture v6's expected rows and counts are unchanged. Its one listed agent, 81847, has only rows
+marked `agent`, so the superseded rule and this one give the same count. Its stage 2 assertion now
+states the count with the agent list applied when the count runs.
