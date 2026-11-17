@@ -119,24 +119,30 @@ Rejected on the recomputability argument above.
 
 This is a test fixture for `docs/adr/0003-active-contributor.md`. It covers one billing cycle in one monitored repository, with twelve scenarios. Each scenario tests a different clause of the decision.
 
-This is fixture version 6. It follows the amendments below. From 2026-11-03: every identity is namespaced by `provider`, and ingest writes at most one row per `(repository_id, event_type, source_ref)`. From 2026-11-05: a commit with more than one parent writes no row (clause 1a), so every commit carries a `parents` count. From 2026-11-14: a commit by a coding agent is credited to a human or counted as uncredited agent work, so the fixture lists its `agent_accounts` and every row carries an `agent` flag. Commits arrive the way GitHub delivers them, inside a `push` delivery with a `commits` array, so one delivery can carry many commits.
+This is fixture version 7. It follows the amendments below. From 2026-11-03: every identity is namespaced by `provider`, and ingest writes at most one row per `(repository_id, event_type, source_ref)`. From 2026-11-05: a commit with more than one parent writes no row (clause 1a), so every commit carries a `parents` count. From 2026-11-14: a commit by a coding agent is credited to a human or counted as uncredited agent work, so the fixture lists its `agent_accounts` and every row carries an `agent` flag. From 2026-11-17: billing applies the agent list as it stands when the count runs, so two more billing stages count the same rows against a changed list. Commits arrive the way GitHub delivers them, inside a `push` delivery with a `commits` array, so one delivery can carry many commits.
 
 - **Cycle:** 2026-09-01T00:00:00Z to 2026-09-30T23:59:59Z
 - **Repository:** `acme-corp/finance-marts`, provider `github`, `repository_id = 41`, monitored for the whole cycle
 - **Expected billable contributor count: 6**
 - **Billable `(provider, provider_user_id)` pairs:** `github` 8801, 8802, 8804, 8806, 8809, 8810
 - **Expected uncredited agent commits: 1**
+- **After a list change** (`billing_after_list_change`: tomas, 8806, added to the agent list): billable count 5, with 8806 excluded; uncredited agent commits still 1
+- **After a removal** (`billing_after_removal`: 81847 taken off the agent list): billable count 6, the same pairs as above, with 81847 still excluded
 
-## Two stages, because the ADR applies its rules in two places
+## Ingest and billing stages, because the ADR applies its rules in two places
 
-ADR 0003 applies some rules when an event **arrives** (clauses 1–3: author not committer, opener counts, bots excluded by `user.type`). It applies the rest when billing **counts** (clause 5: distinct `(provider, provider_user_id)` pairs with a non-null id, over stored `contribution_event` rows; from 2026-11-14, rows with `agent` false). The `contribution_event` table has no column for account type, committer or trailers. So an ingest rule can only be tested by checking which rows ingest writes, not by looking at rows that are already stored.
+ADR 0003 applies some rules when an event **arrives** (clauses 1–3: author not committer, opener counts, bots excluded by `user.type`). It applies the rest when billing **counts** (clause 5: distinct `(provider, provider_user_id)` pairs with a non-null id, over stored `contribution_event` rows; from 2026-11-14, rows with `agent` false; from 2026-11-17, pairs not on the agent list as it stands when the count runs). The `contribution_event` table has no column for account type, committer or trailers. So an ingest rule can only be tested by checking which rows ingest writes, not by looking at rows that are already stored.
 
 - **Stage 1, ingest.** `ingest_input` is a list of normalized deliveries in delivery order. Commits arrive inside `push` deliveries, each carrying a `commits` array. This is not GitHub's literal webhook payload; it is the subset of fields ADR 0003 refers to. `parents` in particular is not in GitHub's push payload; ingest reads it from the compare API. `commit_shas` on a `pull_request_opened` delivery and `pr_number` on a push aren't in GitHub's payloads either. They say which pull request a commit is in; ingest gets them from the pull request's commits endpoint, and from the `pull_request` `synchronize` delivery that a push to a pull request's branch also sends. Running ingest over it must produce exactly the rows in `expected_rows`.
 - **Stage 2, billing.** Counting over `expected_rows` must produce `expected`.
+- **Stage 3, billing after a list change.** `billing_after_list_change` counts the same `expected_rows`, unchanged, against an agent list that also holds tomas (8806). It must produce its own `expected`.
+- **Stage 4, billing after a removal.** `billing_after_removal` counts the same rows against stage 1's agent list with 81847 taken off it, which leaves the list empty. It must produce its own `expected`.
 
 A bot, a committer acting only as committer, a co-author named in a trailer, a reviewer, and a merge commit all produce **no row**. They are excluded at ingest, which is the only place the ADR can exclude them. A commit or pull request already stored for the repository also produces no row, whatever delivery it arrives in. A `provider_user_id: null` row means only *unresolved*. Bots must never be written that way, or they would be counted as unresolved authors.
 
 A coding agent's commits and pull requests are written, with `agent: true`, and never counted. An `agent_credit` row credits one agent commit to a human: the author of the pull request it is in or, in an agent's pull request, the earliest human approver. That approval is the only review that writes a row.
+
+Stages 3 and 4 re-ingest nothing. Every row, and its `agent` flag, stays as stage 1 wrote it; only the agent list that the count applies changes (amendment 2026-11-17).
 
 ## Scenario table
 
@@ -159,9 +165,9 @@ Deliveries and commits do not match one to one, in three ways. `d-0001` carries 
 
 Scenarios 10 and 11 arrive in the order agents work: the agent pushes its branch before any pull request exists, so when its commit arrives, ingest doesn't yet know which pull request it is in, or whom to credit. It writes the credit once it knows the agent commit, its pull request and the human to credit, whichever arrives last.
 
-**Totals:** 21 deliveries in (20 unique `delivery_id` values, plus the redelivery of `d-0004`). The fourteen `push` deliveries carry 16 commits. 18 rows written: 5 agent rows (81847's four commits and PR #302), 3 `agent_credit` rows (one for 8809, two for 8810), and 10 others. The rows with `agent` false have six distinct non-null `(provider, provider_user_id)` pairs, plus one null row: billable count 6 (8801, 8802, 8804, 8806, 8809, 8810), 1 unresolved row. 1 uncredited agent commit: `d-0022`'s.
+**Totals:** 21 deliveries in (20 unique `delivery_id` values, plus the redelivery of `d-0004`). The fourteen `push` deliveries carry 16 commits. 18 rows written: 5 agent rows (81847's four commits and PR #302), 3 `agent_credit` rows (one for 8809, two for 8810), and 10 others. The rows with `agent` false have six distinct non-null `(provider, provider_user_id)` pairs, plus one null row: billable count 6 (8801, 8802, 8804, 8806, 8809, 8810), 1 unresolved row. 1 uncredited agent commit: `d-0022`'s. Stage 3: billable count 5 (8806 out), 1 unresolved row, 1 uncredited agent commit. Stage 4: billable count 6 (the stage 2 pairs, 81847 still out), 1 unresolved row, 1 uncredited agent commit.
 
-## The six traps, and what each one catches
+## The seven traps, and what each one catches
 
 Each trap is set so that a specific wrong implementation produces a specific wrong answer.
 
@@ -180,13 +186,16 @@ Each trap is set so that a specific wrong implementation produces a specific wro
    - **Scenario 10 is caught by the uncredited count, not by the billable count.** ines (8809) is billed under clause 2 for opening PR #301, and the credit is dated at that same opening, so forgetting the credit leaves the count at 6. What changes is `uncredited_agent_commits`: an implementation that stores agent rows and credits nobody counts all 4 agent commits rather than 1, and one that drops agent work writes 10 rows and counts 0.
    - **Crediting every approval** bills kenji (8811) too: `rows_written` becomes 20 and the count 7.
    - **Ignoring the agent list** bills 81847 as a human and credits nobody. The count stays 6, with the wrong people: 81847 in, 8810 out. That's why the fixture asserts the billable set, not only the count.
+7. **Applying the agent list at the wrong time.** Stages 3 and 4 count the same rows against a changed list:
+   - **The list applies at count time.** In `billing_after_list_change`, tomas (8806) is on the list, but 8806's row was ingested earlier, with `agent` false. An implementation that applies the list only at ingest still bills 8806: the count stays 6 rather than 5. One that recomputes the flag from the new list gets the count right but turns 8806's commit into agent work, so `uncredited_agent_commits` becomes 2 rather than 1.
+   - **A flagged row stays out after removal.** In `billing_after_removal`, 81847 is off the list, but its 5 rows were flagged at ingest. An implementation that applies only the list bills 81847: the count becomes 7. One that recomputes the flag from the new list bills 81847 too, and `uncredited_agent_commits` drops to 0.
 
 ## JSON fixture
 
 ```json
 {
   "fixture": "adr-0003-worked-example",
-  "version": 6,
+  "version": 7,
   "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
   "repository": { "repository_id": 41, "provider": "github", "full_name": "acme-corp/finance-marts" },
 
@@ -386,6 +395,53 @@ Each trap is set so that a specific wrong implementation produces a specific wro
     ]
   },
 
+  "billing_after_list_change": {
+    "note": "tomas (8806) is added to the agent list after the cycle's rows were ingested, before the cycle is invoiced. The same rows are counted again; nothing is re-ingested or recomputed. not_billed lists this stage's billing exclusions; the ingest exclusions in expected.not_billed are unchanged, since the rows are",
+    "rows_from": "expected_rows",
+    "agent_accounts": [
+      { "provider": "github", "provider_user_id": 81847, "login": "claude" },
+      { "provider": "github", "provider_user_id": 8806, "login": "tomas" }
+    ],
+    "expected": {
+      "billable_count": 5,
+      "billable_identities": [
+        { "provider": "github", "provider_user_id": 8801 },
+        { "provider": "github", "provider_user_id": 8802 },
+        { "provider": "github", "provider_user_id": 8804 },
+        { "provider": "github", "provider_user_id": 8809 },
+        { "provider": "github", "provider_user_id": 8810 }
+      ],
+      "unresolved_event_count": 1,
+      "uncredited_agent_commits": 1,
+      "not_billed": [
+        { "provider": "github", "provider_user_id": 81847,     "reason": "agent_account",       "excluded_at": "billing" },
+        { "provider": "github", "provider_user_id": 8806,      "reason": "agent_account",       "excluded_at": "billing" }
+      ]
+    }
+  },
+
+  "billing_after_removal": {
+    "note": "81847 is taken off stage 1's agent list, which leaves it empty. The same rows are counted again; 81847's rows keep agent = true, as ingested. not_billed lists this stage's billing exclusions; the ingest exclusions in expected.not_billed are unchanged, since the rows are",
+    "rows_from": "expected_rows",
+    "agent_accounts": [],
+    "expected": {
+      "billable_count": 6,
+      "billable_identities": [
+        { "provider": "github", "provider_user_id": 8801 },
+        { "provider": "github", "provider_user_id": 8802 },
+        { "provider": "github", "provider_user_id": 8804 },
+        { "provider": "github", "provider_user_id": 8806 },
+        { "provider": "github", "provider_user_id": 8809 },
+        { "provider": "github", "provider_user_id": 8810 }
+      ],
+      "unresolved_event_count": 1,
+      "uncredited_agent_commits": 1,
+      "not_billed": [
+        { "provider": "github", "provider_user_id": 81847,     "reason": "rows_flagged_agent",  "excluded_at": "billing" }
+      ]
+    }
+  },
+
   "assertions": [
     "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref + agent)",
     "stage 1: rows_written == 18 — the redelivered d-0004, the repeated commit in d-0013, the merge commit in d-0014 and the later approval in d-0021 write nothing",
@@ -406,6 +462,9 @@ Each trap is set so that a specific wrong implementation produces a specific wro
     "stage 2: unresolved_event_count == 1",
     "stage 2: uncredited_agent_commits == count of commit rows with agent = true and no agent_credit row for their source_ref == 1 (d-0022)",
     "stage 2: (github, 81847) is not billable; necessary but not sufficient, since (github, 8810) must be billable too",
+    "billing_after_list_change: the list applies at count time. Counting expected_rows, unchanged, against this stage's agent_accounts gives billable_count == 5 and set(billable) == {(github, 8801), (github, 8802), (github, 8804), (github, 8809), (github, 8810)}; (github, 8806) is excluded at billing. A count of 6 means the list was applied only at ingest",
+    "billing_after_list_change: no row is re-ingested or recomputed. 8806's row (d-0012) keeps agent = false, and uncredited_agent_commits stays 1, because an unflagged row isn't agent work; unresolved_event_count stays 1",
+    "billing_after_removal: a flagged row stays out after removal. Counting expected_rows against an agent_accounts without (github, 81847) gives billable_count == 6 and the stage 2 billable set; (github, 81847) is not billable, because all 5 of its rows have agent = true. uncredited_agent_commits stays 1",
     "ADR 0004: each of (github, 8801), (github, 8802), (github, 8804), (github, 8806), (github, 8809), (github, 8810) has an organization_member row with source = 'contribution' and NO workspace_role",
     "ADR 0004: (github, 8803) keeps its existing member row with source = 'invited'; ingest creates no second member row and grants no role",
     "ADR 0004: (github, 81847) and (github, 8811) get no organization_member row"
