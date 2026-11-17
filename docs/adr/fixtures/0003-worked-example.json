@@ -1,6 +1,6 @@
 {
   "fixture": "adr-0003-worked-example",
-  "version": 6,
+  "version": 7,
   "cycle": { "start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z" },
   "repository": { "repository_id": 41, "provider": "github", "full_name": "acme-corp/finance-marts" },
 
@@ -200,6 +200,53 @@
     ]
   },
 
+  "billing_after_list_change": {
+    "note": "tomas (8806) is added to the agent list after the cycle's rows were ingested, before the cycle is invoiced. The same rows are counted again; nothing is re-ingested or recomputed. not_billed lists this stage's billing exclusions; the ingest exclusions in expected.not_billed are unchanged, since the rows are",
+    "rows_from": "expected_rows",
+    "agent_accounts": [
+      { "provider": "github", "provider_user_id": 81847, "login": "claude" },
+      { "provider": "github", "provider_user_id": 8806, "login": "tomas" }
+    ],
+    "expected": {
+      "billable_count": 5,
+      "billable_identities": [
+        { "provider": "github", "provider_user_id": 8801 },
+        { "provider": "github", "provider_user_id": 8802 },
+        { "provider": "github", "provider_user_id": 8804 },
+        { "provider": "github", "provider_user_id": 8809 },
+        { "provider": "github", "provider_user_id": 8810 }
+      ],
+      "unresolved_event_count": 1,
+      "uncredited_agent_commits": 1,
+      "not_billed": [
+        { "provider": "github", "provider_user_id": 81847,     "reason": "agent_account",       "excluded_at": "billing" },
+        { "provider": "github", "provider_user_id": 8806,      "reason": "agent_account",       "excluded_at": "billing" }
+      ]
+    }
+  },
+
+  "billing_after_removal": {
+    "note": "81847 is taken off stage 1's agent list, which leaves it empty. The same rows are counted again; 81847's rows keep agent = true, as ingested. not_billed lists this stage's billing exclusions; the ingest exclusions in expected.not_billed are unchanged, since the rows are",
+    "rows_from": "expected_rows",
+    "agent_accounts": [],
+    "expected": {
+      "billable_count": 6,
+      "billable_identities": [
+        { "provider": "github", "provider_user_id": 8801 },
+        { "provider": "github", "provider_user_id": 8802 },
+        { "provider": "github", "provider_user_id": 8804 },
+        { "provider": "github", "provider_user_id": 8806 },
+        { "provider": "github", "provider_user_id": 8809 },
+        { "provider": "github", "provider_user_id": 8810 }
+      ],
+      "unresolved_event_count": 1,
+      "uncredited_agent_commits": 1,
+      "not_billed": [
+        { "provider": "github", "provider_user_id": 81847,     "reason": "rows_flagged_agent",  "excluded_at": "billing" }
+      ]
+    }
+  },
+
   "assertions": [
     "stage 1: ingest over ingest_input writes exactly expected_rows (set equality on delivery_id + provider + provider_user_id + event_type + source_ref + agent)",
     "stage 1: rows_written == 18 — the redelivered d-0004, the repeated commit in d-0013, the merge commit in d-0014 and the later approval in d-0021 write nothing",
@@ -220,6 +267,9 @@
     "stage 2: unresolved_event_count == 1",
     "stage 2: uncredited_agent_commits == count of commit rows with agent = true and no agent_credit row for their source_ref == 1 (d-0022)",
     "stage 2: (github, 81847) is not billable; necessary but not sufficient, since (github, 8810) must be billable too",
+    "billing_after_list_change: the list applies at count time. Counting expected_rows, unchanged, against this stage's agent_accounts gives billable_count == 5 and set(billable) == {(github, 8801), (github, 8802), (github, 8804), (github, 8809), (github, 8810)}; (github, 8806) is excluded at billing. A count of 6 means the list was applied only at ingest",
+    "billing_after_list_change: no row is re-ingested or recomputed. 8806's row (d-0012) keeps agent = false, and uncredited_agent_commits stays 1, because an unflagged row isn't agent work; unresolved_event_count stays 1",
+    "billing_after_removal: a flagged row stays out after removal. Counting expected_rows against an agent_accounts without (github, 81847) gives billable_count == 6 and the stage 2 billable set; (github, 81847) is not billable, because all 5 of its rows have agent = true. uncredited_agent_commits stays 1",
     "ADR 0004: each of (github, 8801), (github, 8802), (github, 8804), (github, 8806), (github, 8809), (github, 8810) has an organization_member row with source = 'contribution' and NO workspace_role",
     "ADR 0004: (github, 8803) keeps its existing member row with source = 'invited'; ingest creates no second member row and grants no role",
     "ADR 0004: (github, 81847) and (github, 8811) get no organization_member row"
