@@ -1,0 +1,215 @@
+name: Wheels
+
+# Builds kv-cli as Python wheels, one per platform, and publishes them to PyPI,
+# so `pip install kv-cli` and `uv tool install kv-cli` install the binary with
+# no Rust toolchain. Each wheel holds the compiled binary only (maturin
+# `bindings = "bin"`, tag py3-none-<platform>); nothing is downloaded at
+# install time.
+#
+# Separate from release.yml, so a PyPI outage cannot fail a GitHub release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - pyproject.toml
+      - Cargo.toml
+      - .github/workflows/wheels.yml
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Package index to publish to
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  # Never cancel a run that may be publishing.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  guard:
+    name: tag matches Cargo.toml
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag with Cargo.toml's version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches Cargo.toml version $crate"
+
+  wheels:
+    name: wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every platform rather than cancelling the rest on the first
+      # failure.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64 manylinux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+            smoke: true
+          - name: linux arm64 manylinux
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+          - name: linux x86-64 musllinux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - name: linux arm64 musllinux
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - name: macos arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            smoke: true
+          # macos-13 was GitHub's last Intel image and is retired. All current
+          # macOS runners are arm64, so Intel is cross-compiled - both Apple
+          # targets ship in the same Xcode toolchain.
+          - name: macos x86-64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - name: windows x86-64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            smoke: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # On Linux this builds inside a manylinux or musllinux container, which
+      # carries the C cross-compiler that tree-sitter's grammar needs.
+      - name: Build the wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist
+
+      - name: Set up Python
+        if: matrix.smoke
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Installs from dist/ only, never from an index, so this tests the
+      # wheel this job built and nothing else.
+      - name: Smoke-test the wheel
+        if: matrix.smoke
+        shell: bash
+        run: |
+          python -m venv .smoke
+          bin=.smoke/bin
+          if [ -d .smoke/Scripts ]; then bin=.smoke/Scripts; fi
+          "$bin/python" -m pip install --no-index --only-binary=:all: --find-links dist kv-cli
+
+          crate=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          version=$("$bin/kv-cli" --version)
+          echo "$version"
+          if [ "$version" != "kv-cli $crate" ]; then
+            echo "::error::installed binary reports '$version', expected 'kv-cli $crate'"
+            exit 1
+          fi
+
+          # Must exit 0: samples/compliant.py always audits clean.
+          "$bin/kv-cli" audit samples/compliant.py
+
+          "$bin/kv-cli" schema > schema-out.json
+          python -c 'import json, sys; json.load(open(sys.argv[1]))' schema-out.json
+          echo "kv-cli schema printed valid JSON"
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      # A platform without a wheel builds from the sdist, so check that it
+      # builds - e.g. that the files the binary embeds are in it.
+      - name: Build a wheel from the sdist
+        run: |
+          python3 -m venv "$RUNNER_TEMP/sdist-check"
+          "$RUNNER_TEMP/sdist-check/bin/pip" wheel --no-deps dist/*.tar.gz -w "$RUNNER_TEMP/sdist-wheel"
+          ls -l "$RUNNER_TEMP/sdist-wheel"
+
+      - name: Upload the sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # One publish job, so a partial upload of some platforms never happens.
+  # Trusted publishing: PyPI issues a short-lived token for this workflow and
+  # environment, so no PyPI token is stored anywhere. A tag publishes to PyPI.
+  # A manual run publishes to the index chosen by `target` - PyPI only from a
+  # tag, so a manual run can never publish an untagged version there.
+  publish:
+    name: publish
+    needs: [guard, wheels, sdist]
+    if: >-
+      always()
+      && needs.wheels.result == 'success'
+      && needs.sdist.result == 'success'
+      && (needs.guard.result == 'success' || needs.guard.result == 'skipped')
+      && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        || (github.event_name == 'workflow_dispatch'
+            && (inputs.target == 'testpypi' || startsWith(github.ref, 'refs/tags/v')))
+      )
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'https://test.pypi.org/p/kv-cli' || 'https://pypi.org/p/kv-cli' }}
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the wheels and the sdist
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: List the files to upload
+        run: ls -l dist
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          # TestPyPI runs can repeat for one version; PyPI uploads cannot.
+          skip-existing: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi' }}

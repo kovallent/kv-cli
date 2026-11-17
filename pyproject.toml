@@ -1,0 +1,37 @@
+# Packages the kv-cli binary as a Python wheel, so `pip install kv-cli` and
+# `uv tool install kv-cli` install it with no Rust toolchain. The wheel holds
+# the compiled binary and nothing else: no extension module, no Python code,
+# and nothing downloaded at install time.
+#
+# The version is not set here. maturin reads it from Cargo.toml, which stays
+# the only place it is declared.
+
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kv-cli"
+dynamic = ["version"]
+description = "Contract guardrails for data pipelines: missing parameters, hardcoded secrets and pinned infrastructure, caught before code leaves the workstation."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/kovallent/kv-cli"
+Changelog = "https://github.com/kovallent/kv-cli/blob/main/CHANGELOG.md"
+Issues = "https://github.com/kovallent/kv-cli/issues"
+
+[tool.maturin]
+# A binary, not a Python extension: the wheel is tagged py3-none-<platform>.
+bindings = "bin"
+strip = true
+# Finder metadata committed before .gitignore covered it; not source.
+exclude = ["**/.DS_Store"]
