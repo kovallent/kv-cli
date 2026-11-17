@@ -45,6 +45,8 @@ samples/deploy.py
         expected signature to declare `target_environment: str = "dev"`
         in scope: name matches applies_to.name_patterns "deploy*"
     …
+
+  · files: 1 failing, 0 warning-only, 0 clean, 0 skipped
 FAIL 13 errors, 6 warnings (19 gating under --strict)
 
 $ kv-cli fix samples/deploy.py
@@ -118,6 +120,7 @@ Exit `0` means compliant and `1` means findings. A 500-file repository takes abo
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
 kv-cli init                           # created ./.kovallent.yaml
 kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
+kv-cli audit --show-clean samples/    # also lists each clean file, with its scope
 kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
@@ -129,6 +132,8 @@ kv-cli audit samples/compliant.py     # PASS — must always be clean
 1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only.
 2. **Your functions are not governed.** By default, `KV001` covers functions named like `deploy*`, `run_*`, `*_pipeline`, `*_job` or `main`, or decorated with `@task`. Run `kv-cli init` and edit `applies_to`, or see [`KV001`](docs/rules/KV001.md).
 3. **A framework owns your signatures.** Check the scope line. A low `in scope` count with a high `framework-exempt` count means the exemption is working, not missing things. See [frameworks](docs/frameworks.md).
+
+`kv-cli audit --show-clean` names each clean file with its own scope, so you can confirm a specific file was checked. A file reads `nothing enforced` when none of its functions were under the contract, and `credentials only` when it is a config file or notebook.
 
 If no file matched at all, that is not a pass. The run exits `2` with `no files to audit` and names the patterns it tried.
 
@@ -153,7 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.8.0
+      - uses: kovallent/kv-cli@v0.9.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -175,7 +180,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.8.0
+          KV_VERSION: v0.9.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -231,7 +236,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli
-    rev: v0.8.0
+    rev: v0.9.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -327,7 +332,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.8.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.9.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI package, so `pip install kv-cli` will not work.

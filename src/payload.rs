@@ -66,6 +66,89 @@ impl SkippedFile {
     }
 }
 
+/// What a run concluded about one file. Intrinsic, like a finding's severity:
+/// `--strict` never changes it, because applying strictness is the reader's
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileStatus {
+    /// At least one error-severity finding.
+    Fail,
+    /// Warning-severity findings only.
+    Warn,
+    /// No findings, and fully read. Not a compliance claim on its own: read it
+    /// with `analysis` and `scope`, since a file can be clean because nothing
+    /// in it was enforced.
+    Clean,
+    /// Listed in `skipped`, with no findings.
+    Skipped,
+}
+
+/// How much of a file kv-cli could check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAnalysis {
+    /// Python: every rule applied.
+    Full,
+    /// YAML, `.env*`, TOML, INI/cfg, JSON and notebooks: scanned for
+    /// credentials only, so the scope is always zero.
+    CredentialsOnly,
+    /// A syntax error: audited on a partial parse. Also listed in `skipped`.
+    Partial,
+    /// The file could not be read at all. Also listed in `skipped`.
+    #[serde(rename = "none")]
+    NotRead,
+}
+
+/// One resolved file and what the run concluded about it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FileResult {
+    /// Normalized and forward-slashed, as in `findings`.
+    pub path: String,
+    /// The worst of this file's findings; `skipped` or `clean` when it has none.
+    pub status: FileStatus,
+    /// This file's findings whose intrinsic severity is error.
+    pub errors: usize,
+    /// This file's findings whose intrinsic severity is warning.
+    pub warnings: usize,
+    pub analysis: FileAnalysis,
+    /// The run's scope counts for this file alone. They sum to `run.scope`.
+    pub scope: Scope,
+}
+
+impl FileResult {
+    /// Status from this file's own findings and skip. A finding outranks a
+    /// skip: a file audited on a partial parse that still produced an error is
+    /// failing, and `analysis` says the parse was partial.
+    pub fn new(
+        path: String,
+        findings: &[Finding],
+        skipped: bool,
+        analysis: FileAnalysis,
+        scope: Scope,
+    ) -> Self {
+        let errors = findings.iter().filter(|f| f.severity.is_error()).count();
+        let warnings = findings.len() - errors;
+        let status = if errors > 0 {
+            FileStatus::Fail
+        } else if warnings > 0 {
+            FileStatus::Warn
+        } else if skipped {
+            FileStatus::Skipped
+        } else {
+            FileStatus::Clean
+        };
+        Self {
+            path,
+            status,
+            errors,
+            warnings,
+            analysis,
+            scope,
+        }
+    }
+}
+
 /// Version of the payload shape, independent of the tool version.
 ///
 /// Bump only on a breaking payload change. The tool version moves every
@@ -123,6 +206,11 @@ pub struct RunMeta {
     /// Framework profiles detected, and in how many files.
     pub frameworks_detected: BTreeMap<String, usize>,
     pub scope: Scope,
+    /// Every resolved file, sorted by path, so `files.len() == files_scanned`:
+    /// the files that passed are listed, not only the ones that failed. Absent
+    /// from payloads before 0.9.0, so not required.
+    #[serde(default)]
+    pub files: Vec<FileResult>,
 }
 
 /// Provenance of each run-identity field: `"flag"`, `"env:NAME"`, or absent.
@@ -378,12 +466,28 @@ mod tests {
                 contract_path: Some(".kovallent.yaml".into()),
                 contract_expected: None,
                 contract_drift: false,
-                files_scanned: 1,
+                files_scanned: 2,
                 errors: findings.iter().filter(|f| f.severity.is_error()).count(),
                 warnings: findings.iter().filter(|f| !f.severity.is_error()).count(),
                 skipped: vec![SkippedFile::syntax_error("jobs/broken.py".into())],
                 frameworks_detected: BTreeMap::new(),
                 scope: ctx.scope(&analysis),
+                files: vec![
+                    FileResult::new(
+                        "jobs/broken.py".into(),
+                        &[],
+                        true,
+                        FileAnalysis::Partial,
+                        Scope::default(),
+                    ),
+                    FileResult::new(
+                        "jobs/raw_ingest.py".into(),
+                        &findings,
+                        false,
+                        FileAnalysis::Full,
+                        ctx.scope(&analysis),
+                    ),
+                ],
             },
             findings: &findings,
         };

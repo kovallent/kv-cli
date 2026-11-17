@@ -16,7 +16,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use config::{Contract, CONTRACT_FILE, DEFAULT_CONTRACT_YAML, FINGERPRINT_LEN};
 use configscan::ConfigKind;
-use payload::{Identity, IdentityFlags, Payload, RunMeta, SkippedFile, SCHEMA_VERSION};
+use payload::{
+    FileAnalysis, FileResult, FileStatus, Identity, IdentityFlags, Payload, RunMeta, SkippedFile,
+    SCHEMA_VERSION,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -93,6 +96,7 @@ enum Command {
         kv-cli audit                          scan the current folder\n  \
         kv-cli audit src/ dags/etl.py         scan some paths only\n  \
         kv-cli audit --strict                 fail on warnings too (CI)\n  \
+        kv-cli audit --show-clean             list the clean files too, with their scope\n  \
         kv-cli audit --format json > out.json machine-readable payload\n\n\
         Exit codes: 0 compliant, 1 findings, 2 tool error, 3 contract drift.\n\
         Run `kv-cli explain KV001` for what a rule checks and how to fix it.")]
@@ -109,6 +113,10 @@ enum Command {
         /// Treat warnings as errors.
         #[arg(long)]
         strict: bool,
+        /// List each clean file too, with its scope (text output). The JSON
+        /// payload always lists every file.
+        #[arg(long)]
+        show_clean: bool,
         /// Fingerprint the local contract is expected to have. On mismatch the
         /// run exits 3 (contract drift) instead of 0 or 1. The authoritative
         /// value must live somewhere the pull-request author cannot edit - an
@@ -219,6 +227,7 @@ fn main() -> ExitCode {
             config,
             format,
             strict,
+            show_clean,
             expect_contract,
             repo,
             commit,
@@ -228,6 +237,7 @@ fn main() -> ExitCode {
             config.as_deref(),
             format,
             strict,
+            show_clean,
             expect_contract.as_deref(),
             &IdentityFlags {
                 repo: repo.as_deref(),
@@ -829,6 +839,10 @@ struct RunReport<'a> {
     gating: usize,
     strict: bool,
     scope: Scope,
+    /// Every resolved file, sorted by path.
+    file_results: &'a [FileResult],
+    /// List clean files in the text output.
+    show_clean: bool,
     identity: &'a IdentityFlags<'a>,
     /// Symlinks the walk did not follow; see `audit::Collected`.
     symlinks_not_followed: usize,
@@ -841,6 +855,7 @@ fn cmd_audit(
     config: Option<&Path>,
     format: Format,
     strict: bool,
+    show_clean: bool,
     expect_contract: Option<&str>,
     identity: &IdentityFlags,
 ) -> Result<u8, String> {
@@ -876,7 +891,18 @@ fn cmd_audit(
     let mut skipped: Vec<SkippedFile> = Vec::new();
     let mut detected: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut scope = Scope::default();
+    // One entry per resolved file, so a file that passed is named rather than
+    // left implicit in `files_scanned`. Built from the same outcome that feeds
+    // the run's findings, skips and scope, so the two views cannot disagree.
+    let mut file_results: Vec<FileResult> = Vec::with_capacity(files.len());
     for outcome in audit_files(&engine, &base, &files) {
+        file_results.push(FileResult::new(
+            outcome.path,
+            &outcome.findings,
+            outcome.skipped.is_some(),
+            outcome.analysis,
+            outcome.scope,
+        ));
         findings.extend(outcome.findings);
         skipped.extend(outcome.skipped);
         scope.add(outcome.scope);
@@ -884,6 +910,7 @@ fn cmd_audit(
             *detected.entry(name).or_insert(0) += 1;
         }
     }
+    file_results.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Counts are intrinsic: what each finding *is*, not what `--strict` makes
     // it. Folding the policy in here would leave the payload unable to say how
@@ -919,6 +946,8 @@ fn cmd_audit(
         gating,
         strict,
         scope,
+        file_results: &file_results,
+        show_clean,
         identity,
         symlinks_not_followed,
         named_excluded,
@@ -942,12 +971,28 @@ fn cmd_audit(
 }
 
 /// Everything one file contributes to a run.
-#[derive(Default)]
 struct FileOutcome {
+    /// Normalized, as findings carry it.
+    path: String,
     findings: Vec<Finding>,
     skipped: Option<SkippedFile>,
     scope: Scope,
     frameworks: Vec<&'static str>,
+    analysis: FileAnalysis,
+}
+
+impl FileOutcome {
+    /// A file with nothing to report yet: no findings, no skip, zero scope.
+    fn empty(path: String, analysis: FileAnalysis) -> Self {
+        Self {
+            path,
+            findings: Vec::new(),
+            skipped: None,
+            scope: Scope::default(),
+            frameworks: Vec::new(),
+            analysis,
+        }
+    }
 }
 
 fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
@@ -956,8 +1001,8 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
         Ok(src) => src,
         Err(e) => {
             return FileOutcome {
-                skipped: Some(SkippedFile::unreadable(rel, read_error(&e))),
-                ..Default::default()
+                skipped: Some(SkippedFile::unreadable(rel.clone(), read_error(&e))),
+                ..FileOutcome::empty(rel, FileAnalysis::NotRead)
             }
         }
     };
@@ -966,13 +1011,18 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
         FileKind::Config(kind) => {
             return FileOutcome {
                 findings: engine.audit_config(&rel, &src, kind, Some(file)),
-                ..Default::default()
+                ..FileOutcome::empty(rel, FileAnalysis::CredentialsOnly)
             }
         }
         FileKind::Notebook => {
             let (findings, error) = engine.audit_notebook(&rel, &src);
             // Not a readable notebook: its code was not analysed, which must
             // be visible - though value patterns still read its raw text.
+            let analysis = if error.is_some() {
+                FileAnalysis::Partial
+            } else {
+                FileAnalysis::CredentialsOnly
+            };
             let skipped = error.map(|why| SkippedFile {
                 detail: Some(format!(
                     "not a readable notebook ({why}); only value patterns were applied"
@@ -982,7 +1032,7 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
             return FileOutcome {
                 findings,
                 skipped,
-                ..Default::default()
+                ..FileOutcome::empty(rel, analysis)
             };
         }
     }
@@ -998,6 +1048,12 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
             .then(|| SkippedFile::syntax_error(rel.clone())),
         scope: ctx.scope(&analysis),
         frameworks: ctx.frameworks(),
+        analysis: if analysis.has_error {
+            FileAnalysis::Partial
+        } else {
+            FileAnalysis::Full
+        },
+        path: rel,
     }
 }
 
@@ -1086,6 +1142,7 @@ fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
                 .map(|(name, n)| (name.to_string(), *n))
                 .collect(),
             scope: r.scope,
+            files: r.file_results.to_vec(),
         },
         findings,
     };
@@ -1207,7 +1264,35 @@ fn print_text(findings: &[Finding], r: &RunReport) {
         }
     }
 
+    // A clean file is named with its scope, never called compliant on its
+    // own: it may be clean because nothing in it was enforced. "Compliant"
+    // stays the run-level verdict.
+    if r.show_clean {
+        let mut clean = r
+            .file_results
+            .iter()
+            .filter(|f| f.status == FileStatus::Clean)
+            .peekable();
+        if clean.peek().is_some() {
+            println!();
+        }
+        for f in clean {
+            println!("{}", f.path.clone().underline());
+            println!("        {}  {}", emerald("clean"), clean_scope(f).dimmed());
+        }
+    }
+
     println!();
+
+    let count = |status: FileStatus| r.file_results.iter().filter(|f| f.status == status).count();
+    println!(
+        "  {} files: {} failing, {} warning-only, {} clean, {} skipped",
+        "\u{b7}".dimmed(),
+        count(FileStatus::Fail),
+        count(FileStatus::Warn),
+        count(FileStatus::Clean),
+        count(FileStatus::Skipped)
+    );
 
     // Drift is reported separately from findings, and first: it says the rules
     // themselves are not the expected ones, which changes how to read
@@ -1283,6 +1368,56 @@ fn print_text(findings: &[Finding], r: &RunReport) {
                     .dimmed()
             );
         }
+    }
+}
+
+/// `text` in emerald (#10b981), the colour of `clean` under `--show-clean`,
+/// on a terminal that advertises 24-bit colour. Elsewhere it is plain green:
+/// `colored` would otherwise fall back to the nearest basic colour, which for
+/// emerald is cyan, the colour framework names already use.
+fn emerald(text: &str) -> colored::ColoredString {
+    let truecolor = std::env::var("COLORTERM")
+        .is_ok_and(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"));
+    if truecolor {
+        text.truecolor(16, 185, 129)
+    } else {
+        text.green()
+    }
+}
+
+/// What a clean file's scope says, for `--show-clean`.
+///
+/// A Python file with no enforced function reads "nothing enforced", followed
+/// by why, so it cannot pass for one that was checked and complied. Enforced
+/// means in scope and not report-only.
+fn clean_scope(f: &FileResult) -> String {
+    match f.analysis {
+        FileAnalysis::Full => {}
+        FileAnalysis::CredentialsOnly => return "credentials only".to_string(),
+        FileAnalysis::Partial => return "partial parse".to_string(),
+        FileAnalysis::NotRead => return "not read".to_string(),
+    }
+    let s = &f.scope;
+    let enforced = s.functions_in_scope - s.functions_report_only;
+    let rest: Vec<String> = [
+        (s.functions_report_only, "report-only"),
+        (s.functions_exempt_framework, "framework-exempt"),
+        (s.functions_exempt_user, "user-exempt"),
+        (s.functions_out_of_scope, "out of scope"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    if enforced > 0 {
+        std::iter::once(format!("{enforced} enforced"))
+            .chain(rest)
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else if rest.is_empty() {
+        "nothing enforced: no functions".to_string()
+    } else {
+        format!("nothing enforced: {}", rest.join(", "))
     }
 }
 
