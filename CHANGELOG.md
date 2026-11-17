@@ -15,6 +15,37 @@ Nothing yet.
 
 ---
 
+## [0.9.0] — 2026-11-17
+
+A run names every file it checked, including the ones that passed, each with
+its own scope. `schema_version` stays 1 and contract fingerprints are
+unchanged.
+
+### Added
+
+- **`run.files` in the JSON payload**: one entry per resolved file, sorted by
+  path, so `files.len() == files_scanned`. Each entry has `path`, `status`
+  (`fail`, `warn`, `clean` or `skipped`), `errors`, `warnings`, `analysis`
+  (`full`, `credentials_only`, `partial` or `none`) and `scope`, the six scope
+  counts for that file alone. The per-file scopes sum to `run.scope`. Like a
+  finding's severity, `status` is intrinsic: `--strict` never changes it. A
+  `clean` file is not a compliance claim on its own; its `analysis` and
+  `scope` show whether anything in it was enforced. `files_scanned`,
+  `findings` and `skipped` are unchanged. The field is optional in
+  `schema/findings.v1.json`, so `schema_version` stays 1 and payloads from
+  earlier releases still validate.
+- **A file summary line** in text output, below the last file block and
+  above the verdict: `· files: N failing, N warning-only, N clean, N skipped`.
+  A clean run prints what it printed before, plus this line.
+- **`kv-cli audit --show-clean`** lists each clean file in the same block
+  style, with its scope: `clean  2 enforced, 1 framework-exempt`,
+  `clean  credentials only`, or `clean  nothing enforced: 1 framework-exempt`
+  for a Python file where no function is enforced. A single file is called
+  clean, never compliant; "compliant" stays the run-level `PASS` verdict. The
+  `FAIL` and `PASS` lines and the exit codes are unchanged.
+
+---
+
 ## [0.8.0] — 2026-11-12
 
 KV001 findings say whether their function is report-only. `schema_version`

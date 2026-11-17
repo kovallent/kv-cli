@@ -5,6 +5,7 @@
 //! covers is about what the *process* does, not what an internal function
 //! returns.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -42,7 +43,7 @@ fn run_json(dir: &Path, extra_args: &[&str]) -> (Option<i32>, serde_json::Value)
             String::from_utf8_lossy(&out.stderr)
         )
     });
-    common::check_report_only(&payload);
+    common::check_payload(&payload);
     (out.status.code(), payload)
 }
 
@@ -119,6 +120,11 @@ fn unreadable_file_always_gates() {
     assert_eq!(skipped.len(), 1, "{payload:#}");
     assert_eq!(skipped[0]["reason"], "unreadable");
     assert_eq!(skipped[0]["severity"], "error");
+    // Nothing of it was read, which run.files says too.
+    let file = &payload["run"]["files"][0];
+    assert_eq!(file["path"], "locked.py", "{payload:#}");
+    assert_eq!(file["status"], "skipped", "{payload:#}");
+    assert_eq!(file["analysis"], "none", "{payload:#}");
 }
 
 /// Policy: source must be UTF-8. A latin-1 file - valid Python with a PEP 263
@@ -293,7 +299,7 @@ fn star_cta_follows_a_passing_run_on_stderr() {
     // JSON output is parsed, so the line appears on neither stream.
     let (code, stdout, stderr) = audit_streams(&dir, &["audit", ".", "--format", "json"]);
     assert_eq!(code, Some(0));
-    common::check_report_only(&serde_json::from_str(&stdout).expect("JSON payload"));
+    common::check_payload(&serde_json::from_str(&stdout).expect("JSON payload"));
     assert!(!stdout.contains("a star helps") && !stderr.contains("a star helps"));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -732,7 +738,7 @@ fn the_contract_applies_to_files_named_at_the_top_level() {
         .output()
         .expect("kv-cli runs");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    common::check_report_only(&payload);
+    common::check_payload(&payload);
     assert_eq!(
         payload["run"]["contract_path"], "./.kovallent.yaml",
         "{payload:#}"
@@ -803,7 +809,7 @@ fn a_file_named_twice_is_audited_once() {
         .output()
         .expect("kv-cli runs");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    common::check_report_only(&payload);
+    common::check_payload(&payload);
     assert_eq!(payload["run"]["files_scanned"], 2, "{payload:#}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -868,7 +874,7 @@ fn the_readme_sample_counts_are_true() {
             .output()
             .expect("kv-cli runs");
         let payload = serde_json::from_slice(&out.stdout).expect("JSON payload");
-        common::check_report_only(&payload);
+        common::check_payload(&payload);
         payload
     };
     let counts = |p: &serde_json::Value| {
@@ -1092,7 +1098,7 @@ fn scan_patterns_follow_gitignore_rules_from_the_project_root() {
             .output()
             .unwrap();
         let p: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        common::check_report_only(&p);
+        common::check_payload(&p);
         p["run"]["files_scanned"].as_u64().unwrap()
     };
     // src/a.py and jobs/daily/c.py; not src/deep/b.py.
@@ -1277,7 +1283,7 @@ fn the_documented_workflow_passes_its_own_gate() {
         .output()
         .expect("kv-cli runs");
     let named: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
-    common::check_report_only(&named);
+    common::check_payload(&named);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(kv002(&named), Vec::<serde_json::Value>::new(), "{named:#}");
     assert_eq!(out.status.code(), Some(0), "{named:#}");
@@ -1311,7 +1317,7 @@ fn kv001_findings_say_whether_they_are_report_only() {
         .output()
         .expect("kv-cli runs");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
-    common::check_report_only(&payload);
+    common::check_payload(&payload);
     let findings = payload["findings"].as_array().unwrap();
 
     let task = findings
@@ -1358,4 +1364,253 @@ fn a_v0_7_2_payload_still_validates_against_the_schema() {
     assert!(findings.iter().any(|f| f["code"] == "KV001"));
     assert!(findings.iter().all(|f| f.get("report_only").is_none()));
     assert_eq!(payload_schema_errors(&old), Vec::<String>::new());
+}
+
+// --- per-file results (run.files, the summary line, --show-clean) -----------
+
+/// `samples/` as JSON, from the repository root, with built-in defaults.
+fn samples_json(extra: &[&str]) -> serde_json::Value {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(bin())
+        .args(["audit", "samples/", "--format", "json"])
+        .args(extra)
+        .current_dir(repo)
+        .output()
+        .expect("kv-cli runs");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON payload");
+    common::check_payload(&payload);
+    payload
+}
+
+fn file_entry<'a>(payload: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    payload["run"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == path)
+        .unwrap_or_else(|| panic!("{path} in run.files: {payload:#}"))
+}
+
+/// Every sample file is named, once, with a status; the ones with findings
+/// are failing or warning-only; and the per-file scopes add up to the run's.
+#[test]
+fn every_sample_file_is_listed_with_its_status() {
+    let payload = samples_json(&[]);
+    let run = &payload["run"];
+    let files = run["files"].as_array().unwrap();
+    assert_eq!(files.len() as u64, run["files_scanned"].as_u64().unwrap());
+
+    let paths: BTreeSet<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(paths.len(), files.len(), "every path appears once");
+
+    for f in payload["findings"].as_array().unwrap() {
+        let status = &file_entry(&payload, f["path"].as_str().unwrap())["status"];
+        assert!(
+            status == "fail" || status == "warn",
+            "{f:#}\nstatus {status}"
+        );
+    }
+
+    for key in [
+        "functions_total",
+        "functions_in_scope",
+        "functions_report_only",
+        "functions_exempt_framework",
+        "functions_exempt_user",
+        "functions_out_of_scope",
+    ] {
+        let sum: u64 = files
+            .iter()
+            .map(|f| f["scope"][key].as_u64().unwrap())
+            .sum();
+        assert_eq!(sum, run["scope"][key].as_u64().unwrap(), "{key}");
+    }
+
+    let compliant = file_entry(&payload, "compliant.py");
+    assert_eq!(compliant["status"], "clean", "{compliant:#}");
+    assert_eq!(compliant["analysis"], "full", "{compliant:#}");
+    let scope = &compliant["scope"];
+    let enforced = scope["functions_in_scope"].as_u64().unwrap()
+        - scope["functions_report_only"].as_u64().unwrap();
+    assert!(
+        enforced >= 1,
+        "compliant.py enforces something: {compliant:#}"
+    );
+}
+
+/// A YAML file with no secret is clean, but only checked for credentials, so
+/// its scope is zero.
+#[test]
+fn a_yaml_file_with_no_secret_is_clean_and_credentials_only() {
+    let dir = tempdir("files-yaml");
+    write(&dir, "config.yml", "name: orders\nschedule: daily\n");
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(code, Some(0), "{payload:#}");
+    let f = file_entry(&payload, "config.yml");
+    assert_eq!(f["status"], "clean", "{f:#}");
+    assert_eq!(f["analysis"], "credentials_only", "{f:#}");
+    for (k, v) in f["scope"].as_object().unwrap() {
+        assert_eq!(v, 0, "{k}: {f:#}");
+    }
+
+    let (_, stdout) = text_audit(&dir, &["audit", ".", "--show-clean"]);
+    assert!(
+        stdout.contains("config.yml\n        clean  credentials only\n"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose only function belongs to dbt is clean with nothing enforced,
+/// and `--show-clean` says so rather than reading as a pass.
+#[test]
+fn a_dbt_model_alone_reads_nothing_enforced() {
+    let dir = tempdir("files-dbt");
+    write(
+        &dir,
+        "orders.py",
+        "def model(dbt, session):\n    dbt.config(materialized=\"table\")\n    return session.table(\"raw.orders\")\n",
+    );
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(code, Some(0), "{payload:#}");
+    let f = file_entry(&payload, "orders.py");
+    assert_eq!(f["status"], "clean", "{f:#}");
+    assert_eq!(f["analysis"], "full", "{f:#}");
+    assert_eq!(f["scope"]["functions_exempt_framework"], 1, "{f:#}");
+    assert_eq!(f["scope"]["functions_in_scope"], 0, "{f:#}");
+
+    let (_, stdout) = text_audit(&dir, &["audit", ".", "--show-clean"]);
+    assert!(
+        stdout.contains("orders.py\n        clean  nothing enforced: 1 framework-exempt\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("compliant\n        "), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file's status is intrinsic, like a finding's severity: `--strict`
+/// changes what gates, never what a file is.
+#[test]
+fn strict_changes_no_file_status() {
+    let lenient = samples_json(&[]);
+    let strict = samples_json(&["--strict"]);
+    assert_eq!(lenient["run"]["strict"], false);
+    assert_eq!(strict["run"]["strict"], true);
+    assert_eq!(lenient["run"]["files"], strict["run"]["files"]);
+    assert!(
+        strict["run"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["status"] == "warn"),
+        "samples/ has a warning-only file, so the comparison means something"
+    );
+}
+
+/// A file with a syntax error is skipped, audited on a partial parse; an
+/// unreadable notebook likewise.
+#[test]
+fn a_syntax_error_file_is_skipped_with_partial_analysis() {
+    let dir = tempdir("files-syntax");
+    write(&dir, "broken.py", "def broken(:\n    pass\n");
+    write(&dir, "broken.ipynb", "{ not json");
+    let (_, payload) = run_json(&dir, &[]);
+    for path in ["broken.py", "broken.ipynb"] {
+        let f = file_entry(&payload, path);
+        assert_eq!(f["status"], "skipped", "{f:#}");
+        assert_eq!(f["analysis"], "partial", "{f:#}");
+    }
+    let (_, stdout) = text_audit(&dir, &["audit", "."]);
+    assert!(
+        stdout.contains("  · files: 0 failing, 0 warning-only, 0 clean, 2 skipped\n"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Golden: a clean run without `--show-clean` prints what it printed before
+/// 0.9.0, plus the summary line above the verdict.
+#[test]
+fn a_clean_run_adds_only_the_summary_line() {
+    let dir = tempdir("files-clean-run");
+    write(
+        &dir,
+        "app.py",
+        "def deploy_x(name, target_environment: str = \"dev\", dry_run: bool = False):\n    return name\n",
+    );
+    let (code, stdout) = text_audit(&dir, &["audit", "."]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        stdout,
+        "kv-cli audit  built-in defaults (run `kv-cli init`)  1 file\n\
+         \x20 · contract a6edcff00199c1cf\n\
+         \x20 · functions: 1 in scope, 0 framework-exempt, 0 user-exempt, 0 out of scope\n\
+         \n\
+         \x20 · files: 0 failing, 0 warning-only, 1 clean, 0 skipped\n\
+         PASS 1 file is compliant\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Text audit of `samples/` from the repository root.
+fn samples_text(args: &[&str]) -> (Option<i32>, String) {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut all = vec!["audit", "samples/"];
+    all.extend_from_slice(args);
+    text_audit(repo, &all)
+}
+
+/// Golden: the summary line on `samples/`, directly above the verdict, the
+/// same with and without `--strict`.
+#[test]
+fn the_summary_line_on_samples_is_golden() {
+    const SUMMARY: &str = "  · files: 11 failing, 2 warning-only, 3 clean, 0 skipped";
+    for (args, verdict) in [
+        (&[][..], "FAIL 31 errors, 17 warnings"),
+        (
+            &["--strict"][..],
+            "FAIL 31 errors, 17 warnings (48 gating under --strict)",
+        ),
+    ] {
+        let (code, stdout) = samples_text(args);
+        assert_eq!(code, Some(1));
+        let lines: Vec<&str> = stdout.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("  · files:"))
+            .unwrap_or_else(|| panic!("no summary line: {stdout}"));
+        assert_eq!(lines[at], SUMMARY, "{args:?}");
+        assert_eq!(lines[at - 1], "", "a blank line after the last file block");
+        assert_eq!(lines[at + 1], verdict, "{args:?}");
+        assert_eq!(stdout.matches("  · files:").count(), 1);
+    }
+}
+
+/// Golden: `--show-clean` on `samples/` lists the three clean files after the
+/// failing blocks, each with its scope, and never calls one compliant.
+#[test]
+fn show_clean_on_samples_is_golden() {
+    let (code, stdout) = samples_text(&["--show-clean"]);
+    assert_eq!(code, Some(1));
+    let golden = "\n\
+        compliant.py\n\
+        \x20       clean  3 enforced\n\
+        configs/.env.example\n\
+        \x20       clean  credentials only\n\
+        frameworks/dbt_model.py\n\
+        \x20       clean  nothing enforced: 1 framework-exempt\n\
+        \n\
+        \x20 · files: 11 failing, 2 warning-only, 3 clean, 0 skipped\n\
+        FAIL 31 errors, 17 warnings\n\
+        run `kv-cli fix` to apply the standard fixes\n\
+        run `kv-cli explain KV001` for what a rule checks and how to fix it\n";
+    assert!(stdout.ends_with(golden), "{stdout}");
+    assert!(!stdout.contains("compliant  "), "{stdout}");
+
+    // Without the flag, the same run names no clean file, and is otherwise the
+    // same output.
+    let (_, plain) = samples_text(&[]);
+    assert!(!plain.contains("clean  "), "{plain}");
+    let blocks = &golden[..golden.find("\n\n").unwrap() + 1];
+    assert_eq!(stdout.replacen(blocks, "", 1), plain);
 }

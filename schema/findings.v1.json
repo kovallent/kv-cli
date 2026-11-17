@@ -1,5 +1,96 @@
 {
   "$defs": {
+    "FileAnalysis": {
+      "description": "How much of a file kv-cli could check.",
+      "oneOf": [
+        {
+          "const": "full",
+          "description": "Python: every rule applied.",
+          "type": "string"
+        },
+        {
+          "const": "credentials_only",
+          "description": "YAML, `.env*`, TOML, INI/cfg, JSON and notebooks: scanned for\ncredentials only, so the scope is always zero.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A syntax error: audited on a partial parse. Also listed in `skipped`.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "The file could not be read at all. Also listed in `skipped`.",
+          "type": "string"
+        }
+      ]
+    },
+    "FileResult": {
+      "description": "One resolved file and what the run concluded about it.",
+      "properties": {
+        "analysis": {
+          "$ref": "#/$defs/FileAnalysis"
+        },
+        "errors": {
+          "description": "This file's findings whose intrinsic severity is error.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Normalized and forward-slashed, as in `findings`.",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope",
+          "description": "The run's scope counts for this file alone. They sum to `run.scope`."
+        },
+        "status": {
+          "$ref": "#/$defs/FileStatus",
+          "description": "The worst of this file's findings; `skipped` or `clean` when it has none."
+        },
+        "warnings": {
+          "description": "This file's findings whose intrinsic severity is warning.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "errors",
+        "warnings",
+        "analysis",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "FileStatus": {
+      "description": "What a run concluded about one file. Intrinsic, like a finding's severity:\n`--strict` never changes it, because applying strictness is the reader's\ndecision.",
+      "oneOf": [
+        {
+          "const": "fail",
+          "description": "At least one error-severity finding.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Warning-severity findings only.",
+          "type": "string"
+        },
+        {
+          "const": "clean",
+          "description": "No findings, and fully read. Not a compliance claim on its own: read it\nwith `analysis` and `scope`, since a file can be clean because nothing\nin it was enforced.",
+          "type": "string"
+        },
+        {
+          "const": "skipped",
+          "description": "Listed in `skipped`, with no findings.",
+          "type": "string"
+        }
+      ]
+    },
     "Finding": {
       "oneOf": [
         {
@@ -197,6 +288,14 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "files": {
+          "default": [],
+          "description": "Every resolved file, sorted by path, so `files.len() == files_scanned`:\nthe files that passed are listed, not only the ones that failed. Absent\nfrom payloads before 0.9.0, so not required.",
+          "items": {
+            "$ref": "#/$defs/FileResult"
+          },
+          "type": "array"
         },
         "files_scanned": {
           "format": "uint",
