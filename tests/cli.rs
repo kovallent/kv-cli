@@ -2372,11 +2372,18 @@ fn fix_lists_kv004_as_manual_and_renames_nothing() {
     write(&dir, "jobs.py", NAMING_TASKS);
     let (code, stdout, _) = audit_streams(&dir, &["fix", ".", "--no-color"]);
     assert_eq!(code, Some(0), "{stdout}");
+    // `fix` shows the path as given (`./jobs.py`, `.\jobs.py` on Windows), so
+    // as in the other `fix` tests, check the file and line and the message
+    // separately, never the separator in front of `jobs.py`.
+    let manual = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("manual:") && l.contains("jobs.py:10 "))
+        .unwrap_or_else(|| panic!("no manual: line for jobs.py:10\n{stdout}"));
     assert!(
-        stdout.contains(
-            "manual: ./jobs.py:10 `LoadOrders` does not match naming rule `pipeline_functions` - rename it and its callers by hand"
+        manual.ends_with(
+            "`LoadOrders` does not match naming rule `pipeline_functions` - rename it and its callers by hand"
         ),
-        "{stdout}"
+        "{manual}"
     );
     assert!(stdout.contains("nothing to fix"), "{stdout}");
     assert_eq!(
