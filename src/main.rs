@@ -9,6 +9,7 @@ mod jinja;
 mod notebook;
 mod payload;
 mod python;
+mod sarif;
 mod yamlscan;
 
 use audit::{Engine, Finding, Scope};
@@ -208,6 +209,8 @@ enum ContractAction {
 enum Format {
     Text,
     Json,
+    /// SARIF 2.1.0, for code-scanning tools.
+    Sarif,
 }
 
 fn main() -> ExitCode {
@@ -288,7 +291,7 @@ fn emits_machine_output(command: &Command) -> bool {
         Command::Contract {
             action: ContractAction::Show { .. } | ContractAction::Schema,
         } => true,
-        Command::Audit { format, .. } => *format == Format::Json,
+        Command::Audit { format, .. } => *format != Format::Text,
         _ => false,
     }
 }
@@ -583,6 +586,25 @@ fn cmd_explain(code: Option<&str>) -> Result<u8, String> {
 fn rule_title(page: &str) -> &str {
     let heading = page.lines().next().unwrap_or_default();
     heading.split_once(": ").map_or(heading, |(_, title)| title)
+}
+
+/// The first paragraph under a page's "What it catches", on one line - the
+/// page's own wording, for SARIF's `fullDescription`. The title when a page
+/// has no such section.
+fn rule_summary(page: &str) -> String {
+    let paragraph: Vec<&str> = page
+        .lines()
+        .skip_while(|l| l.trim() != "## What it catches")
+        .skip(1)
+        .skip_while(|l| l.trim().is_empty())
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    if paragraph.is_empty() {
+        rule_title(page).to_string()
+    } else {
+        paragraph.join(" ")
+    }
 }
 
 fn cmd_schema() -> Result<u8, String> {
@@ -955,6 +977,7 @@ fn cmd_audit(
 
     match format {
         Format::Json => print_json(&findings, &report)?,
+        Format::Sarif => print_sarif(&findings, &report)?,
         Format::Text => print_text(&findings, &report),
     }
 
@@ -1149,6 +1172,35 @@ fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+/// The same run as `print_json`, as one SARIF 2.1.0 log. Built from the same
+/// findings and report: nothing is re-run or re-derived.
+fn print_sarif(findings: &[Finding], r: &RunReport) -> Result<(), String> {
+    let rules: Vec<sarif::Rule> = RULES
+        .iter()
+        .map(|(code, page)| sarif::Rule {
+            id: code,
+            title: rule_title(page),
+            summary: rule_summary(page),
+            page,
+        })
+        .collect();
+    let input = sarif::Input {
+        tool_version: env!("CARGO_PKG_VERSION"),
+        rules: &rules,
+        findings,
+        skipped: r.skipped,
+        scope: r.scope,
+        contract_sha256: r.fingerprint,
+        contract_path: r.contract_path.map(slash_path),
+        schema_version: SCHEMA_VERSION,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&sarif::log(&input)).map_err(|e| e.to_string())?
     );
     Ok(())
 }

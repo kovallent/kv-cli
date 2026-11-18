@@ -1614,3 +1614,269 @@ fn show_clean_on_samples_is_golden() {
     let blocks = &golden[..golden.find("\n\n").unwrap() + 1];
     assert_eq!(stdout.replacen(blocks, "", 1), plain);
 }
+
+// --- SARIF output -----------------------------------------------------------
+
+/// Run kv-cli from the repository root; returns the exit code and stdout.
+fn repo_run(args: &[&str]) -> (Option<i32>, String) {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(bin())
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("kv-cli runs");
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).expect("UTF-8 stdout"),
+    )
+}
+
+/// Validation errors for `log` against the SARIF 2.1.0 schema, vendored in
+/// `tests/fixtures` (see the `.md` beside it) so no test fetches anything.
+fn sarif_schema_errors(log: &serde_json::Value) -> Vec<String> {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/sarif-schema-2.1.0.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("SARIF schema compiles");
+    validator.iter_errors(log).map(|e| e.to_string()).collect()
+}
+
+fn sarif_of(args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let (code, stdout) = repo_run(args);
+    let log = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{stdout}"));
+    (code, log)
+}
+
+/// `samples/` as SARIF validates against the official schema, exits as the
+/// JSON run does, and carries the same scope and contract.
+#[test]
+fn sarif_on_samples_validates_against_the_schema() {
+    let (code, log) = sarif_of(&["audit", "samples/", "--format", "sarif"]);
+    let (json_code, payload) = {
+        let (c, out) = repo_run(&["audit", "samples/", "--format", "json"]);
+        (c, serde_json::from_str::<serde_json::Value>(&out).unwrap())
+    };
+    assert_eq!(code, json_code, "the format never changes the exit code");
+    assert_eq!(code, Some(1));
+    assert_eq!(sarif_schema_errors(&log), Vec::<String>::new());
+
+    assert_eq!(log["version"], "2.1.0");
+    let run = &log["runs"][0];
+    let driver = &run["tool"]["driver"];
+    assert_eq!(driver["name"], "kv-cli");
+    assert_eq!(driver["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        driver["informationUri"],
+        "https://github.com/kovallent/kv-cli"
+    );
+    assert_eq!(run["properties"]["scope"], payload["run"]["scope"]);
+    assert_eq!(
+        run["properties"]["contract_sha256"],
+        payload["run"]["contract_sha256"]
+    );
+    assert_eq!(
+        run["properties"]["contract_path"],
+        payload["run"]["contract_path"]
+    );
+    assert_eq!(
+        run["properties"]["schema_version"],
+        payload["run"]["schema_version"]
+    );
+}
+
+/// Each rule is described with the text `kv-cli explain` prints, no new
+/// wording, and within the 1,024 characters GitHub allows for descriptions.
+#[test]
+fn sarif_rules_use_the_explain_text() {
+    let (_, log) = sarif_of(&["audit", "samples/deploy.py", "--format", "sarif"]);
+    let rules = log["runs"][0]["tool"]["driver"]["rules"]
+        .as_array()
+        .unwrap();
+    let (_, list) = repo_run(&["explain", "--no-color"]);
+    let ids: Vec<&str> = rules.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["KV001", "KV002", "KV003"]);
+    for rule in rules {
+        let id = rule["id"].as_str().unwrap();
+        let (_, page) = repo_run(&["explain", id]);
+        let title = rule["shortDescription"]["text"].as_str().unwrap();
+        assert!(list.contains(&format!("{id}  {title}\n")), "{id}: {title}");
+        assert_eq!(rule["help"]["text"], page.as_str());
+        assert_eq!(rule["help"]["markdown"], page.as_str());
+        let full = rule["fullDescription"]["text"].as_str().unwrap();
+        let flat = page.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(full), "{id}: fullDescription is page text");
+        assert!(title.len() <= 1024 && full.len() <= 1024, "{id}");
+    }
+}
+
+/// A result's `partialFingerprints` is its finding's fingerprint, and the
+/// rest of the result is copied from the same finding.
+#[test]
+fn sarif_fingerprints_equal_the_json_fingerprints() {
+    let (_, log) = sarif_of(&["audit", "samples/", "--format", "sarif"]);
+    let (_, out) = repo_run(&["audit", "samples/", "--format", "json"]);
+    let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let results = log["runs"][0]["results"].as_array().unwrap();
+    let findings = payload["findings"].as_array().unwrap();
+    assert_eq!(results.len(), findings.len());
+    assert!(!results.is_empty());
+    for (r, f) in results.iter().zip(findings) {
+        assert_eq!(r["partialFingerprints"]["kovallent/v1"], f["fingerprint"]);
+        assert_eq!(r["ruleId"], f["code"]);
+        assert_eq!(r["level"], f["severity"], "intrinsic severity: {f:#}");
+        assert_eq!(r["message"]["text"], f["message"]);
+        let loc = &r["locations"][0]["physicalLocation"];
+        assert_eq!(loc["artifactLocation"]["uri"], f["path"]);
+        assert_eq!(loc["region"]["startLine"], f["line"]);
+        let p = &r["properties"];
+        for key in ["symbol", "subject", "detail", "framework", "report_only"] {
+            assert_eq!(p.get(key), f.get(key), "{key}: {f:#}");
+        }
+    }
+    // `--strict` changes what gates, not any level.
+    let (_, strict) = sarif_of(&["audit", "samples/", "--format", "sarif", "--strict"]);
+    assert_eq!(strict["runs"][0]["results"], log["runs"][0]["results"]);
+}
+
+/// The value of every KV002 finding in `samples/deploy.py` is absent from the
+/// SARIF log. Each literal is located from the redacted detail - its first
+/// two characters and its length - so the test checks the secret itself,
+/// not the key name the log is meant to carry.
+///
+/// The search covers the whole log except the rules' `help`, which is the
+/// rule pages verbatim: `docs/rules/KV002.md` happens to use one of the same
+/// example values, `abcd1234efgh`, to show a suppressed line.
+#[test]
+fn sarif_never_contains_a_kv002_literal() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(repo.join("samples/deploy.py")).unwrap();
+    let lines: Vec<&str> = source.lines().collect();
+    let (_, raw) = repo_run(&["audit", "samples/deploy.py", "--format", "sarif"]);
+    let log: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let mut without_docs = log.clone();
+    for rule in without_docs["runs"][0]["tool"]["driver"]["rules"]
+        .as_array_mut()
+        .unwrap()
+    {
+        rule.as_object_mut().unwrap().remove("help");
+    }
+    let stdout = serde_json::to_string_pretty(&without_docs).unwrap();
+
+    let mut checked = 0;
+    for r in log["runs"][0]["results"].as_array().unwrap() {
+        if r["ruleId"] != "KV002" {
+            continue;
+        }
+        // `value "s3…" (<redacted>, 20 chars) - ...`
+        let detail = r["properties"]["detail"].as_str().unwrap();
+        assert!(detail.contains("<redacted>"), "{detail}");
+        let prefix: String = detail.split('"').nth(1).unwrap().chars().take(2).collect();
+        let len: usize = detail
+            .split("<redacted>, ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap();
+        let line = r["locations"][0]["physicalLocation"]["region"]["startLine"]
+            .as_u64()
+            .unwrap() as usize;
+        let literal = lines[line - 1]
+            .split(['"', '\''])
+            .find(|s| s.starts_with(&prefix) && s.chars().count() == len)
+            .unwrap_or_else(|| panic!("no {len}-char {prefix}… literal on line {line}"));
+        assert!(
+            !stdout.contains(literal),
+            "line {line}: the literal leaked into SARIF"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 7,
+        "deploy.py has seven KV002 literals; checked {checked}"
+    );
+}
+
+/// Golden: `samples/deploy.py` as SARIF, byte for byte apart from the tool
+/// version (the driver's `version` and each rule's `helpUri`), so the file
+/// survives a release. `KV_GOLDEN_BLESS=1` rewrites it after an intended
+/// change - review the diff.
+#[test]
+fn sarif_for_deploy_py_is_golden() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let golden_path = repo.join("tests/fixtures/deploy.py.sarif");
+    let (code, stdout) = repo_run(&["audit", "samples/deploy.py", "--format", "sarif"]);
+    assert_eq!(code, Some(1));
+    if std::env::var_os("KV_GOLDEN_BLESS").is_some() {
+        std::fs::write(&golden_path, &stdout).unwrap();
+    }
+    let golden = std::fs::read_to_string(&golden_path).expect("golden file");
+    let golden_version = serde_json::from_str::<serde_json::Value>(&golden).unwrap()["runs"][0]
+        ["tool"]["driver"]["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let current = env!("CARGO_PKG_VERSION");
+    let normalized = stdout
+        .replace(
+            &format!("\"version\": \"{current}\""),
+            &format!("\"version\": \"{golden_version}\""),
+        )
+        .replace(
+            &format!("/blob/v{current}/"),
+            &format!("/blob/v{golden_version}/"),
+        );
+    assert_eq!(
+        normalized, golden,
+        "rerun with KV_GOLDEN_BLESS=1 if intended"
+    );
+}
+
+/// Contract drift still exits 3, whatever the format, and the log is valid.
+#[test]
+fn a_drift_run_exits_3_with_valid_sarif() {
+    let (code, log) = sarif_of(&[
+        "audit",
+        "samples/deploy.py",
+        "--format",
+        "sarif",
+        "--expect-contract",
+        "0000000000000000",
+    ]);
+    assert_eq!(code, Some(3));
+    assert_eq!(sarif_schema_errors(&log), Vec::<String>::new());
+    assert!(!log["runs"][0]["results"].as_array().unwrap().is_empty());
+}
+
+/// A file kv-cli could not fully analyse is a notification, never silence.
+#[test]
+fn a_skipped_file_is_a_sarif_notification() {
+    let dir = tempdir("sarif-skip");
+    write(&dir, "broken.py", "def broken(:\n    pass\n");
+    let out = Command::new(bin())
+        .args(["audit", ".", "--format", "sarif"])
+        .current_dir(&dir)
+        .output()
+        .expect("kv-cli runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a syntax-error skip does not gate"
+    );
+    let log: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(sarif_schema_errors(&log), Vec::<String>::new());
+    let notes = log["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+        .as_array()
+        .unwrap();
+    assert_eq!(notes.len(), 1, "{log:#}");
+    assert_eq!(notes[0]["level"], "warning");
+    assert_eq!(notes[0]["properties"]["reason"], "syntax_error");
+    assert_eq!(
+        notes[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "broken.py"
+    );
+    assert_eq!(
+        notes[0]["message"]["text"],
+        "audited on a partial parse; some findings may be hidden"
+    );
+}
