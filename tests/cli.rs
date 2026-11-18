@@ -1159,6 +1159,43 @@ fn explain_prints_the_rule_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every `docs/rules/*.md` is compiled into the binary with LF line endings
+/// only, whatever platform built it. `include_str!` embeds the checkout's
+/// bytes, so a CRLF checkout (Git's `core.autocrlf` on Windows) would give a
+/// Windows release different `explain` and SARIF help text from every other
+/// build. `.gitattributes` prevents that; this catches it if it stops.
+#[test]
+fn embedded_rule_pages_have_no_carriage_returns() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut codes: Vec<String> = std::fs::read_dir(repo.join("docs/rules"))
+        .expect("docs/rules exists")
+        .map(|entry| entry.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
+        .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+        .collect();
+    codes.sort();
+    assert!(codes.len() >= 3, "rule pages found: {codes:?}");
+
+    for code in &codes {
+        // Raw stdout bytes: `explain` prints the embedded page as is.
+        let out = Command::new(bin())
+            .args(["explain", code])
+            .output()
+            .expect("kv-cli runs");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "docs/rules/{code}.md is not compiled into the binary"
+        );
+        assert!(!out.stdout.is_empty(), "explain {code} printed nothing");
+        assert!(
+            !out.stdout.contains(&b'\r'),
+            "the binary's copy of docs/rules/{code}.md contains \\r: \
+             is it checked out with CRLF? See .gitattributes"
+        );
+    }
+}
+
 /// A run with findings points at `explain` for the lowest code it reported.
 #[test]
 fn findings_point_to_explain() {
