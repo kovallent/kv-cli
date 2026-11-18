@@ -10,6 +10,7 @@
 //! could not explain, simple assignments are read from the text (see
 //! [`recover_bindings`]). `fix` never rewrites such a file.
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 use tree_sitter::{Node, Parser};
 
@@ -137,6 +138,68 @@ pub struct Imports {
     /// Root module name of every import, e.g. `snowflake` for
     /// `from snowflake.snowpark import Session`. Used to detect frameworks.
     pub modules: Vec<String>,
+    /// Every name an import binds, at any depth - inside `try:` or a function
+    /// too - with the module it comes from. Used to tell a framework's
+    /// decorator from one that merely shares its name.
+    pub names: Vec<ImportedName>,
+}
+
+/// A name an import statement binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedName {
+    /// The name as the file uses it: `F` for `import pyspark.sql.functions as
+    /// F`, `pyspark` for `import pyspark.sql.functions`, `table` for `from dlt
+    /// import table`.
+    pub local: String,
+    /// The module it comes from: `pyspark.sql.functions`, `pyspark.sql`,
+    /// `dlt`. A relative import keeps its leading dots (`.helpers`, `.`).
+    pub module: String,
+}
+
+/// Where a name used in a file comes from, as far as the file itself says.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NameOrigin<'a> {
+    /// Bound by one or more imports, from these modules. An import wins over
+    /// a definition of the same name, as in a `try: from dlt import table` /
+    /// `except ImportError: table = None` fallback.
+    Imported(Vec<&'a str>),
+    /// Bound by a `def`, a `class` or an assignment in the file.
+    Defined,
+    /// Bound nowhere in the file. A star import may supply it.
+    Unbound,
+}
+
+/// What a file binds its names to: its imports, and what it defines itself.
+/// Owned, so a per-file context can keep it after the analysis is gone.
+#[derive(Debug, Clone, Default)]
+pub struct Names {
+    imported: Vec<ImportedName>,
+    defined: BTreeSet<String>,
+}
+
+impl Names {
+    pub fn of(a: &Analysis) -> Self {
+        Self {
+            imported: a.imports.names.clone(),
+            defined: a.defined.clone(),
+        }
+    }
+
+    pub fn origin(&self, name: &str) -> NameOrigin<'_> {
+        let modules: Vec<&str> = self
+            .imported
+            .iter()
+            .filter(|i| i.local == name)
+            .map(|i| i.module.as_str())
+            .collect();
+        if !modules.is_empty() {
+            NameOrigin::Imported(modules)
+        } else if self.defined.contains(name) {
+            NameOrigin::Defined
+        } else {
+            NameOrigin::Unbound
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +207,8 @@ pub struct Analysis {
     pub functions: Vec<FunctionDef>,
     pub bindings: Vec<Binding>,
     pub imports: Imports,
+    /// Every name a `def`, a `class` or an assignment binds, at any depth.
+    pub defined: BTreeSet<String>,
     /// True when tree-sitter recovered from a syntax error. Findings are still
     /// reported, but the file is never rewritten.
     pub has_error: bool,
@@ -398,6 +463,7 @@ pub fn analyze(source: &str) -> Analysis {
         functions: Vec::new(),
         bindings: Vec::new(),
         imports: Imports::default(),
+        defined: BTreeSet::new(),
         has_error: false,
         comments: Vec::new(),
         concatenations: Vec::new(),
@@ -427,18 +493,24 @@ pub fn analyze(source: &str) -> Analysis {
         bindings: Vec::new(),
         comments: Vec::new(),
         concatenations: Vec::new(),
+        imported: Vec::new(),
+        defined: BTreeSet::new(),
     };
     let root = tree.root_node();
     walk(root, &mut ctx);
-    let imports = scan_imports(root, &ctx);
+    let mut imports = scan_imports(root, &ctx);
 
     let Ctx {
         mut functions,
         mut bindings,
         mut comments,
         concatenations,
+        imported,
+        defined,
         ..
     } = ctx;
+    imports.names = imported;
+    analysis.defined = defined;
     if analysis.has_error {
         recover_bindings(source, root, &analysis.line_starts, &mut bindings);
     }
@@ -542,6 +614,8 @@ struct Ctx<'a> {
     bindings: Vec<Binding>,
     comments: Vec<Range<usize>>,
     concatenations: Vec<StringLiteral>,
+    imported: Vec<ImportedName>,
+    defined: BTreeSet<String>,
 }
 
 impl Ctx<'_> {
@@ -590,11 +664,17 @@ fn visit(node: Node, ctx: &mut Ctx) {
     match node.kind() {
         "comment" => ctx.comments.push(node.byte_range()),
         "function_definition" => {
+            define_name(node.child_by_field_name("name"), ctx);
             if let Some(f) = function_def(node, ctx) {
                 ctx.functions.push(f);
             }
         }
-        "assignment" => collect_assignment(node, ctx),
+        "class_definition" => define_name(node.child_by_field_name("name"), ctx),
+        "import_statement" | "import_from_statement" => collect_imported_names(node, ctx),
+        "assignment" => {
+            define_targets(node.child_by_field_name("left"), ctx);
+            collect_assignment(node, ctx)
+        }
         "augmented_assignment" => bind(
             node.child_by_field_name("left"),
             node.child_by_field_name("right"),
@@ -634,6 +714,83 @@ fn visit(node: Node, ctx: &mut Ctx) {
         ),
         _ => {}
     }
+}
+
+fn define_name(name: Option<Node>, ctx: &mut Ctx) {
+    if let Some(n) = name.filter(|n| n.kind() == "identifier") {
+        ctx.defined.insert(ctx.text(n).to_string());
+    }
+}
+
+/// The names an assignment's left side binds: `x`, and each of `a, b` or
+/// `(a, b)`. An attribute or subscript (`app.x`, `d["k"]`) binds no name.
+fn define_targets(left: Option<Node>, ctx: &mut Ctx) {
+    let Some(left) = left else { return };
+    let mut stack = vec![left];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" => {
+                ctx.defined.insert(ctx.text(n).to_string());
+            }
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "expression_list" | "tuple" => {
+                stack.extend(named_children(n));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Record the names an `import` or `from ... import` statement binds. A star
+/// import binds names the file cannot see, so it records none.
+fn collect_imported_names(node: Node, ctx: &mut Ctx) {
+    // (local name, module)
+    let mut found: Vec<(&str, &str)> = Vec::new();
+    if node.kind() == "import_statement" {
+        for child in named_children(node) {
+            match child.kind() {
+                // `import pyspark.sql.functions` binds `pyspark`.
+                "dotted_name" => {
+                    let module = ctx.text(child);
+                    found.push((module.split('.').next().unwrap_or(""), module));
+                }
+                // `import pyspark.sql.functions as F` binds `F`.
+                "aliased_import" => {
+                    if let (Some(name), Some(alias)) = (
+                        child.child_by_field_name("name"),
+                        child.child_by_field_name("alias"),
+                    ) {
+                        found.push((ctx.text(alias), ctx.text(name)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(module) = node.child_by_field_name("module_name") {
+        let module = ctx.text(module);
+        let mut cursor = node.walk();
+        for name in node.children_by_field_name("name", &mut cursor) {
+            match name.kind() {
+                // `from dlt import table` binds `table`.
+                "dotted_name" => found.push((ctx.text(name), module)),
+                // `from pyspark.sql import functions as F` binds `F`.
+                "aliased_import" => {
+                    if let Some(alias) = name.child_by_field_name("alias") {
+                        found.push((ctx.text(alias), module));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let names: Vec<ImportedName> = found
+        .into_iter()
+        .filter(|(local, module)| !local.is_empty() && !module.is_empty())
+        .map(|(local, module)| ImportedName {
+            local: local.to_string(),
+            module: module.to_string(),
+        })
+        .collect();
+    ctx.imported.extend(names);
 }
 
 fn is_sequence(node: Node) -> bool {
@@ -1054,6 +1211,55 @@ mod tests {
         // The lambda's own parameters must not leak into the signature.
         assert!(!a.functions[0].has_param("x"));
         assert!(a.functions[0].has_param("d"));
+    }
+
+    #[test]
+    fn imported_names_record_their_module_and_alias() {
+        let src = "import pyspark.sql.functions as F\n\
+                   import dlt, os.path\n\
+                   from pyspark.sql import functions as G, Row\n\
+                   from . import helpers\n\
+                   from .decorators import view as v\n\
+                   from airflow.decorators import *\n\
+                   def f():\n    from snowflake.snowpark.functions import udf\n";
+        let n = Names::of(&analyze(src));
+        let modules = |name| match n.origin(name) {
+            NameOrigin::Imported(m) => m,
+            other => panic!("{name}: {other:?}"),
+        };
+        assert_eq!(modules("F"), vec!["pyspark.sql.functions"]);
+        assert_eq!(modules("dlt"), vec!["dlt"]);
+        // `import os.path` binds `os`.
+        assert_eq!(modules("os"), vec!["os.path"]);
+        assert_eq!(modules("G"), vec!["pyspark.sql"]);
+        assert_eq!(modules("Row"), vec!["pyspark.sql"]);
+        assert_eq!(modules("helpers"), vec!["."]);
+        assert_eq!(modules("v"), vec![".decorators"]);
+        // An import inside a function binds too.
+        assert_eq!(modules("udf"), vec!["snowflake.snowpark.functions"]);
+        // An aliased import binds the alias, not the original name.
+        assert_eq!(n.origin("functions"), NameOrigin::Unbound);
+        assert_eq!(n.origin("view"), NameOrigin::Unbound);
+        // A star import binds nothing the file can see.
+        assert_eq!(n.origin("task"), NameOrigin::Unbound);
+    }
+
+    #[test]
+    fn defined_names_come_from_defs_classes_and_assignments() {
+        let src = "def table(f):\n    return f\n\
+                   class view:\n    pass\n\
+                   app = make_app()\n\
+                   a, (b, c) = 1, (2, 3)\n\
+                   settings.flag = True\n\
+                   cfg[\"k\"] = 1\n";
+        let n = Names::of(&analyze(src));
+        for name in ["table", "view", "app", "a", "b", "c"] {
+            assert_eq!(n.origin(name), NameOrigin::Defined, "{name}");
+        }
+        // An attribute or subscript target binds no name.
+        assert_eq!(n.origin("settings"), NameOrigin::Unbound);
+        assert_eq!(n.origin("cfg"), NameOrigin::Unbound);
+        assert_eq!(n.origin("flag"), NameOrigin::Unbound);
     }
 
     #[test]

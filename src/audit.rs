@@ -380,17 +380,19 @@ impl Engine {
 
     /// Per-file view carrying the framework profiles that apply to it.
     pub fn context(&self, a: &Analysis) -> FileContext<'_> {
+        let names = python::Names::of(a);
         let active = self
             .frameworks
             .iter()
             .filter(|f| match self.explicitly_enabled(f) {
                 Some(decided) => decided,
-                None => self.contract.frameworks.is_auto() && f.profile.detected(a),
+                None => self.contract.frameworks.is_auto() && f.profile.detected(a, &names),
             })
             .collect();
         FileContext {
             engine: self,
             active,
+            names,
         }
     }
 
@@ -421,6 +423,7 @@ impl Engine {
         FileContext {
             engine: self,
             active,
+            names: python::Names::default(),
         }
     }
 
@@ -646,6 +649,9 @@ impl Engine {
 pub struct FileContext<'e> {
     engine: &'e Engine,
     active: Vec<&'e CompiledFramework>,
+    /// What the file binds each name to, so a framework's decorator is told
+    /// apart from one that merely shares its name.
+    names: python::Names,
 }
 
 impl FileContext<'_> {
@@ -751,7 +757,7 @@ impl FileContext<'_> {
             }
         }
         self.active.iter().find_map(|c| {
-            let d = c.profile.governing_decorator(f)?;
+            let d = c.profile.governing_decorator(f, &self.names)?;
             let note = if c.profile.governed_auto_fix {
                 ""
             } else {
@@ -788,7 +794,7 @@ impl FileContext<'_> {
     pub fn no_auto_fix_framework(&self, f: &FunctionDef) -> Option<&'static str> {
         self.active
             .iter()
-            .find(|c| !c.profile.governed_auto_fix && c.profile.governs_signature(f))
+            .find(|c| !c.profile.governed_auto_fix && c.profile.governs_signature(f, &self.names))
             .map(|c| c.profile.name)
     }
 
@@ -796,7 +802,7 @@ impl FileContext<'_> {
     pub fn governing_framework(&self, f: &FunctionDef) -> Option<&'static str> {
         self.active
             .iter()
-            .find(|c| c.profile.governs_signature(f))
+            .find(|c| c.profile.governs_signature(f, &self.names))
             .map(|c| c.profile.name)
     }
 
@@ -804,7 +810,7 @@ impl FileContext<'_> {
     pub fn owning_framework(&self, f: &FunctionDef) -> Option<&'static str> {
         self.active
             .iter()
-            .find(|c| c.profile.owns_signature(f))
+            .find(|c| c.profile.owns_signature(f, &self.names))
             .map(|c| c.profile.name)
     }
 
@@ -856,6 +862,14 @@ impl FileContext<'_> {
     pub fn flagged_infra<'a>(&self, source: &str, a: &'a Analysis) -> Vec<&'a Binding> {
         let cfg = &self.engine.contract.infrastructure;
         if !cfg.enabled {
+            return Vec::new();
+        }
+        // With no framework profile applied, the only key rules left are the
+        // contract's `key_patterns`, which by default wait for a framework:
+        // `warehouse` in a file that uses none is as likely a CLI option as a
+        // deployment target. Value patterns are matched in `check_infra` and
+        // still apply here.
+        if cfg.global_key_patterns_require_framework && self.active.is_empty() {
             return Vec::new();
         }
         let secrets: HashSet<usize> = self
@@ -1831,14 +1845,143 @@ mod tests {
             "from snowflake.snowpark import Session\ncfg = {\"warehouse\": \"PROD_WH\"}\n";
         assert!(codes(with_snowpark).contains(&CODE_HARDCODED_INFRA));
 
-        let without = "cfg = {\"warehouse\": \"PROD_WH\"}\n";
-        assert!(codes(without).contains(&CODE_HARDCODED_INFRA));
-
         // `role` is Snowpark-only and not in the global infra keys.
         let with_snowpark =
             "from snowflake.snowpark import Session\ncfg = {\"role\": \"SYSADMIN\"}\n";
         assert!(codes(with_snowpark).contains(&CODE_HARDCODED_INFRA));
         assert!(!codes("cfg = {\"role\": \"SYSADMIN\"}\n").contains(&CODE_HARDCODED_INFRA));
+    }
+
+    fn kv003(contract: Contract, src: &str) -> Vec<Finding> {
+        let e = Engine::new(contract).unwrap();
+        let a = python::analyze(src);
+        e.context(&a)
+            .audit("t.py", src, &a)
+            .into_iter()
+            .filter(|f| f.code == CODE_HARDCODED_INFRA)
+            .collect()
+    }
+
+    /// The contract's own key patterns wait for a framework by default: in a
+    /// file that imports none, `warehouse` is as likely a CLI option as a
+    /// deployment target. The opt-out restores 0.9.0's behaviour.
+    #[test]
+    fn global_key_patterns_wait_for_a_framework() {
+        let plain = "warehouse = \"PROD_WH\"\n";
+        assert!(kv003(Contract::default(), plain).is_empty());
+
+        let snowflake = "import snowflake.connector\nwarehouse = \"PROD_WH\"\n";
+        let f = kv003(Contract::default(), snowflake);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].symbol, "warehouse");
+
+        let opt_out = Contract::from_yaml(
+            "version: 1\ninfrastructure:\n  global_key_patterns_require_framework: false\n",
+        )
+        .unwrap();
+        let f = kv003(opt_out, plain);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].symbol, "warehouse");
+        assert_eq!(f[0].subject, "key_pattern");
+    }
+
+    /// Value patterns are not key patterns: they apply in every Python file.
+    /// A `bucket` holding an object-store URI is still reported, by the URI.
+    #[test]
+    fn value_patterns_apply_without_a_framework() {
+        let f = kv003(
+            Contract::default(),
+            "df.write.parquet(\"s3://acme-prod-orders/\")\n",
+        );
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].subject, "object_store_uri");
+
+        let f = kv003(Contract::default(), "bucket = \"s3://acme-prod-orders/\"\n");
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].subject, "object_store_uri");
+    }
+
+    /// The opt-out is part of the contract only when it is not the default:
+    /// the built-in contract serializes as it did before the field existed,
+    /// so its fingerprint - which every repository on the defaults pins -
+    /// does not move, and writing the default out changes nothing either.
+    #[test]
+    fn the_framework_opt_out_moves_the_fingerprint_only_when_set() {
+        let default = Contract::default();
+        assert_eq!(default.fingerprint(), "a6edcff00199c1cf");
+        let yaml = serde_yaml::to_string(&default).unwrap();
+        assert!(
+            !yaml.contains("global_key_patterns_require_framework"),
+            "{yaml}"
+        );
+
+        let explicit = Contract::from_yaml(
+            "version: 1\ninfrastructure:\n  global_key_patterns_require_framework: true\n",
+        )
+        .unwrap();
+        assert_eq!(explicit.fingerprint(), default.fingerprint());
+
+        let opt_out = Contract::from_yaml(
+            "version: 1\ninfrastructure:\n  global_key_patterns_require_framework: false\n",
+        )
+        .unwrap();
+        assert_ne!(opt_out.fingerprint(), default.fingerprint());
+    }
+
+    /// A framework's bare decorator exempts its function only when the file
+    /// imports it from that framework.
+    #[test]
+    fn owned_decorators_must_come_from_the_framework() {
+        // Imported from dlt: Delta Live Tables calls it. Exempt.
+        let dlt = "from dlt import table\n\n@table\ndef run_daily():\n    pass\n";
+        assert!(!codes(dlt).contains(&CODE_MISSING_PARAM));
+
+        // Through a module alias. Exempt.
+        let alias = "import pyspark.sql.functions as F\n\n@F.pandas_udf(\"long\")\ndef run_scores(s):\n    return s\n";
+        assert!(!codes(alias).contains(&CODE_MISSING_PARAM));
+
+        // Flask's `@app.view`, with and without PySpark in the same file.
+        for prelude in ["", "import pyspark\n"] {
+            let flask = format!(
+                "{prelude}from flask import Flask\napp = Flask(__name__)\n\n@app.view\ndef run_daily():\n    pass\n"
+            );
+            let f = run(&flask);
+            assert!(
+                f.iter().any(|x| x.code == CODE_MISSING_PARAM),
+                "{flask}\n{f:#?}"
+            );
+        }
+
+        // A locally defined `table` decorator.
+        for prelude in ["", "import dlt\n"] {
+            let local = format!(
+                "{prelude}def table(f):\n    return f\n\n@table\ndef run_daily():\n    pass\n"
+            );
+            let f = run(&local);
+            assert!(
+                f.iter().any(|x| x.code == CODE_MISSING_PARAM),
+                "{local}\n{f:#?}"
+            );
+        }
+    }
+
+    /// The same rule decides which `@task` the Airflow profile governs.
+    #[test]
+    fn governed_decorators_must_come_from_the_framework() {
+        let e = engine();
+        let check = |src: &str| {
+            let a = python::analyze(src);
+            let ctx = e.context(&a);
+            ctx.governing_framework(a.functions.last().unwrap())
+        };
+        assert_eq!(
+            check("from airflow.decorators import task\n@task\ndef extract():\n    pass\n"),
+            Some("airflow")
+        );
+        assert_eq!(
+            check("import airflow\nfrom celery import shared_task as task\n@task\ndef extract():\n    pass\n"),
+            None
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! Scoping matters: `*account*` or `*warehouse*` would be noisy as global
 //! rules, but in a file that imports `snowflake` they are precise.
 
-use crate::python::{Analysis, FunctionDef};
+use crate::python::{Analysis, FunctionDef, NameOrigin, Names};
 
 pub struct FrameworkProfile {
     pub name: &'static str,
@@ -202,8 +202,9 @@ pub fn by_name(name: &str) -> Option<&'static FrameworkProfile> {
 }
 
 impl FrameworkProfile {
-    /// Is this framework in use in the analysed file?
-    pub fn detected(&self, a: &Analysis) -> bool {
+    /// Is this framework in use in the analysed file? `names` is what the
+    /// file binds, from [`Names::of`] on the same analysis.
+    pub fn detected(&self, a: &Analysis, names: &Names) -> bool {
         if self
             .detect_imports
             .iter()
@@ -212,16 +213,15 @@ impl FrameworkProfile {
             return true;
         }
         // dbt injects `dbt` and `session`; nothing is imported.
-        a.functions.iter().any(|f| self.owns_signature(f))
+        a.functions.iter().any(|f| self.owns_signature(f, names))
     }
 
     /// Does the framework control this function's signature?
-    pub fn owns_signature(&self, f: &FunctionDef) -> bool {
-        if f.decorators.iter().any(|d| {
-            self.owned_decorators
-                .iter()
-                .any(|owned| d == owned || d.rsplit('.').next().is_some_and(|last| last == *owned))
-        }) {
+    pub fn owns_signature(&self, f: &FunctionDef, names: &Names) -> bool {
+        if f.decorators
+            .iter()
+            .any(|d| self.provides(d, self.owned_decorators, names))
+        {
             return true;
         }
         self.owned_signatures.iter().any(|(name, leading)| {
@@ -235,31 +235,55 @@ impl FrameworkProfile {
     }
 
     /// Does the framework put this function under the parameter contract?
-    pub fn governs_signature(&self, f: &FunctionDef) -> bool {
-        decorator_matches(f, self.governed_decorators)
+    pub fn governs_signature(&self, f: &FunctionDef, names: &Names) -> bool {
+        self.governing_decorator(f, names).is_some()
     }
 
     /// The decorator, as written, by which this framework governs `f`.
-    pub fn governing_decorator<'f>(&self, f: &'f FunctionDef) -> Option<&'f str> {
+    pub fn governing_decorator<'f>(&self, f: &'f FunctionDef, names: &Names) -> Option<&'f str> {
         f.decorators
             .iter()
-            .find(|d| {
-                self.governed_decorators.iter().any(|want| {
-                    d.as_str() == *want || d.rsplit('.').next().is_some_and(|last| last == *want)
-                })
-            })
+            .find(|d| self.provides(d, self.governed_decorators, names))
             .map(String::as_str)
     }
-}
 
-/// Match a decorator by full dotted path or by its final segment, so `task`
-/// matches both `@task` and `@airflow.decorators.task`.
-fn decorator_matches(f: &FunctionDef, names: &[&str]) -> bool {
-    f.decorators.iter().any(|d| {
-        names
+    /// Is `d`, a decorator as written, one of `listed`, and does it come from
+    /// this framework?
+    ///
+    /// By name, `listed` matches the full dotted path or its final segment, so
+    /// `task` matches `@task` and `@airflow.decorators.task`. That alone let
+    /// `@table` match Flask's `@app.view`-style decorators and locally defined
+    /// ones, and an owned decorator exempts its function from KV001 silently.
+    /// So the decorator's root name must also come from the framework:
+    ///
+    /// - imported from a module this profile detects (`from dlt import table`,
+    ///   or `import pyspark.sql.functions as F` for `@F.pandas_udf`): matches;
+    /// - imported from anywhere else, or defined in the file: no match;
+    /// - bound nowhere in the file: matches by name alone, as before. Such
+    ///   code cannot run, short of a star import.
+    fn provides(&self, d: &str, listed: &[&str], names: &Names) -> bool {
+        let by_name = listed
             .iter()
-            .any(|want| d == want || d.rsplit('.').next().is_some_and(|last| last == *want))
-    })
+            .any(|want| d == *want || d.rsplit('.').next().is_some_and(|last| last == *want));
+        if !by_name {
+            return false;
+        }
+        let root = d.split('.').next().unwrap_or(d);
+        match names.origin(root) {
+            NameOrigin::Imported(modules) => modules.iter().any(|m| self.is_own_module(m)),
+            NameOrigin::Defined => false,
+            NameOrigin::Unbound => true,
+        }
+    }
+
+    /// Is `module` one this profile detects, by its root (`pyspark` for
+    /// `pyspark.sql.functions`)? A relative import never is.
+    fn is_own_module(&self, module: &str) -> bool {
+        !module.starts_with('.')
+            && self
+                .detect_imports
+                .contains(&module.split('.').next().unwrap_or(""))
+    }
 }
 
 #[cfg(test)]
@@ -277,44 +301,166 @@ mod tests {
         }
     }
 
+    fn detected(profile: &str, src: &str) -> bool {
+        let a = analyze(src);
+        by_name(profile).unwrap().detected(&a, &Names::of(&a))
+    }
+
+    /// Does `profile` own the signature of the last function in `src`?
+    fn owns(profile: &str, src: &str) -> bool {
+        let a = analyze(src);
+        let f = a.functions.last().expect("a function");
+        by_name(profile).unwrap().owns_signature(f, &Names::of(&a))
+    }
+
+    /// Does `profile` govern the last function in `src`?
+    fn governs(profile: &str, src: &str) -> bool {
+        let a = analyze(src);
+        let f = a.functions.last().expect("a function");
+        by_name(profile)
+            .unwrap()
+            .governs_signature(f, &Names::of(&a))
+    }
+
     #[test]
     fn detects_by_import() {
-        let a = analyze("import polars as pl\n");
-        assert!(by_name("polars").unwrap().detected(&a));
-        assert!(!by_name("flink").unwrap().detected(&a));
-
-        let a = analyze("from snowflake.snowpark import Session\n");
-        assert!(by_name("snowpark").unwrap().detected(&a));
+        assert!(detected("polars", "import polars as pl\n"));
+        assert!(!detected("flink", "import polars as pl\n"));
+        assert!(detected(
+            "snowpark",
+            "from snowflake.snowpark import Session\n"
+        ));
     }
 
     #[test]
     fn detects_dbt_by_signature_without_any_import() {
-        let a = analyze("def model(dbt, session):\n    return session.table(\"x\")\n");
-        assert!(by_name("dbt").unwrap().detected(&a));
-        assert!(by_name("dbt").unwrap().owns_signature(&a.functions[0]));
+        let src = "def model(dbt, session):\n    return session.table(\"x\")\n";
+        assert!(detected("dbt", src));
+        assert!(owns("dbt", src));
     }
 
     #[test]
     fn dbt_signature_must_match_exactly() {
         // A user function that merely happens to be called `model`.
-        let a = analyze("def model(x, y):\n    pass\n");
-        assert!(!by_name("dbt").unwrap().owns_signature(&a.functions[0]));
+        assert!(!owns("dbt", "def model(x, y):\n    pass\n"));
     }
 
     #[test]
     fn owned_decorators_match_bare_and_dotted() {
-        let a = analyze("@dlt.table\ndef daily_job():\n    pass\n");
-        assert!(by_name("databricks")
-            .unwrap()
-            .owns_signature(&a.functions[0]));
+        assert!(owns(
+            "databricks",
+            "import dlt\n@dlt.table\ndef daily_job():\n    pass\n"
+        ));
+        assert!(owns(
+            "databricks",
+            "from dlt import table\n@table\ndef daily_job():\n    pass\n"
+        ));
+        assert!(owns(
+            "flink",
+            "from pyflink.table import DataTypes, udf\n\
+             @udf(result_type=DataTypes.INT())\ndef run_calc(x):\n    pass\n"
+        ));
+    }
 
-        let a = analyze("from dlt import table\n@table\ndef daily_job():\n    pass\n");
-        assert!(by_name("databricks")
-            .unwrap()
-            .owns_signature(&a.functions[0]));
+    /// The root of a dotted decorator resolves through an alias.
+    #[test]
+    fn an_aliased_module_resolves() {
+        assert!(owns(
+            "databricks",
+            "import pyspark.sql.functions as F\n@F.pandas_udf(\"long\")\ndef run_x(s):\n    return s\n"
+        ));
+        assert!(owns(
+            "databricks",
+            "from pyspark.sql import functions as F\n@F.pandas_udf(\"long\")\ndef run_x(s):\n    return s\n"
+        ));
+        assert!(owns(
+            "databricks",
+            "import dlt as d\n@d.view\ndef run_x():\n    pass\n"
+        ));
+    }
 
-        let a = analyze("@udf(result_type=DataTypes.INT())\ndef run_calc(x):\n    pass\n");
-        assert!(by_name("flink").unwrap().owns_signature(&a.functions[0]));
+    /// A decorator that only shares an owned decorator's name exempts
+    /// nothing: imported from elsewhere, or defined in the file.
+    #[test]
+    fn a_name_from_elsewhere_or_defined_here_is_not_owned() {
+        // Flask: `app` is assigned in the file.
+        assert!(!owns(
+            "databricks",
+            "from flask import Flask\nimport pyspark\napp = Flask(__name__)\n\
+             @app.view\ndef run_x():\n    pass\n"
+        ));
+        // A local decorator called `table`.
+        assert!(!owns(
+            "databricks",
+            "import pyspark\ndef table(f):\n    return f\n@table\ndef run_x():\n    pass\n"
+        ));
+        // `table` imported, but not from a module the profile detects.
+        assert!(!owns(
+            "databricks",
+            "import pyspark\nfrom mylib.decorators import table\n@table\ndef run_x():\n    pass\n"
+        ));
+        // A relative import is never the framework's.
+        assert!(!owns(
+            "databricks",
+            "import pyspark\nfrom .decorators import view\n@view\ndef run_x():\n    pass\n"
+        ));
+        // Snowpark's `udf`, imported from PyFlink: Flink owns it, Snowpark not.
+        let src =
+            "import snowflake\nfrom pyflink.table import udf\n@udf\ndef run_x(a):\n    return a\n";
+        assert!(!owns("snowpark", src));
+        assert!(owns("flink", src));
+    }
+
+    /// An import wins over a fallback definition of the same name.
+    #[test]
+    fn an_import_wins_over_a_fallback_definition() {
+        assert!(owns(
+            "databricks",
+            "try:\n    from dlt import table\nexcept ImportError:\n    table = None\n\
+             @table\ndef run_x():\n    pass\n"
+        ));
+    }
+
+    /// A name bound nowhere in the file keeps the old match by name.
+    #[test]
+    fn an_unbound_name_still_matches_by_name() {
+        assert!(owns("databricks", "@table\ndef run_x():\n    pass\n"));
+        assert!(owns(
+            "databricks",
+            "from dlt import *\n@view\ndef run_x():\n    pass\n"
+        ));
+    }
+
+    /// Airflow's governed `@task` follows the same rule.
+    #[test]
+    fn governed_decorators_resolve_the_same_way() {
+        assert!(governs(
+            "airflow",
+            "from airflow.decorators import task\n@task\ndef extract():\n    pass\n"
+        ));
+        assert!(governs(
+            "airflow",
+            "import airflow.decorators as ad\n@ad.task\ndef extract():\n    pass\n"
+        ));
+        assert!(!governs(
+            "airflow",
+            "import airflow\nfrom celery import shared_task as task\n@task\ndef extract():\n    pass\n"
+        ));
+        assert!(!governs(
+            "airflow",
+            "import airflow\napp = make_app()\n@app.task\ndef extract():\n    pass\n"
+        ));
+        assert!(governs("airflow", "@task\ndef extract():\n    pass\n"));
+    }
+
+    /// Detection by owned decorator obeys the rule too: Flask's `@app.view`
+    /// does not make a file a Databricks file.
+    #[test]
+    fn a_borrowed_decorator_name_does_not_detect_a_framework() {
+        assert!(!detected(
+            "databricks",
+            "from flask import Flask\napp = Flask(__name__)\n@app.view\ndef index():\n    pass\n"
+        ));
     }
 
     #[test]

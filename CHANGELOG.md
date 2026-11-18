@@ -15,6 +15,47 @@ Nothing yet.
 
 ---
 
+## [0.10.0] — 2026-11-18
+
+Two precision fixes for a first run. **Contract fingerprints are unchanged,
+including the built-in default's (`a6edcff00199c1cf`), but findings can
+change**: the same contract now reports fewer KV003 findings in files that use
+no data framework, and can report KV001 on functions it used to exempt by
+mistake.
+
+### Changed
+
+- **KV003's name rule waits for a framework.** `infrastructure.key_patterns`,
+  by default `*warehouse*`, `*catalog*`, `*cluster_id*`, `*workspace_url*` and
+  `*bucket*` plus any you added, now applies only in Python files where a
+  framework profile is detected. In a file that imports no data framework,
+  `warehouse = "PROD_WH"` is no longer reported. Value patterns, such as
+  `s3://` URIs and JDBC URLs, still apply in every Python file, and each
+  profile's own key rules still apply where the profile is detected (Snowpark
+  adds `*warehouse*`, Databricks `*catalog*`, Polars `*bucket*`). The new
+  contract field `infrastructure.global_key_patterns_require_framework`
+  (default `true`) controls this; set it to `false` to keep 0.9.0's behaviour.
+  At its default the field is left out of the serialized contract, so no
+  fingerprint moves; set to `false`, it is part of the contract and changes the
+  fingerprint, so re-pin `--expect-contract`. `schema/contract.v1.json` and the
+  `kv-cli init` template include it.
+
+### Fixed
+
+- **A framework's decorator must come from the framework.** A decorator a
+  profile owns or governs (Databricks `@table`, `@view`, `@pandas_udf`; Flink
+  and Snowpark `@udf`; Airflow `@task` and others) used to match by its last
+  segment alone, so Flask's `@app.view` or a locally defined `@table` silently
+  exempted its function from KV001 and made the file count as a Databricks
+  file. It now matches only when the file imports it from a module the profile
+  detects: `from dlt import table`, or `import pyspark.sql.functions as F` for
+  `@F.pandas_udf`. A decorator imported from elsewhere or defined in the file
+  exempts nothing, so its function is checked as normal. A decorator whose
+  name the file never binds still matches by name, as before. No contract
+  field changes.
+
+---
+
 ## [0.9.0] — 2026-11-17
 
 A run names every file it checked, including the ones that passed, each with
@@ -1021,10 +1062,6 @@ recall.
 
 - `serde_yaml` is pinned at its final `0.9` release and is unmaintained
   upstream. `serde_norway` / `serde_yml` are drop-in replacements.
-- The `databricks` profile owns bare `@table`, `@view` and `@pandas_udf`, which
-  are generic enough to collide with unrelated decorators.
-- KV003's `*catalog*` / `*bucket*` / `*warehouse*` are global rather than
-  framework-scoped, and are the most likely source of first-run noise.
 - dbt SQL models are not parsed; dbt coverage is Python models plus YAML
   credentials.
 - The contract fingerprint is truncated to 64 bits — sized for change
