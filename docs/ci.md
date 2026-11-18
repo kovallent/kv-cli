@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.11.0
+      - uses: kovallent/kv-cli@v0.12.0
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -44,12 +44,12 @@ Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your cont
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@v0.11.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.12.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # v0.11.0
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.12.0
         with:
-          version: v0.11.0
+          version: v0.12.0
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 
@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.11.0
+      - uses: kovallent/kv-cli@v0.12.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 
@@ -146,7 +146,7 @@ jobs:
       # the step above already decided the job's result.
       - name: kv-cli SARIF
         if: always()
-        run: pipx run --spec kv-cli==0.11.0 kv-cli audit --format sarif > kv-cli.sarif || true
+        run: pipx run --spec kv-cli==0.12.0 kv-cli audit --format sarif > kv-cli.sarif || true
 
       - name: Upload to code scanning
         if: always()
@@ -160,7 +160,7 @@ jobs:
 
 What the log holds:
 
-- **One result per finding**, with the rule (`KV001`, `KV002`, `KV003`), the level from the finding's own severity (`--strict` does not change it, as in the JSON report), the message, and the file and line. A KV002 result carries the same redacted detail as the JSON report, never the value.
+- **One result per finding**, with the rule (`KV001` to `KV004`), the level from the finding's own severity (`--strict` does not change it, as in the JSON report), the message, and the file and line. A KV002 result carries the same redacted detail as the JSON report, never the value.
 - **`partialFingerprints`** holds the finding's fingerprint under `kovallent/v1`, equal to `fingerprint` in the JSON report: stable across commits, since it excludes the line number. GitHub does not use it: it tracks alerts with its own `primaryLocationLineHash`, which `upload-sarif` computes from the source. Other SARIF consumers can.
 - **The rules** are described with the same text as `kv-cli explain`.
 - **Files that were not fully analysed** (a syntax error, an unreadable file) are tool notifications, so a partial parse is never silent.
@@ -181,7 +181,7 @@ Release assets exist for Linux x64 and arm64 (glibc), macOS x64 and arm64, and W
 ```yaml
 # .gitlab-ci.yml
 include:
-  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.11.0
+  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.12.0
     inputs:
       # A group CI/CD variable: merge-request authors cannot edit it.
       expect-contract: $KOVALLENT_CONTRACT_SHA
@@ -215,7 +215,7 @@ To change the job, define a job of the same name: GitLab merges it with the comp
 version: 2.1
 
 orbs:
-  kv-cli: kovallent/kv-cli@0.11.0
+  kv-cli: kovallent/kv-cli@0.12.0
 
 workflows:
   kovallent:

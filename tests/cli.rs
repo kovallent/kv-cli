@@ -1731,7 +1731,7 @@ fn sarif_rules_use_the_explain_text() {
         .unwrap();
     let (_, list) = repo_run(&["explain", "--no-color"]);
     let ids: Vec<&str> = rules.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["KV001", "KV002", "KV003"]);
+    assert_eq!(ids, ["KV001", "KV002", "KV003", "KV004"]);
     for rule in rules {
         let id = rule["id"].as_str().unwrap();
         let (_, page) = repo_run(&["explain", id]);
@@ -2231,5 +2231,157 @@ fn ci_wrapper_script_verifies_sha256sums_and_passes_the_exit_code() {
         "downloaded before validating: {requests}"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- KV004: naming convention -----------------------------------------------
+
+const NAMING_CONTRACT: &str = "version: 1\nnaming:\n  rules:\n    - name: pipeline_functions\n      applies_to: in_scope\n      pattern: \"^[a-z][a-z0-9_]*$\"\n      message: \"pipeline entrypoints use snake_case\"\n";
+
+const NAMING_TASKS: &str = "from kovallent import task\n\n\n@task\ndef load_orders(target_environment: str = \"dev\", dry_run: bool = False):\n    return 1\n\n\n@task\ndef LoadOrders(target_environment: str = \"dev\", dry_run: bool = False):\n    return 2\n";
+
+/// The default contract has no naming rules, so `samples/` has no KV004.
+#[test]
+fn the_default_contract_reports_no_kv004_on_samples() {
+    let (code, stdout) = repo_run(&["audit", "samples/", "--format", "json"]);
+    assert_eq!(code, Some(1));
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = payload["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    assert!(findings.iter().all(|f| f["code"] != "KV004"));
+    assert_eq!(payload["run"]["contract_sha256"], "a6edcff00199c1cf");
+}
+
+/// One rule, end to end: the text line and its detail, the JSON finding,
+/// and `explain KV004`.
+#[test]
+fn a_naming_rule_reports_load_orders_in_text_and_json() {
+    let dir = tempdir("kv004");
+    write(&dir, ".kovallent.yaml", NAMING_CONTRACT);
+    write(&dir, "jobs.py", NAMING_TASKS);
+
+    let (code, stdout, _) = audit_streams(&dir, &["audit", ".", "--no-color"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "a warning does not gate without --strict\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "    10  warning  KV004  `LoadOrders` does not match naming rule `pipeline_functions`\n        name must match `^[a-z][a-z0-9_]*$`: pipeline entrypoints use snake_case\n"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("`load_orders`"), "{stdout}");
+
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(code, Some(0));
+    common::check_payload(&payload);
+    let findings = payload["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{payload:#}");
+    let f = &findings[0];
+    assert_eq!(f["code"], "KV004");
+    assert_eq!(f["symbol"], "LoadOrders");
+    assert_eq!(f["subject"], "pipeline_functions");
+    assert_eq!(f["kind"], "naming_convention");
+    assert!(f.get("report_only").is_none() && f.get("framework").is_none());
+
+    let (code, page, _) = audit_streams(&dir, &["explain", "KV004"]);
+    assert_eq!(code, Some(0));
+    assert!(page.starts_with("# KV004: naming convention\n"), "{page}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An invalid naming pattern makes the contract invalid, located to its line.
+#[test]
+fn an_invalid_naming_pattern_is_reported_with_its_line() {
+    let dir = tempdir("kv004-invalid");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nnaming:\n  rules:\n    - name: broken\n      pattern: '^[a-z'\n",
+    );
+    write(&dir, "jobs.py", NAMING_TASKS);
+    let (code, _, stderr) = audit_streams(&dir, &["audit", "."]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains(".kovallent.yaml:5: naming.rules[0].pattern: does not compile"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--strict` makes a KV004 warning gate exactly as it makes a KV003 one:
+/// neither gates without it, and each gates with it, on the same terms.
+#[test]
+fn strict_gates_kv004_exactly_as_it_gates_kv003() {
+    let kv003 = tempdir("strict-kv003");
+    write(
+        &kv003,
+        "jobs.py",
+        "def deploy_app(target_environment: str = \"dev\", dry_run: bool = False):\n    return \"s3://acme-prod-orders/\"\n",
+    );
+    let kv004 = tempdir("strict-kv004");
+    write(&kv004, ".kovallent.yaml", NAMING_CONTRACT);
+    write(&kv004, "jobs.py", NAMING_TASKS);
+
+    let outcome = |dir: &Path, strict: bool| {
+        let mut args = vec!["audit", ".", "--no-color"];
+        if strict {
+            args.push("--strict");
+        }
+        let (code, stdout, _) = audit_streams(dir, &args);
+        let verdict = stdout
+            .lines()
+            .find(|l| l.starts_with("PASS") || l.starts_with("FAIL"))
+            .unwrap_or_default()
+            .to_string();
+        let (_, payload) = run_json(dir, if strict { &["--strict"] } else { &[] });
+        let codes: Vec<String> = payload["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| format!("{} {}", f["code"], f["severity"]))
+            .collect();
+        (code, verdict, codes)
+    };
+    for strict in [false, true] {
+        let (c3, v3, f3) = outcome(&kv003, strict);
+        let (c4, v4, f4) = outcome(&kv004, strict);
+        assert_eq!(f3, ["\"KV003\" \"warning\""]);
+        assert_eq!(f4, ["\"KV004\" \"warning\""]);
+        assert_eq!(
+            c3,
+            Some(if strict { 1 } else { 0 }),
+            "KV003 strict={strict}"
+        );
+        assert_eq!(c4, c3, "KV004 strict={strict}");
+        assert_eq!(v4, v3, "strict={strict}");
+    }
+    let _ = std::fs::remove_dir_all(&kv003);
+    let _ = std::fs::remove_dir_all(&kv004);
+}
+
+/// `fix` never renames a function: a rename breaks every caller. It lists
+/// the KV004 finding as a `manual:` item and leaves the name as it was.
+#[test]
+fn fix_lists_kv004_as_manual_and_renames_nothing() {
+    let dir = tempdir("kv004-fix");
+    write(&dir, ".kovallent.yaml", NAMING_CONTRACT);
+    write(&dir, "jobs.py", NAMING_TASKS);
+    let (code, stdout, _) = audit_streams(&dir, &["fix", ".", "--no-color"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains(
+            "manual: ./jobs.py:10 `LoadOrders` does not match naming rule `pipeline_functions` - rename it and its callers by hand"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("nothing to fix"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("jobs.py")).unwrap(),
+        NAMING_TASKS
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

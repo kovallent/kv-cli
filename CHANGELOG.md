@@ -11,8 +11,41 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.12.0] — 2026-11-18
+
+KV004, naming convention, and CI wrappers for GitLab and CircleCI. The
+default contract's fingerprint (`a6edcff00199c1cf`), the JSON payload's
+`schema_version` (1) and exit codes are unchanged.
+
 ### Added
 
+- **KV004, naming convention**: a Python function whose name does not match
+  a naming rule in the contract's new `naming` section. There are no rules
+  by default, so KV004 reports nothing until a contract adds one, and a
+  contract without the section keeps its fingerprint.
+  - `naming.severity` (`warning` by default) and `naming.rules[]`, each with
+    a `name`, a `pattern` (a regex matched against the whole function name),
+    an optional `message`, and `applies_to`: `in_scope` (the default) or
+    `all_functions`.
+  - `in_scope` checks the functions the scope block counts as in scope or
+    framework-exempt: a framework owns a signature, not a name, so a dbt
+    `model()` is still checked. `applies_to.exempt_name_patterns` always
+    wins, so `_private` and `test_*` are never checked.
+  - `Contract::validate` rejects a pattern that does not compile or that
+    matches the empty string, and a rule without a distinct name, each with
+    its line.
+  - A finding's `symbol` is the function, its `subject` the rule's name and
+    its `detail` the pattern and message; the fingerprint formula is the
+    usual one. In JSON its `kind` is `naming_convention`, an additive change
+    to `schema/findings.v1.json`. KV004 has no `report_only` and changes no
+    scope count.
+  - `kv-cli fix` never renames a function and lists each KV004 finding as a
+    `manual:` item. `kv-cli explain KV004` and the SARIF rule list include
+    it, and `kv-cli init` writes a commented-out example.
 - **A GitLab CI/CD component (`templates/kv-cli.yml`) and a CircleCI orb
   (`orb/`)**: thin wrappers with the GitHub Action's behaviour. Each installs
   a released kv-cli binary, verified against the release's `SHA256SUMS`, runs
@@ -27,6 +60,12 @@ versions may carry breaking changes.
     holds the fingerprint, since a CircleCI parameter cannot read one.
 - `docs/ci.md`: GitLab CI/CD and CircleCI sections, each with a copy-paste
   config pinned to the release.
+
+### Fixed
+
+- `kv-cli fix --help` said pinned infrastructure (KV003) is listed as
+  `manual:` items. It never was: `fix` leaves KV003 alone and says nothing.
+  The help now says so.
 
 ---
 

@@ -44,6 +44,14 @@ pub struct Contract {
     /// KV003: identifiers that should vary by environment.
     #[serde(default)]
     pub infrastructure: InfraConfig,
+    /// KV004: naming rules for functions. None by default, so KV004 reports
+    /// nothing until a contract adds one.
+    //
+    // Left out of the serialized contract while it holds its default, so the
+    // built-in contract, and every contract that does not set it, keeps the
+    // fingerprint it had before the section existed (ADR 0001).
+    #[serde(default, skip_serializing_if = "NamingConfig::is_default")]
+    pub naming: NamingConfig,
     #[serde(default)]
     pub frameworks: FrameworkConfig,
     #[serde(default)]
@@ -122,6 +130,68 @@ pub struct InfraConfig {
 
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+/// KV004: a function whose name does not match a naming rule. Report-only:
+/// `kv-cli fix` never renames a function, because a rename breaks every
+/// caller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NamingConfig {
+    /// Severity of every KV004 finding. Defaults to `warning`, so adopting a
+    /// naming rule does not break CI on day one; `--strict` gates on it.
+    #[serde(default = "Severity::warning")]
+    pub severity: Severity,
+    /// Each rule checks a set of functions against one pattern. With no
+    /// rules, KV004 reports nothing.
+    #[serde(default)]
+    pub rules: Vec<NamingRule>,
+}
+
+impl Default for NamingConfig {
+    fn default() -> Self {
+        Self {
+            severity: Severity::Warning,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl NamingConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// One naming rule: the functions it checks, and the pattern their names
+/// must match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NamingRule {
+    /// Names the rule in findings, as their `subject`.
+    pub name: String,
+    /// Which functions the rule checks. `applies_to.exempt_name_patterns`
+    /// still wins either way.
+    #[serde(default)]
+    pub applies_to: NamingScope,
+    /// A regex the whole function name must match, e.g.
+    /// `^[a-z][a-z0-9_]*$`. It must not match the empty string.
+    pub pattern: String,
+    /// Why the rule exists, shown under each finding.
+    #[serde(default)]
+    pub message: String,
+}
+
+/// The functions a naming rule checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NamingScope {
+    /// Functions in scope of the parameter contract, framework-exempt ones
+    /// included: a framework owns a signature, not a name.
+    #[default]
+    InScope,
+    /// Every function definition.
+    AllFunctions,
 }
 
 // Per-field defaults delegate to each section's `Default`, so omitting a key
@@ -603,6 +673,7 @@ impl Default for Contract {
             applies_to: AppliesTo::default(),
             secrets: SecretsConfig::default(),
             infrastructure: InfraConfig::default(),
+            naming: NamingConfig::default(),
             frameworks: FrameworkConfig::default(),
             fix: FixConfig::default(),
         }
@@ -793,6 +864,50 @@ impl Contract {
                     ),
                     Ok(_) => {}
                 }
+            }
+        }
+
+        // --- naming rules (KV004): a name findings can report, and a
+        // pattern that compiles and does not match the empty string. A
+        // pattern that accepts an empty name has nothing it requires, which
+        // is almost always a `*` where a `+` was meant.
+        let rules = &self.naming.rules;
+        for (i, r) in rules.iter().enumerate() {
+            let field = |f: &str| format!("naming.rules[{i}].{f}");
+            if r.name.trim().is_empty() {
+                problem(
+                    field("name"),
+                    None,
+                    "a naming rule needs a name; findings report it".into(),
+                );
+            } else if rules[..i].iter().any(|q| q.name == r.name) {
+                problem(
+                    field("name"),
+                    locate(raw, "name", &r.name, 1),
+                    format!(
+                        "{:?} names another naming rule too; findings could not tell them apart",
+                        r.name
+                    ),
+                );
+            }
+            let nth = rules[..i].iter().filter(|q| q.pattern == r.pattern).count();
+            let line = locate(raw, "pattern", &r.pattern, nth);
+            match regex::Regex::new(&r.pattern) {
+                Err(e) => problem(
+                    field("pattern"),
+                    line,
+                    format!("does not compile: {}", regex_reason(&e)),
+                ),
+                Ok(re) if re.is_match("") => problem(
+                    field("pattern"),
+                    line,
+                    format!(
+                        "{:?} matches the empty string, so it requires nothing of a name; \
+                         require at least one character, e.g. \"^[a-z][a-z0-9_]*$\"",
+                        r.pattern
+                    ),
+                ),
+                Ok(_) => {}
             }
         }
 
@@ -1230,6 +1345,19 @@ infrastructure:
     - "*_header"
     - "*_type"
 
+# KV004: naming rules for functions. There are none by default, so KV004
+# reports nothing until you add one. `pattern` is a regex the whole function
+# name must match. `applies_to` is in_scope (functions in scope of the
+# contract, framework-exempt ones included) or all_functions.
+# exempt_name_patterns above still win. `fix` never renames a function.
+# naming:
+#   severity: warning
+#   rules:
+#     - name: pipeline_functions
+#       applies_to: in_scope
+#       pattern: '^[a-z][a-z0-9_]*$'
+#       message: "pipeline entrypoints use snake_case"
+
 # Behaviour of `kv-cli fix`.
 fix:
   insert_missing_parameters: true
@@ -1555,6 +1683,80 @@ mod tests {
             base,
             fp(&format!("{BASE}infrastructure:\n  enabled: false\n"))
         );
+    }
+
+    /// The `naming` section stays out of the serialized contract while it
+    /// holds its default, so every contract that does not use KV004 keeps
+    /// its fingerprint. Writing the default out by hand changes nothing;
+    /// adding a rule or changing the severity does.
+    #[test]
+    fn a_default_naming_section_leaves_the_fingerprint_alone() {
+        let canonical = serde_yaml::to_string(&Contract::default()).unwrap();
+        assert!(!canonical.contains("naming"), "{canonical}");
+
+        let base = fp(BASE);
+        assert_eq!(
+            base,
+            fp(&format!(
+                "{BASE}naming:\n  severity: warning\n  rules: []\n"
+            ))
+        );
+        let rule = "naming:\n  rules:\n    - name: snake\n      pattern: '^[a-z_]+$'\n";
+        assert_ne!(base, fp(&format!("{BASE}{rule}")));
+        assert_ne!(base, fp(&format!("{BASE}naming:\n  severity: error\n")));
+    }
+
+    /// A naming pattern must compile and must require something of a name,
+    /// and each rule needs a distinct name for findings to report. Each
+    /// problem is located to its line.
+    #[test]
+    fn naming_rules_are_validated_and_located() {
+        let yaml = "version: 1\nnaming:\n  rules:\n    - name: broken\n      pattern: '^[a-z'\n    - name: optional\n      pattern: '^[a-z0-9_]*$'\n    - name: broken\n      pattern: '^[a-z]+$'\n    - name: ''\n      pattern: '^x+$'\n";
+        let p = problems(yaml);
+        assert_eq!(
+            p.iter()
+                .map(|p| (p.path.as_str(), p.line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("naming.rules[0].pattern", Some(5)),
+                ("naming.rules[1].pattern", Some(7)),
+                ("naming.rules[2].name", Some(8)),
+                ("naming.rules[3].name", None),
+            ]
+        );
+        assert_eq!(p[0].message, "does not compile: unclosed character class");
+        assert!(
+            p[1].message.contains("matches the empty string"),
+            "{}",
+            p[1].message
+        );
+        // Parsing rejects an unknown scope rather than defaulting it.
+        assert!(Contract::from_yaml(
+            "version: 1\nnaming:\n  rules:\n    - name: x\n      pattern: '^x$'\n      applies_to: everything\n"
+        )
+        .is_err());
+    }
+
+    /// The commented-out example in the `init` template is a working rule
+    /// once uncommented, and leaving it commented changes nothing.
+    #[test]
+    fn the_templates_naming_example_works_when_uncommented() {
+        assert!(Contract::from_yaml(DEFAULT_CONTRACT_YAML)
+            .unwrap()
+            .naming
+            .is_default());
+        let start = DEFAULT_CONTRACT_YAML.find("# naming:").unwrap();
+        let block: String = DEFAULT_CONTRACT_YAML[start..]
+            .lines()
+            .take_while(|l| l.starts_with('#'))
+            .map(|l| format!("{}\n", l.strip_prefix("# ").unwrap_or("")))
+            .collect();
+        let c = Contract::from_yaml(&format!("version: 1\n{block}")).unwrap();
+        assert_eq!(c.validate(None), vec![]);
+        assert_eq!(c.naming.rules.len(), 1);
+        assert_eq!(c.naming.rules[0].name, "pipeline_functions");
+        assert_eq!(c.naming.rules[0].applies_to, NamingScope::InScope);
+        assert_eq!(c.naming.severity, Severity::Warning);
     }
 
     /// Removing a rule must not collide with the contract that still has it.

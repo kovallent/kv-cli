@@ -158,6 +158,28 @@
             "detector"
           ],
           "type": "object"
+        },
+        {
+          "description": "A function whose name does not match a naming rule.",
+          "properties": {
+            "function": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "naming_convention",
+              "type": "string"
+            },
+            "rule": {
+              "description": "The naming rule's `name`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "function",
+            "rule"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -205,11 +227,11 @@
           "type": "string"
         },
         "subject": {
-          "description": "What about it: the required parameter for KV001, the detector name for\nKV002 and KV003.",
+          "description": "What about it: the required parameter for KV001, the detector name for\nKV002 and KV003, the naming rule's name for KV004.",
           "type": "string"
         },
         "symbol": {
-          "description": "The thing the finding is about, as data: the governed function name for\nKV001, the assignment target or key for KV002 and KV003. Empty when a\nvalue-pattern rule matched free-floating text with no binding.",
+          "description": "The thing the finding is about, as data: the function name for KV001\nand KV004, the assignment target or key for KV002 and KV003. Empty\nwhen a value-pattern rule matched free-floating text with no binding.",
           "type": "string"
         }
       },

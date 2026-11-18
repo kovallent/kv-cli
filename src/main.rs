@@ -45,10 +45,11 @@ const EXIT_DRIFT: u8 = 3;
 
 /// Each rule's reference page, compiled in so `kv-cli explain` works offline.
 /// The same files are the rule pages on GitHub (`docs/rules/`).
-const RULES: [(&str, &str); 3] = [
+const RULES: [(&str, &str); 4] = [
     ("KV001", include_str!("../docs/rules/KV001.md")),
     ("KV002", include_str!("../docs/rules/KV002.md")),
     ("KV003", include_str!("../docs/rules/KV003.md")),
+    ("KV004", include_str!("../docs/rules/KV004.md")),
 ];
 
 const STAR_CTA: &str =
@@ -154,9 +155,10 @@ enum Command {
         kv-cli fix --dry-run        show what would change, write nothing\n  \
         kv-cli fix                  fix the current folder\n  \
         kv-cli fix samples/a.py     fix one file\n\n\
-        Each changed file is backed up to <file>.kvbak first. Pinned\n\
-        infrastructure (KV003) and hardcoded parameter defaults are listed as\n\
-        `manual:` items, never rewritten.")]
+        Each changed file is backed up to <file>.kvbak first. Hardcoded\n\
+        parameter defaults and names that break a naming rule (KV004) are\n\
+        listed as `manual:` items, never rewritten. Pinned infrastructure\n\
+        (KV003) is never rewritten either.")]
     Fix {
         /// Files or directories to repair.
         #[arg(default_value = ".")]

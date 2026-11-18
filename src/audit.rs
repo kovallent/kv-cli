@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub const CODE_MISSING_PARAM: &str = "KV001";
 pub const CODE_HARDCODED_SECRET: &str = "KV002";
 pub const CODE_HARDCODED_INFRA: &str = "KV003";
+pub const CODE_NAMING: &str = "KV004";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -35,6 +36,12 @@ pub enum FindingKind {
         detector: String,
         key: Option<String>,
     },
+    /// A function whose name does not match a naming rule.
+    NamingConvention {
+        function: String,
+        /// The naming rule's `name`.
+        rule: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -52,12 +59,12 @@ pub struct Finding {
     #[serde(serialize_with = "ser_severity")]
     #[schemars(with = "String")]
     pub severity: Severity,
-    /// The thing the finding is about, as data: the governed function name for
-    /// KV001, the assignment target or key for KV002 and KV003. Empty when a
-    /// value-pattern rule matched free-floating text with no binding.
+    /// The thing the finding is about, as data: the function name for KV001
+    /// and KV004, the assignment target or key for KV002 and KV003. Empty
+    /// when a value-pattern rule matched free-floating text with no binding.
     pub symbol: String,
     /// What about it: the required parameter for KV001, the detector name for
-    /// KV002 and KV003.
+    /// KV002 and KV003, the naming rule's name for KV004.
     pub subject: String,
     pub message: String,
     pub detail: Option<String>,
@@ -207,6 +214,8 @@ pub struct Engine {
     pub contract: Contract,
     secret_values: Vec<(String, Regex)>,
     infra_values: Vec<(String, Regex)>,
+    /// KV004: each naming rule's pattern, anchored to the whole name.
+    naming: Vec<Regex>,
     frameworks: Vec<CompiledFramework>,
 }
 
@@ -250,6 +259,18 @@ impl Engine {
             Vec::new()
         };
 
+        // `pattern` is matched against the whole function name, so a rule
+        // written without anchors still means the whole name.
+        let naming = contract
+            .naming
+            .rules
+            .iter()
+            .map(|r| {
+                Regex::new(&format!("^(?:{})$", r.pattern))
+                    .expect("validate() compiled every naming pattern")
+            })
+            .collect();
+
         let mut compiled = Vec::new();
         for profile in frameworks::PROFILES {
             compiled.push(CompiledFramework {
@@ -263,6 +284,7 @@ impl Engine {
             contract,
             secret_values,
             infra_values,
+            naming,
             frameworks: compiled,
         })
     }
@@ -938,6 +960,7 @@ impl FileContext<'_> {
         // credential and an endpoint is reported as the credential.
         let mut covered = Covered::default();
         self.check_parameters(path, a, &mut findings);
+        findings.extend(self.naming_findings(path, a));
         if self.engine.contract.secrets.enabled {
             self.check_secrets(path, source, a, &mut findings, &mut covered);
             self.check_concatenations(path, source, a, &mut findings, &mut covered);
@@ -998,6 +1021,68 @@ impl FileContext<'_> {
                 });
             }
         }
+    }
+
+    /// KV004: functions whose names do not match a naming rule.
+    ///
+    /// `applies_to.exempt_name_patterns` always wins, so `_private` and
+    /// `test_*` are never checked. `in_scope` checks the functions the scope
+    /// block counts as in scope or framework-exempt: a framework owns a
+    /// signature, not a name, so a dbt `model()` is still checked.
+    /// `all_functions` checks every definition.
+    ///
+    /// `audit` reports these and `fix` lists the same list as `manual:`
+    /// items, since a rename breaks every caller.
+    pub fn naming_findings(&self, path: &str, a: &Analysis) -> Vec<Finding> {
+        let naming = &self.engine.contract.naming;
+        let mut out = Vec::new();
+        if naming.rules.is_empty() {
+            return out;
+        }
+        let exempt = &self.engine.contract.applies_to.exempt_name_patterns;
+        for f in &a.functions {
+            if exempt.iter().any(|p| name_match(p, &f.name)) {
+                continue;
+            }
+            let in_scope = matches!(
+                self.classify(f),
+                ScopeDecision::Governed
+                    | ScopeDecision::GovernedReportOnly
+                    | ScopeDecision::ExemptFramework
+            );
+            for (rule, re) in naming.rules.iter().zip(&self.engine.naming) {
+                if rule.applies_to == config::NamingScope::InScope && !in_scope {
+                    continue;
+                }
+                if re.is_match(&f.name) {
+                    continue;
+                }
+                let mut detail = format!("name must match `{}`", rule.pattern);
+                if !rule.message.trim().is_empty() {
+                    detail = format!("{detail}: {}", rule.message.trim());
+                }
+                out.push(Finding {
+                    fingerprint: finding_fingerprint(path, CODE_NAMING, &f.name, &rule.name),
+                    path: path.to_string(),
+                    line: f.line,
+                    code: CODE_NAMING,
+                    severity: naming.severity,
+                    symbol: f.name.clone(),
+                    subject: rule.name.clone(),
+                    message: format!("`{}` does not match naming rule `{}`", f.name, rule.name),
+                    detail: Some(detail),
+                    // The rule is the contract's, never a framework's, and
+                    // `report_only` is a KV001 notion.
+                    framework: None,
+                    report_only: None,
+                    kind: FindingKind::NamingConvention {
+                        function: f.name.clone(),
+                        rule: rule.name.clone(),
+                    },
+                });
+            }
+        }
+        out
     }
 
     fn check_secrets(
@@ -2697,5 +2782,164 @@ jobs:
         )
         .is_empty());
         assert!(yaml("profiles.yml", "password: changeme\n").is_empty());
+    }
+
+    // --- KV004: naming convention --------------------------------------------
+
+    /// A contract with one naming rule, as YAML, so the tests read like the
+    /// contracts users write.
+    fn naming(rule: &str) -> Contract {
+        Contract::from_yaml(&format!("version: 1\nnaming:\n  rules:\n{rule}")).unwrap()
+    }
+
+    const SNAKE: &str = "    - name: pipeline_functions\n      pattern: '^[a-z][a-z0-9_]*$'\n      message: pipeline entrypoints use snake_case\n";
+
+    fn kv004(contract: Contract, src: &str) -> Vec<Finding> {
+        let e = Engine::new(contract).unwrap();
+        let a = python::analyze(src);
+        e.context(&a)
+            .audit("t.py", src, &a)
+            .into_iter()
+            .filter(|f| f.code == CODE_NAMING)
+            .collect()
+    }
+
+    const TASKS: &str = "@task\ndef load_orders(target_environment: str = \"dev\", dry_run: bool = False):\n    pass\n\n@task\ndef LoadOrders(target_environment: str = \"dev\", dry_run: bool = False):\n    pass\n";
+
+    #[test]
+    fn the_default_contract_has_no_naming_rules() {
+        assert!(Contract::default().naming.rules.is_empty());
+        assert!(kv004(Contract::default(), TASKS).is_empty());
+    }
+
+    /// `LoadOrders` breaks the rule and `load_orders` keeps it. The finding
+    /// is shaped like every other: the function as `symbol`, the rule as
+    /// `subject`, the pattern and message as `detail`, and the usual
+    /// fingerprint formula. No `framework`, and no `report_only`, which is
+    /// KV001's alone.
+    #[test]
+    fn a_naming_rule_rejects_load_orders_and_accepts_load_orders() {
+        let f = kv004(naming(SNAKE), TASKS);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        let f = &f[0];
+        assert_eq!(
+            (f.symbol.as_str(), f.subject.as_str()),
+            ("LoadOrders", "pipeline_functions")
+        );
+        assert_eq!(f.line, 6);
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(
+            f.message,
+            "`LoadOrders` does not match naming rule `pipeline_functions`"
+        );
+        assert_eq!(
+            f.detail.as_deref(),
+            Some("name must match `^[a-z][a-z0-9_]*$`: pipeline entrypoints use snake_case")
+        );
+        assert_eq!(
+            f.fingerprint,
+            finding_fingerprint("t.py", "KV004", "LoadOrders", "pipeline_functions")
+        );
+        assert_eq!(f.framework, None);
+        assert_eq!(f.report_only, None);
+        assert!(matches!(
+            &f.kind,
+            FindingKind::NamingConvention { function, rule }
+                if function == "LoadOrders" && rule == "pipeline_functions"
+        ));
+    }
+
+    /// The pattern is matched against the whole name, anchored or not.
+    #[test]
+    fn a_naming_pattern_must_match_the_whole_name() {
+        let rule = "    - name: snake\n      pattern: '[a-z_]+'\n";
+        let f = kv004(naming(rule), TASKS);
+        assert_eq!(
+            f.iter().map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
+            ["LoadOrders"]
+        );
+    }
+
+    /// `exempt_name_patterns` wins under either scope, so `_private` and
+    /// `test_*` are never checked, even by `all_functions`.
+    #[test]
+    fn an_exempt_name_is_never_checked() {
+        let src = "def _LoadOrders():\n    pass\n\ndef test_LoadOrders():\n    pass\n\n@task\ndef _Private(target_environment: str = \"dev\", dry_run: bool = False):\n    pass\n";
+        for scope in ["in_scope", "all_functions"] {
+            let rule = format!("{SNAKE}      applies_to: {scope}\n");
+            assert!(kv004(naming(&rule), src).is_empty(), "{scope}");
+        }
+    }
+
+    /// `in_scope` checks governed and framework-exempt functions and skips
+    /// the rest; `all_functions` checks every definition.
+    #[test]
+    fn in_scope_skips_ungoverned_functions_and_all_functions_does_not() {
+        let src = "def HelperFn():\n    pass\n";
+        assert!(kv004(naming(SNAKE), src).is_empty());
+        let all = format!("{SNAKE}      applies_to: all_functions\n");
+        assert_eq!(kv004(naming(&all), src).len(), 1);
+    }
+
+    /// A framework owns a signature, not a name: dbt's `model()` is
+    /// framework-exempt from KV001 and still checked by an `in_scope` rule.
+    #[test]
+    fn a_dbt_model_is_checked_under_in_scope() {
+        let src = "def model(dbt, session):\n    return session.table(\"raw\")\n";
+        let e = engine();
+        let a = python::analyze(src);
+        assert_eq!(
+            e.context(&a).classify(&a.functions[0]),
+            ScopeDecision::ExemptFramework
+        );
+        let verb_first = "    - name: verb_first\n      pattern: '^(load|run)_[a-z_]+$'\n";
+        let f = kv004(naming(verb_first), src);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!((f[0].symbol.as_str(), f[0].framework), ("model", None));
+    }
+
+    /// Every rule a function breaks is its own finding, with its own
+    /// fingerprint, and `naming.severity` sets the severity of each.
+    #[test]
+    fn each_broken_rule_is_a_finding_at_the_sections_severity() {
+        let c = Contract::from_yaml(&format!(
+            "version: 1\nnaming:\n  severity: error\n  rules:\n{SNAKE}    - name: short\n      pattern: '^.{{1,12}}$'\n"
+        ))
+        .unwrap();
+        let f = kv004(c, TASKS);
+        assert_eq!(
+            f.iter()
+                .map(|f| (f.subject.as_str(), f.severity))
+                .collect::<Vec<_>>(),
+            [("pipeline_functions", Severity::Error)]
+        );
+        let long = "@task\ndef LoadAllTheOrders(target_environment: str = \"dev\", dry_run: bool = False):\n    pass\n";
+        let c = Contract::from_yaml(&format!(
+            "version: 1\nnaming:\n  rules:\n{SNAKE}    - name: short\n      pattern: '^.{{1,12}}$'\n"
+        ))
+        .unwrap();
+        let f = kv004(c, long);
+        assert_eq!(f.len(), 2);
+        assert_ne!(f[0].fingerprint, f[1].fingerprint);
+    }
+
+    /// KV004 changes nothing in the scope block: naming rules don't move a
+    /// function in or out of scope.
+    #[test]
+    fn naming_rules_leave_the_scope_block_alone() {
+        let a = python::analyze(TASKS);
+        let without = engine().context(&a).scope(&a);
+        let with = Engine::new(naming(SNAKE)).unwrap();
+        let with = with.context(&a).scope(&a);
+        assert_eq!(format!("{without:?}"), format!("{with:?}"));
+    }
+
+    /// The fingerprint leaves out the line, so moving the function keeps it.
+    #[test]
+    fn a_kv004_fingerprint_survives_a_line_shift() {
+        let before = kv004(naming(SNAKE), TASKS);
+        let after = kv004(naming(SNAKE), &format!("import os\n\n\n{TASKS}"));
+        assert_ne!(before[0].line, after[0].line);
+        assert_eq!(before[0].fingerprint, after[0].fingerprint);
     }
 }
