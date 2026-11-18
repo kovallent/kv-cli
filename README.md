@@ -70,15 +70,24 @@ FIXED applied 18 changes across 1 file
 
 ## Quickstart
 
-**1. Install.** On macOS or Linux with Homebrew:
+**1. Install.** From PyPI, with pip or uv:
+
+```bash
+pip install kv-cli
+uv tool install kv-cli
+```
+
+Either one installs the prebuilt binary from a wheel, with no Rust toolchain needed. There are wheels for Linux x86-64 and ARM64 (glibc and musl), macOS Apple silicon and Intel, and Windows x86-64. On any other platform, pip builds from source, which needs Rust and a C compiler.
+
+On macOS or Linux with Homebrew:
 
 ```bash
 brew install kovallent/tap/kv-cli
 ```
 
-It installs the prebuilt binary, with no Rust toolchain needed, and `brew upgrade kv-cli` picks up new releases.
+It installs the prebuilt binary too, and `brew upgrade kv-cli` picks up new releases.
 
-Without Homebrew, download your platform's archive from the [latest release](https://github.com/kovallent/kv-cli/releases/latest) and unpack it:
+Or download your platform's archive from the [latest release](https://github.com/kovallent/kv-cli/releases/latest) and unpack it:
 
 | Platform | Archive |
 | --- | --- |
@@ -235,14 +244,19 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 
 ```yaml
 repos:
-  - repo: https://github.com/kovallent/kv-cli
+  - repo: https://github.com/kovallent/kv-cli-pre-commit
     rev: v0.9.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
+      - id: kv-cli-strict     # manual stage: pre-commit run kv-cli-strict --hook-stage manual --all-files
 ```
 
-These hooks build kv-cli from source on first run (`language: rust`), so each contributor needs Rust and a C compiler and waits through one compile. To use an installed binary instead:
+[kv-cli-pre-commit](https://github.com/kovallent/kv-cli-pre-commit) declares the same hooks as `language: python` and pins `kv-cli` to the same version, which pip installs from the prebuilt wheels: no contributor needs a Rust toolchain, and nothing compiles.
+
+`repo: https://github.com/kovallent/kv-cli` still works as a hook repository too, as `language: rust`: pre-commit builds kv-cli from source on first run, which needs Rust and a C compiler.
+
+To use an installed binary instead:
 
 ```yaml
 repos:
@@ -335,7 +349,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 cargo install --git https://github.com/kovallent/kv-cli --tag v0.9.0
 ```
 
-Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes. There is no PyPI package, so `pip install kv-cli` will not work.
+Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.
 
 ---
 
