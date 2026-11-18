@@ -301,27 +301,7 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
             continue;
         }
 
-        // Split on the first `:` that is followed by whitespace or ends the
-        // line, so `url: https://x` does not split at the scheme colon.
-        let bytes = rest.as_bytes();
-        let mut split = None;
-        let mut quote: Option<u8> = None;
-        for (i, &b) in bytes.iter().enumerate() {
-            match quote {
-                Some(q) if b == q => quote = None,
-                Some(_) => {}
-                None if b == b'"' || b == b'\'' => quote = Some(b),
-                None if b == b':' => {
-                    let next = bytes.get(i + 1);
-                    if next.is_none() || next.is_some_and(|c| c.is_ascii_whitespace()) {
-                        split = Some(i);
-                        break;
-                    }
-                }
-                None => {}
-            }
-        }
-        let Some(at) = split else { continue };
+        let Some(at) = key_colon(rest) else { continue };
 
         let key = unquote(&rest[..at]);
         let value = strip_node_properties(&rest[at + 1..]);
@@ -358,6 +338,227 @@ pub fn scalars(source: &str) -> Vec<Scalar> {
     out
 }
 
+/// The `:` that ends a mapping key: the first one outside quotes that is
+/// followed by whitespace or ends the line, so `url: https://x` does not
+/// split at the scheme colon.
+fn key_colon(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b':' => {
+                let next = bytes.get(i + 1);
+                if next.is_none() || next.is_some_and(|c| c.is_ascii_whitespace()) {
+                    return Some(i);
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+/// One step of a path into a YAML document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Segment {
+    Key(String),
+    Index(usize),
+}
+
+/// A scalar and its full path, for files where the place a value sits
+/// decides what it means: in a Databricks asset bundle, the same key under
+/// `targets.dev` is a per-target value, and anywhere else it is pinned.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub path: Vec<Segment>,
+    pub value: String,
+    pub line: usize,
+    /// The line's comment, for ignore-marker checks.
+    pub comment: String,
+}
+
+impl Entry {
+    /// The mapping key this scalar is the value of; `None` for a sequence
+    /// item.
+    pub fn key(&self) -> Option<&str> {
+        match self.path.last() {
+            Some(Segment::Key(k)) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// The first key of the path: the top-level section the scalar is in.
+    pub fn section(&self) -> Option<&str> {
+        match self.path.first() {
+            Some(Segment::Key(k)) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// `resources.jobs.nightly.job_clusters[0].new_cluster.cluster_id`.
+    pub fn dotted(&self) -> String {
+        let mut out = String::new();
+        for s in &self.path {
+            match s {
+                Segment::Key(k) => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(k);
+                }
+                Segment::Index(i) => out.push_str(&format!("[{i}]")),
+            }
+        }
+        out
+    }
+}
+
+/// Every scalar in a YAML document with its full path, sequence entries
+/// included: mapping values, block-sequence items, and the members of flow
+/// mappings and flow sequences written on one line. Literal and folded
+/// blocks are skipped as free text, as in [`scalars`].
+///
+/// Like [`scalars`], a line scanner rather than a parser, so each scalar keeps
+/// its line number. Indentation decides nesting; a sequence may sit at the
+/// same column as the key that owns it.
+pub fn entries(source: &str) -> Vec<Entry> {
+    let mut out = Vec::new();
+    // Column of the key that opened a literal block, while inside one.
+    let mut block: Option<usize> = None;
+    // The containers enclosing the current line, outermost first: a key whose
+    // value is a nested block, or a block-sequence entry, with its column.
+    let mut open: Vec<(usize, Segment)> = Vec::new();
+    let prefix = |open: &[(usize, Segment)]| -> Vec<Segment> {
+        open.iter().map(|(_, s)| s.clone()).collect()
+    };
+
+    for (idx, raw_line) in source.lines().enumerate() {
+        let indent = raw_line.len() - raw_line.trim_start().len();
+        if let Some(open_at) = block {
+            if raw_line.trim().is_empty() || indent > open_at {
+                continue;
+            }
+            block = None;
+        }
+        let (line, comment) = split_comment(raw_line);
+        let mut rest = line.trim_start();
+        if rest.is_empty() {
+            continue;
+        }
+        if indent == 0 && (rest == "---" || rest.starts_with("--- ") || rest == "...") {
+            open.clear();
+            continue;
+        }
+
+        // Each `- ` opens a sequence entry at its column, or moves to the
+        // next entry of the sequence already open there.
+        let mut column = indent;
+        let mut in_entry = false;
+        while let Some(stripped) = rest.strip_prefix('-') {
+            if !(stripped.starts_with(' ') || stripped.is_empty()) {
+                break;
+            }
+            let dash = column;
+            while open.last().is_some_and(|(at, _)| *at > dash) {
+                open.pop();
+            }
+            match open.last_mut() {
+                Some((at, Segment::Index(i))) if *at == dash => *i += 1,
+                _ => open.push((dash, Segment::Index(0))),
+            }
+            in_entry = true;
+            let entry = stripped.trim_start();
+            column += rest.len() - entry.len();
+            rest = entry;
+        }
+        if rest.is_empty() {
+            continue;
+        }
+
+        let push = |out: &mut Vec<Entry>, path: Vec<Segment>, value: &str| {
+            let value = unquote(value);
+            if !value.is_empty() {
+                out.push(Entry {
+                    path,
+                    value,
+                    line: idx + 1,
+                    comment: comment.to_string(),
+                });
+            }
+        };
+        // A value on this line: a scalar, or a flow collection written out.
+        let emit = |out: &mut Vec<Entry>, path: Vec<Segment>, value: &str| {
+            if value.starts_with('{') && !value.starts_with("{{") && !value.starts_with("{%") {
+                for (inner, k, v) in flow_pairs(value).unwrap_or_default() {
+                    let mut p = path.clone();
+                    p.extend(inner.into_iter().map(Segment::Key));
+                    p.push(Segment::Key(k));
+                    push(out, p, &v);
+                }
+            } else if let Some(items) = value
+                .strip_prefix('[')
+                .and_then(|v| v.trim_end().strip_suffix(']'))
+            {
+                for (i, item) in split_top_level(items, ',').into_iter().enumerate() {
+                    let item = strip_node_properties(item.trim());
+                    let mut p = path.clone();
+                    p.push(Segment::Index(i));
+                    if item.starts_with('{') {
+                        for (inner, k, v) in flow_pairs(item).unwrap_or_default() {
+                            let mut q = p.clone();
+                            q.extend(inner.into_iter().map(Segment::Key));
+                            q.push(Segment::Key(k));
+                            push(out, q, &v);
+                        }
+                    } else if !item.starts_with('[') {
+                        push(out, p, item);
+                    }
+                }
+            } else {
+                push(out, path, value);
+            }
+        };
+
+        let key = key_colon(rest)
+            .map(|at| (unquote(&rest[..at]), at))
+            .filter(|(k, _)| !k.is_empty() && !k.contains(char::is_whitespace));
+        let Some((key, at)) = key else {
+            // A bare scalar is only a value as a sequence entry; anything
+            // else is the continuation of a multi-line scalar.
+            if in_entry {
+                let value = strip_node_properties(rest);
+                if opens_literal_block(value) {
+                    block = Some(column);
+                } else {
+                    emit(&mut out, prefix(&open), value);
+                }
+            }
+            continue;
+        };
+
+        // A key closes every container at or right of its column.
+        while open.last().is_some_and(|(c, _)| *c >= column) {
+            open.pop();
+        }
+        let value = strip_node_properties(&rest[at + 1..]);
+        if opens_literal_block(value) {
+            block = Some(column);
+            continue;
+        }
+        if is_empty_value(value) {
+            open.push((column, Segment::Key(key)));
+            continue;
+        }
+        let mut path = prefix(&open);
+        path.push(Segment::Key(key));
+        emit(&mut out, path, value.trim_end());
+    }
+    out
+}
+
 /// `{% set name = expr %}` on one line, read as `name: {{ expr }}`, so the
 /// expression is judged like any other template: a literal it writes down is
 /// a value, a lookup is not. Tuple targets and `{% set %}…{% endset %}` blocks
@@ -379,6 +580,117 @@ fn jinja_set(line: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dotted(src: &str) -> Vec<(String, String, usize)> {
+        entries(src)
+            .into_iter()
+            .map(|e| (e.dotted(), e.value, e.line))
+            .collect()
+    }
+
+    /// Mapping keys, block sequences (indented or at the key's own column),
+    /// bare sequence items and flow collections all get their full path.
+    #[test]
+    fn entries_carry_their_full_path() {
+        let src = "\
+resources:
+  jobs:
+    nightly:
+      job_clusters:
+        - job_cluster_key: main
+          new_cluster:
+            cluster_id: 1234-567890-abcd1234
+      tasks:
+      - task_key: run
+        spark_python_task:
+          parameters:
+            - --input
+            - \"s3://prod-orders/raw/\"  # a comment
+      - task_key: second
+        tags: {team: data, env: prod}
+        args: [one, 'two', {k: v}]
+other: 1
+";
+        assert_eq!(
+            dotted(src),
+            [
+                (
+                    "resources.jobs.nightly.job_clusters[0].job_cluster_key".into(),
+                    "main".into(),
+                    5
+                ),
+                (
+                    "resources.jobs.nightly.job_clusters[0].new_cluster.cluster_id".into(),
+                    "1234-567890-abcd1234".into(),
+                    7
+                ),
+                (
+                    "resources.jobs.nightly.tasks[0].task_key".into(),
+                    "run".into(),
+                    9
+                ),
+                (
+                    "resources.jobs.nightly.tasks[0].spark_python_task.parameters[0]".into(),
+                    "--input".into(),
+                    12
+                ),
+                (
+                    "resources.jobs.nightly.tasks[0].spark_python_task.parameters[1]".into(),
+                    "s3://prod-orders/raw/".into(),
+                    13
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].task_key".into(),
+                    "second".into(),
+                    14
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].tags.team".into(),
+                    "data".into(),
+                    15
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].tags.env".into(),
+                    "prod".into(),
+                    15
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].args[0]".into(),
+                    "one".into(),
+                    16
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].args[1]".into(),
+                    "two".into(),
+                    16
+                ),
+                (
+                    "resources.jobs.nightly.tasks[1].args[2].k".into(),
+                    "v".into(),
+                    16
+                ),
+                ("other".into(), "1".into(), 17),
+            ]
+        );
+        let e = &entries(src)[4];
+        assert_eq!(e.key(), None);
+        assert_eq!(e.section(), Some("resources"));
+        assert_eq!(e.comment.trim(), "# a comment");
+    }
+
+    /// A literal block is free text, and the keys after it are structure
+    /// again; a new document starts from the top.
+    #[test]
+    fn entries_skip_literal_blocks_and_reset_per_document() {
+        let src = "a:\n  script: |\n    cluster_id: not-a-key\n  after: 1\n---\nb: 2\n";
+        assert_eq!(
+            dotted(src),
+            [
+                ("a.after".into(), "1".into(), 4),
+                ("b".into(), "2".into(), 6)
+            ]
+        );
+    }
 
     #[test]
     fn quoted_scalars_are_unescaped() {

@@ -15,6 +15,50 @@ Nothing yet.
 
 ---
 
+## [0.13.0] — 2026-11-18
+
+KV003 for Databricks asset bundles. **A repository with a bundle may see new
+KV003 warnings in `databricks.yml`** and in the files it includes; set
+`infrastructure.bundle_files: false` to opt out. Contract fingerprints, the
+JSON payload's `schema_version` (1) and exit codes are unchanged.
+
+### Added
+
+- **KV003 in Databricks asset bundles.** A bundle declares what varies under
+  `targets:` and `variables:`, so a value pinned anywhere else is reported:
+  new KV003 warnings in `databricks.yml` (or `databricks.yaml`) and in the
+  YAML files its `include:` globs name, such as `resources/*.yml`. A file
+  belongs to the nearest `databricks.yml` above it, up to the repository
+  root. dbt's `profiles.yml` never counts, and no other YAML file changes
+  behaviour.
+  - A scalar is reported when it is outside `targets:` and `variables:`, is
+    not a substitution (`${var.x}`, `${bundle.target}`, `${workspace.*}`,
+    `${resources.*}`), and its key matches `infrastructure.key_patterns` or
+    the databricks profile's infrastructure keys (including
+    `*warehouse_id*`), or its value matches `infrastructure.value_patterns`
+    (`object_store_uri`, `jdbc_url`). `allow_values`,
+    `exempt_key_patterns`, `min_value_length` and the
+    `kovallent:allow-infra` marker apply as they do for Python.
+  - Severity is `infrastructure.severity`, a warning by default, so nothing
+    gates unless `--strict`.
+  - The finding's `symbol` is the scalar's dotted YAML path, such as
+    `resources.jobs.nightly.tasks[0].existing_cluster_id`, and its `subject`
+    the matching rule; the fingerprint excludes the line, as for every
+    finding.
+  - **Opt-out:** `infrastructure.bundle_files: false` restores the
+    credentials-only YAML of 0.12.0 and earlier. The key defaults to `true` and is left out of the
+    serialized contract at its default, so no fingerprint moves until you
+    set it.
+  - A bundle file reports `analysis: credentials_and_infrastructure` in
+    `run.files`, a new value of that enum (additive), and `--show-clean`
+    reads `clean  credentials and infrastructure checked`.
+  - `kv-cli fix` neither rewrites nor lists KV003 in a bundle file, as in
+    Python.
+- `samples/bundle/`: a bundle with two pinned values and three declared
+  per-target ones. `samples/` now reports 31 errors and 19 warnings.
+
+---
+
 ## [0.12.0] — 2026-11-18
 
 KV004, naming convention, and CI wrappers for GitLab and CircleCI. The

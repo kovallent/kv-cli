@@ -1140,6 +1140,20 @@ pub fn path_match(pattern: &str, path: &str) -> bool {
     match_segments(&segments, &path)
 }
 
+/// Match a glob against a `/`-separated relative path, anchored at its
+/// start: unlike [`path_match`], a pattern with no `/` names a file at the
+/// top level only, the way a Databricks bundle's `include:` globs are read
+/// relative to the bundle root. `*` and `?` match within one segment; `**`
+/// as a whole segment matches any number of them.
+pub fn anchored_path_match(pattern: &str, path: &str) -> bool {
+    let path: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = pattern
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    match_segments(&segments, &path)
+}
+
 fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
     match pattern.split_first() {
         None => path.is_empty(),

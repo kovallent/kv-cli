@@ -129,21 +129,21 @@ Exit `0` means compliant and `1` means findings. A 500-file repository takes abo
 ```bash
 git clone https://github.com/kovallent/kv-cli && cd kv-cli
 kv-cli init                           # created ./.kovallent.yaml
-kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings — by design
+kv-cli audit --strict samples/        # FAIL 31 errors, 19 warnings — by design
 kv-cli audit --show-clean samples/    # also lists each clean file, with its scope
 kv-cli fix samples/deploy.py          # FIXED applied 18 changes across 1 file
 kv-cli audit samples/compliant.py     # PASS — must always be clean
 ```
 
-`samples/deploy.py` exercises every detector and suppression. `samples/frameworks/` has one file per supported stack. `samples/credentials.py` shows every form a hardcoded credential takes, next to names that are *not* credentials. `samples/configs/` and `samples/notebooks/` cover `.env`, `airflow.cfg`, TOML, JSON and a notebook whose saved output printed a token. A test checks the counts above against the real output.
+`samples/deploy.py` exercises every detector and suppression. `samples/frameworks/` has one file per supported stack. `samples/credentials.py` shows every form a hardcoded credential takes, next to names that are *not* credentials. `samples/configs/` and `samples/notebooks/` cover `.env`, `airflow.cfg`, TOML, JSON and a notebook whose saved output printed a token. `samples/bundle/` is a Databricks asset bundle with two values pinned outside `targets:` and `variables:`. A test checks the counts above against the real output.
 
 ### It found nothing. Is it working?
 
-1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only.
+1. **Your models are SQL.** SQL is not analysed. Python gets the full audit; notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) are scanned for credentials only. A Databricks asset bundle (`databricks.yml` and the files it includes) is checked for pinned infrastructure too.
 2. **Your functions are not governed.** By default, `KV001` covers functions named like `deploy*`, `run_*`, `*_pipeline`, `*_job` or `main`, or decorated with `@task`. Run `kv-cli init` and edit `applies_to`, or see [`KV001`](docs/rules/KV001.md).
 3. **A framework owns your signatures.** Check the scope line. A low `in scope` count with a high `framework-exempt` count means the exemption is working, not missing things. See [frameworks](docs/frameworks.md).
 
-`kv-cli audit --show-clean` names each clean file with its own scope, so you can confirm a specific file was checked. A file reads `nothing enforced` when none of its functions were under the contract, and `credentials only` when it is a config file or notebook.
+`kv-cli audit --show-clean` names each clean file with its own scope, so you can confirm a specific file was checked. A file reads `nothing enforced` when none of its functions were under the contract, `credentials only` when it is a config file or notebook, and `credentials and infrastructure checked` when it belongs to a Databricks asset bundle.
 
 If no file matched at all, that is not a pass. The run exits `2` with `no files to audit` and names the patterns it tried.
 
@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.12.0
+      - uses: kovallent/kv-cli@v0.13.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.12.0
+          KV_VERSION: v0.13.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -250,7 +250,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.12.0
+    rev: v0.13.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -351,7 +351,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.12.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.13.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.

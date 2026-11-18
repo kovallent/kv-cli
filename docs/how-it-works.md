@@ -21,11 +21,11 @@ Config files are handled by line scanners rather than parsers — `src/yamlscan.
 | --- | --- | --- | --- | --- |
 | Python (`.py`) | ✓ | ✓ | ✓ | ✓ |
 | Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | | |
-| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | | |
+| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | Databricks bundle files | |
 
 Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
 
-Config files are where environment-specific values belong, so `KV003` never applies to them. `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
+Config files are where environment-specific values belong, so `KV003` applies to none of them except Databricks asset bundles: `databricks.yml` and the files it includes declare their per-target values under `targets:` and `variables:`, so a value pinned anywhere else is reported. See [KV003](rules/KV003.md#databricks-asset-bundles). `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.
 
 ## What `fix` changes
 

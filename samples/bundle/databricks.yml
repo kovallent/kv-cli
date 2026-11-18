@@ -1,0 +1,35 @@
+# A Databricks asset bundle. A bundle declares what varies between targets,
+# under `targets:` and `variables:`, so kv-cli reports infrastructure pinned
+# anywhere else in it (KV003). Nothing in this file is reported.
+bundle:
+  name: orders
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog the jobs write to
+    default: prod_catalog # a variable's declared default
+  landing_path:
+    description: Where raw orders land
+    default: s3://prod-landing/orders/ # a declared default, though it names a bucket
+  warehouse_id:
+    description: SQL warehouse for the report
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      warehouse_id: 4b9f1e2d7c3a5e60
+    resources:
+      jobs:
+        nightly:
+          tasks:
+            - task_key: load
+              existing_cluster_id: 0101-000000-devclstr # a per-target value
+  prod:
+    mode: production
+    variables:
+      warehouse_id: 9e8d7c6b5a4f3e21

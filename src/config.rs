@@ -126,6 +126,16 @@ pub struct InfraConfig {
     // fingerprint it had before the field existed (ADR 0001).
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub global_key_patterns_require_framework: bool,
+    /// Apply KV003 to Databricks asset bundle files: `databricks.yml` or
+    /// `databricks.yaml`, and the YAML files its `include:` globs name. A
+    /// bundle declares what varies under `targets:` and `variables:`, so an
+    /// identifier anywhere else is pinned by mistake. `false` leaves every
+    /// YAML file credentials-only, as before 0.13.0.
+    //
+    // Left out of the serialized contract while it holds its default, so
+    // contracts that do not set it keep their fingerprint (ADR 0001).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub bundle_files: bool,
 }
 
 fn is_true(b: &bool) -> bool {
@@ -297,6 +307,7 @@ impl Default for InfraConfig {
                 .map(|s| s.to_string())
                 .collect(),
             global_key_patterns_require_framework: true,
+            bundle_files: true,
         }
     }
 }
@@ -1321,6 +1332,11 @@ infrastructure:
   # is detected). Value patterns apply everywhere. false: key_patterns in
   # every Python file, as before 0.10.0.
   global_key_patterns_require_framework: true
+  # Also check Databricks asset bundles: databricks.yml and the files its
+  # include: globs name. Values under targets: and variables: are exempt,
+  # since that is where a bundle declares what varies. false: every YAML
+  # file is credentials-only, as before 0.13.0.
+  bundle_files: true
   value_patterns:
     - name: object_store_uri
       regex: '\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\s\x22'']+'
@@ -1757,6 +1773,33 @@ mod tests {
         assert_eq!(c.naming.rules[0].name, "pipeline_functions");
         assert_eq!(c.naming.rules[0].applies_to, NamingScope::InScope);
         assert_eq!(c.naming.severity, Severity::Warning);
+    }
+
+    /// `infrastructure.bundle_files` stays out of the serialized contract at
+    /// its default, so adding it moved no fingerprint; turning it off does.
+    #[test]
+    fn bundle_files_at_its_default_leaves_the_fingerprint_alone() {
+        assert!(Contract::default().infrastructure.bundle_files);
+        let canonical = serde_yaml::to_string(&Contract::default()).unwrap();
+        assert!(!canonical.contains("bundle_files"), "{canonical}");
+        assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
+        let base = fp(BASE);
+        assert_eq!(
+            base,
+            fp(&format!("{BASE}infrastructure:\n  bundle_files: true\n"))
+        );
+        assert_ne!(
+            base,
+            fp(&format!("{BASE}infrastructure:\n  bundle_files: false\n"))
+        );
+        // The init template writes it out, at its default.
+        assert!(DEFAULT_CONTRACT_YAML.contains("  bundle_files: true\n"));
+        assert_eq!(
+            Contract::from_yaml(DEFAULT_CONTRACT_YAML)
+                .unwrap()
+                .fingerprint(),
+            "a6edcff00199c1cf"
+        );
     }
 
     /// Removing a rule must not collide with the contract that still has it.

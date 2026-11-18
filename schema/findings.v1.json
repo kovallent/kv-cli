@@ -14,6 +14,11 @@
           "type": "string"
         },
         {
+          "const": "credentials_and_infrastructure",
+          "description": "A Databricks asset bundle file: scanned for credentials and, outside\n`targets:` and `variables:`, pinned infrastructure (KV003). The scope\nis always zero.",
+          "type": "string"
+        },
+        {
           "const": "partial",
           "description": "A syntax error: audited on a partial parse. Also listed in `skipped`.",
           "type": "string"

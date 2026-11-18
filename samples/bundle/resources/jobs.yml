@@ -1,0 +1,22 @@
+# Included by ../databricks.yml, so it is a bundle file too.
+resources:
+  jobs:
+    nightly:
+      name: orders-nightly
+      tasks:
+        - task_key: load
+          # KV003: pins every target to one production cluster.
+          existing_cluster_id: 0923-164208-prdclstr
+          spark_python_task:
+            python_file: ../src/load.py
+            parameters:
+              - --input
+              # KV003: a production path, whatever the target.
+              - s3://prod-orders/raw/
+        - task_key: report
+          depends_on:
+            - task_key: load
+          sql_task:
+            warehouse_id: ${var.warehouse_id} # a substitution: varies by target
+            query:
+              query_id: 6d1c0f4e-orders-daily

@@ -884,7 +884,7 @@ fn the_readme_sample_counts_are_true() {
         )
     };
 
-    // `./kv-cli audit --strict samples/        # FAIL 31 errors, 17 warnings`
+    // `./kv-cli audit --strict samples/        # FAIL 31 errors, 19 warnings`
     let readme = std::fs::read_to_string(repo.join("README.md")).unwrap();
     let line = readme
         .lines()
@@ -1601,12 +1601,12 @@ fn samples_text(args: &[&str]) -> (Option<i32>, String) {
 /// same with and without `--strict`.
 #[test]
 fn the_summary_line_on_samples_is_golden() {
-    const SUMMARY: &str = "  · files: 11 failing, 2 warning-only, 3 clean, 0 skipped";
+    const SUMMARY: &str = "  · files: 11 failing, 3 warning-only, 4 clean, 0 skipped";
     for (args, verdict) in [
-        (&[][..], "FAIL 31 errors, 17 warnings"),
+        (&[][..], "FAIL 31 errors, 19 warnings"),
         (
             &["--strict"][..],
-            "FAIL 31 errors, 17 warnings (48 gating under --strict)",
+            "FAIL 31 errors, 19 warnings (50 gating under --strict)",
         ),
     ] {
         let (code, stdout) = samples_text(args);
@@ -1623,13 +1623,15 @@ fn the_summary_line_on_samples_is_golden() {
     }
 }
 
-/// Golden: `--show-clean` on `samples/` lists the three clean files after the
+/// Golden: `--show-clean` on `samples/` lists the four clean files after the
 /// failing blocks, each with its scope, and never calls one compliant.
 #[test]
 fn show_clean_on_samples_is_golden() {
     let (code, stdout) = samples_text(&["--show-clean"]);
     assert_eq!(code, Some(1));
     let golden = "\n\
+        bundle/databricks.yml\n\
+        \x20       clean  credentials and infrastructure checked\n\
         compliant.py\n\
         \x20       clean  3 enforced\n\
         configs/.env.example\n\
@@ -1637,8 +1639,8 @@ fn show_clean_on_samples_is_golden() {
         frameworks/dbt_model.py\n\
         \x20       clean  nothing enforced: 1 framework-exempt\n\
         \n\
-        \x20 · files: 11 failing, 2 warning-only, 3 clean, 0 skipped\n\
-        FAIL 31 errors, 17 warnings\n\
+        \x20 · files: 11 failing, 3 warning-only, 4 clean, 0 skipped\n\
+        FAIL 31 errors, 19 warnings\n\
         run `kv-cli fix` to apply the standard fixes\n\
         run `kv-cli explain KV001` for what a rule checks and how to fix it\n";
     assert!(stdout.ends_with(golden), "{stdout}");
@@ -2391,4 +2393,134 @@ fn fix_lists_kv004_as_manual_and_renames_nothing() {
         NAMING_TASKS
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- KV003 in Databricks asset bundles --------------------------------------
+
+/// The KV003 findings in a payload, as `(path, symbol, subject)`.
+fn kv003s(payload: &serde_json::Value) -> Vec<(String, String, String)> {
+    payload["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "KV003")
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap().to_string(),
+                f["symbol"].as_str().unwrap().to_string(),
+                f["subject"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `samples/bundle`: the pinned `existing_cluster_id` and the `s3://prod-…`
+/// task parameter are reported; the same key under `targets.dev`,
+/// `${var.warehouse_id}` and `variables.catalog.default` are not. Both files
+/// are checked for credentials and infrastructure, at warning severity.
+#[test]
+fn the_bundle_fixture_reports_its_two_pinned_values() {
+    let (code, stdout) = repo_run(&["audit", "samples/bundle", "--format", "json"]);
+    assert_eq!(code, Some(0), "warnings do not gate without --strict");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    common::check_payload(&payload);
+    assert_eq!(payload["run"]["contract_sha256"], "a6edcff00199c1cf");
+    let s = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    assert_eq!(
+        kv003s(&payload),
+        [
+            s(
+                "resources/jobs.yml",
+                "resources.jobs.nightly.tasks[0].existing_cluster_id",
+                "key_pattern"
+            ),
+            s(
+                "resources/jobs.yml",
+                "resources.jobs.nightly.tasks[0].spark_python_task.parameters[1]",
+                "object_store_uri"
+            ),
+        ]
+    );
+    let findings = payload["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{payload:#}");
+    assert!(findings.iter().all(|f| f["severity"] == "warning"));
+    for f in payload["run"]["files"].as_array().unwrap() {
+        assert_eq!(f["analysis"], "credentials_and_infrastructure", "{f:#}");
+    }
+
+    let (code, _) = repo_run(&["audit", "samples/bundle", "--strict"]);
+    assert_eq!(code, Some(1), "--strict gates on the KV003 warnings");
+}
+
+/// dbt's `profiles.yml` stays credentials-only even when a bundle includes
+/// it, and so does a YAML file no bundle includes, with the same keys.
+#[test]
+fn profiles_yml_and_other_yaml_stay_credentials_only() {
+    let dir = tempdir("bundle-profiles");
+    let pinned =
+        "dev:\n  existing_cluster_id: 0923-164208-prdclstr\n  path: s3://prod-orders/raw/\n";
+    write(
+        &dir,
+        "databricks.yml",
+        "bundle:\n  name: b\ninclude:\n  - profiles.yml\n  - resources/*.yml\n",
+    );
+    write(&dir, "profiles.yml", pinned);
+    write(&dir, "other.yml", pinned);
+    let (code, payload) = run_json(&dir, &[]);
+    assert_eq!(code, Some(0), "{payload:#}");
+    common::check_payload(&payload);
+    assert!(kv003s(&payload).is_empty(), "{payload:#}");
+    for name in ["profiles.yml", "other.yml"] {
+        assert_eq!(file_entry(&payload, name)["analysis"], "credentials_only");
+    }
+    assert_eq!(
+        file_entry(&payload, "databricks.yml")["analysis"],
+        "credentials_and_infrastructure"
+    );
+
+    // The samples' own `profiles.yml`, too.
+    let samples = samples_json(&[]);
+    assert_eq!(
+        file_entry(&samples, "frameworks/profiles.yml")["analysis"],
+        "credentials_only"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `infrastructure.bundle_files: false` restores 0.11.0's credentials-only
+/// YAML: no KV003, and `analysis` back to `credentials_only`.
+#[test]
+fn bundle_files_false_turns_bundle_kv003_off() {
+    let dir = tempdir("bundle-off");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::create_dir_all(dir.join("resources")).unwrap();
+    for f in ["databricks.yml", "resources/jobs.yml"] {
+        std::fs::copy(repo.join("samples/bundle").join(f), dir.join(f)).unwrap();
+    }
+    let (_, on) = run_json(&dir, &[]);
+    assert_eq!(kv003s(&on).len(), 2);
+
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\ninfrastructure:\n  bundle_files: false\n",
+    );
+    let (code, off) = run_json(&dir, &[]);
+    assert_eq!(code, Some(0));
+    common::check_payload(&off);
+    assert!(kv003s(&off).is_empty(), "{off:#}");
+    for f in off["run"]["files"].as_array().unwrap() {
+        assert_eq!(f["analysis"], "credentials_only", "{f:#}");
+    }
+    assert_ne!(off["run"]["contract_sha256"], "a6edcff00199c1cf");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `fix` never rewrites or lists KV003, in a bundle file as in Python.
+#[test]
+fn fix_leaves_bundle_kv003_alone() {
+    let (code, stdout) = repo_run(&["fix", "--dry-run", "samples/bundle", "--no-color"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("nothing to fix"), "{stdout}");
+    assert!(!stdout.contains("manual:"), "{stdout}");
 }

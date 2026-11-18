@@ -1,6 +1,7 @@
 //! kv-cli - Kovallent parameter-contract linter for Python codebases.
 
 mod audit;
+mod bundle;
 mod config;
 mod configscan;
 mod fix;
@@ -21,7 +22,7 @@ use payload::{
     FileAnalysis, FileResult, FileStatus, Identity, IdentityFlags, Payload, RunMeta, SkippedFile,
     SCHEMA_VERSION,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -358,8 +359,9 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
 }
 
 /// How a file is read. Python gets the full audit; notebooks and config
-/// files are scanned for credentials only. Anything unrecognised - a file
-/// named explicitly on the command line - is read as Python.
+/// files are scanned for credentials only, and a Databricks asset bundle's
+/// YAML for pinned infrastructure too. Anything unrecognised - a file named
+/// explicitly on the command line - is read as Python.
 enum FileKind {
     Python,
     Notebook,
@@ -1020,7 +1022,12 @@ impl FileOutcome {
     }
 }
 
-fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
+fn audit_file(
+    engine: &Engine,
+    base: &Path,
+    file: &Path,
+    bundles: &HashSet<PathBuf>,
+) -> FileOutcome {
     let rel = audit::normalize_path(base, file);
     let src = match read_source_raw(file) {
         Ok(src) => src,
@@ -1034,10 +1041,16 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
     match file_kind(file) {
         FileKind::Python => {}
         FileKind::Config(kind) => {
+            let bundle = bundles.contains(file);
+            let analysis = if bundle && engine.checks_bundles() {
+                FileAnalysis::CredentialsAndInfrastructure
+            } else {
+                FileAnalysis::CredentialsOnly
+            };
             return FileOutcome {
-                findings: engine.audit_config(&rel, &src, kind, Some(file)),
-                ..FileOutcome::empty(rel, FileAnalysis::CredentialsOnly)
-            }
+                findings: engine.audit_config(&rel, &src, kind, Some(file), bundle),
+                ..FileOutcome::empty(rel, analysis)
+            };
         }
         FileKind::Notebook => {
             let (findings, error) = engine.audit_notebook(&rel, &src);
@@ -1092,11 +1105,24 @@ fn audit_file(engine: &Engine, base: &Path, file: &Path) -> FileOutcome {
 fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutcome> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // Which YAML files belong to a Databricks asset bundle depends on the
+    // bundle root's `include:` globs, so it is settled once, before the
+    // files are shared out.
+    let bundles = if engine.checks_bundles() {
+        bundle::files(files)
+    } else {
+        HashSet::new()
+    };
+    let bundles = &bundles;
+
     let workers = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(files.len());
     if workers <= 1 {
-        return files.iter().map(|f| audit_file(engine, base, f)).collect();
+        return files
+            .iter()
+            .map(|f| audit_file(engine, base, f, bundles))
+            .collect();
     }
 
     let next = AtomicUsize::new(0);
@@ -1111,7 +1137,7 @@ fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutco
                         let Some(file) = files.get(i) else {
                             return done;
                         };
-                        done.push((i, audit_file(engine, base, file)));
+                        done.push((i, audit_file(engine, base, file, bundles)));
                     }
                 })
             })
@@ -1448,6 +1474,9 @@ fn clean_scope(f: &FileResult) -> String {
     match f.analysis {
         FileAnalysis::Full => {}
         FileAnalysis::CredentialsOnly => return "credentials only".to_string(),
+        FileAnalysis::CredentialsAndInfrastructure => {
+            return "credentials and infrastructure checked".to_string()
+        }
         FileAnalysis::Partial => return "partial parse".to_string(),
         FileAnalysis::NotRead => return "not read".to_string(),
     }
@@ -1554,7 +1583,9 @@ fn cmd_fix(
         let manual = match file_kind(file) {
             FileKind::Python => None,
             FileKind::Config(kind) => Some((
-                engine.audit_config(&shown, &src, kind, Some(file.as_path())),
+                // Credentials only: `fix` never rewrites or lists KV003,
+                // in a bundle file as in Python.
+                engine.audit_config(&shown, &src, kind, Some(file.as_path()), false),
                 format!(
                     "credential in {} - move it to the environment or a secret store by hand",
                     kind.label()
