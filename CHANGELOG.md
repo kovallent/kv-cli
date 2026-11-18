@@ -11,7 +11,22 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A GitLab CI/CD component (`templates/kv-cli.yml`) and a CircleCI orb
+  (`orb/`)**: thin wrappers with the GitHub Action's behaviour. Each installs
+  a released kv-cli binary, verified against the release's `SHA256SUMS`, runs
+  `kv-cli audit --format sarif`, keeps the SARIF log as an artifact, and
+  exits with kv-cli's exit code, which is the gate. Inputs: `version`,
+  `paths`, `strict`, `expect-contract`. There is no upload.
+  - Both run one script, `orb/src/scripts/audit.sh`; a test keeps the
+    component's copy byte-identical.
+  - A failure before kv-cli runs (a bad input, a failed download, a checksum
+    mismatch) exits `2`, a tool error, never `1`.
+  - The orb's `expect-contract` is the name of the environment variable that
+    holds the fingerprint, since a CircleCI parameter cannot read one.
+- `docs/ci.md`: GitLab CI/CD and CircleCI sections, each with a copy-paste
+  config pinned to the release.
 
 ---
 

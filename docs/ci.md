@@ -1,6 +1,6 @@
-# CI with the GitHub Action
+# CI: GitHub Actions, GitLab and CircleCI
 
-`action.yml` at the root of this repository is a composite GitHub Action. It installs a released kv-cli binary, runs `kv-cli audit` against your repository's contract, and passes kv-cli's exit code through as the job's result.
+`action.yml` at the root of this repository is a composite GitHub Action. It installs a released kv-cli binary, runs `kv-cli audit` against your repository's contract, and passes kv-cli's exit code through as the job's result. For GitLab and CircleCI there are thin wrappers with the same behaviour: a [GitLab CI/CD component](#gitlab-cicd) and a [CircleCI orb](#circleci).
 
 **The gate is kv-cli's own exit code, not a server's opinion.** It is computed on the runner from the code and the contract in the checkout. No Kovallent service is consulted, so the gate keeps working when the service is down or absent. Uploading the report is optional and best-effort, and it never changes the result.
 
@@ -173,3 +173,71 @@ Code scanning is available for public repositories, and for organization-owned p
 ## Runners
 
 Release assets exist for Linux x64 and arm64 (glibc), macOS x64 and arm64, and Windows x64. The Action runs in `bash` and uses `curl`, `tar`, and `sha256sum` or `shasum`. Annotations and the job summary use `jq`. GitHub-hosted runners have all of these; on a self-hosted runner without `jq`, the Action warns and skips those two steps, and the exit code still gates.
+
+## GitLab CI/CD
+
+`templates/kv-cli.yml` is a GitLab CI/CD component with the Action's behaviour. Its job, `kv-cli-audit`, installs a released kv-cli binary, checks it against the release's `SHA256SUMS` before extracting it, runs `kv-cli audit --format sarif`, and exits with kv-cli's exit code. **The gate is that exit code**: the job fails on findings (`1`), a tool error (`2`) or contract drift (`3`). The component has no upload.
+
+```yaml
+# .gitlab-ci.yml
+include:
+  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.11.0
+    inputs:
+      # A group CI/CD variable: merge-request authors cannot edit it.
+      expect-contract: $KOVALLENT_CONTRACT_SHA
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `version` | the release this component version was published with | kv-cli release to install, e.g. `v0.11.0`. |
+| `paths` | `.` | Files or directories to audit, separated by spaces or newlines. |
+| `strict` | `true` | Treat warnings as gating (`--strict`). A boolean, so GitLab rejects a typo before the pipeline starts. |
+| `expect-contract` | *required, no default* | The fingerprint the contract must have. An unset variable expands to an empty value, which makes kv-cli exit `2`. |
+
+**Keep the expected fingerprint where merge-request authors can't change it**, for the same reason as the GitHub organization variable:
+
+- **Store `KOVALLENT_CONTRACT_SHA` as a group CI/CD variable.** Editing a group variable needs the Owner role in the group, and editing a project variable needs the Maintainer role, so a merge-request author with the Developer role can't change it.
+- **Don't select "Protect variable".** A protected variable reaches a merge-request pipeline only when both its source and target branches are protected. On an ordinary feature branch the value would be empty, and the gate would exit `2` on every merge request.
+- **Keep "Minimum role to use pipeline variables" at `no_one_allowed` or `maintainer`.** A pipeline variable outranks a group or project variable. `no_one_allowed` is the default for new projects on GitLab.com.
+
+The job's SARIF log is kept as the job artifact `kv-cli.sarif`, including when the job fails. It is not a SAST report: `artifacts:reports:sast` accepts only GitLab's own SAST report format, not SARIF. GitLab's `artifacts:reports:sarif` does read SARIF (Ultimate, from GitLab 19.2), but GitLab ingests a security report only from a job that succeeds. This job fails whenever there are findings, so it doesn't declare one.
+
+To block merges, turn on **Pipelines must succeed** under **Settings > Merge requests > Merge checks**. Whoever can edit `.gitlab-ci.yml` can drop the gate, as with a GitHub workflow. Require Code Owner approval for `.gitlab-ci.yml` (Premium), or add the job to every project with a pipeline execution policy (Ultimate), which a project's own configuration can't remove.
+
+To change the job, define a job of the same name: GitLab merges it with the component's. For example, set `stage`, `rules`, `tags`, or an `image` of your own. The image needs bash, curl, tar and `sha256sum` or `shasum`, on glibc: the Linux release binaries can't run on Alpine (musl). Release binaries exist for Linux (x86-64, arm64) and macOS runners. On GitLab Self-Managed, use the component from a mirror of the component project, because components can only be included from the same instance.
+
+## CircleCI
+
+`orb/` is a CircleCI orb with the same behaviour. Its `audit` command installs a released kv-cli binary, checks it against the release's `SHA256SUMS` before extracting it, runs `kv-cli audit --format sarif`, stores the SARIF log with `store_artifacts`, and exits with kv-cli's exit code. `store_artifacts` runs even when the audit step has failed. The `audit` job checks out the code and runs the command. **The gate is the job's exit code**, so make the job a required status check in your repository's branch protection. The orb has no upload.
+
+```yaml
+# .circleci/config.yml
+version: 2.1
+
+orbs:
+  kv-cli: kovallent/kv-cli@0.11.0
+
+workflows:
+  kovallent:
+    jobs:
+      - kv-cli/audit:
+          # This name is the status check you make required.
+          name: Kovallent gate
+          # The name of a project environment variable, not its value.
+          expect-contract: KOVALLENT_CONTRACT_SHA
+```
+
+The inputs are the component's, as orb parameters, except that **`expect-contract` is the name of the environment variable** that holds the fingerprint. A CircleCI parameter can't read an environment variable's value. An unset or empty variable makes kv-cli exit `2`.
+
+**Keep the expected fingerprint where pull-request authors can't change it.** Set `KOVALLENT_CONTRACT_SHA` in **Project Settings > Environment Variables**. In CircleCI's roles for `circleci`-type organizations, managing project settings needs the Admin role, which Contributors don't have. Don't put it in a context: Contributors can edit context variables. By default, CircleCI doesn't pass project environment variables to builds of pull requests from forks, so those builds exit `2`: the gate fails rather than passes. Whoever can edit `.circleci/config.yml` can drop the gate, as with a GitHub workflow, so protect it with code-owner review in your VCS.
+
+To run the audit in a job of your own, use the command after `checkout`:
+
+```yaml
+steps:
+  - checkout
+  - kv-cli/audit:
+      expect-contract: KOVALLENT_CONTRACT_SHA
+```
+
+The `audit` job uses `cimg/base:current`. An executor of your own needs bash, curl, tar and `sha256sum` or `shasum`, on glibc: the Linux release binaries can't run on Alpine (musl). Release binaries exist for Linux (x86-64, arm64) and macOS.

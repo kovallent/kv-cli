@@ -1,0 +1,107 @@
+name: CI wrappers
+
+# Runs the script that the GitLab component (templates/kv-cli.yml) and the
+# CircleCI orb (orb/) both execute against samples/, with a real download
+# from a release, verified against its SHA256SUMS. The component carries a
+# byte-identical copy of orb/src/scripts/audit.sh, which `cargo test` checks.
+# Each case passes inputs the way its wrapper does: GitLab expands the
+# fingerprint's variable into KV_EXPECT_CONTRACT, while the orb passes the
+# variable's name in KV_EXPECT_CONTRACT_VAR.
+#
+# GitLab and CircleCI themselves do not run here, so their YAML is not
+# exercised: this checks the script, on the platforms the wrappers support.
+
+on:
+  pull_request:
+    paths:
+      - templates/**
+      - orb/**
+      - samples/**
+      - .github/workflows/ci-wrappers.yml
+  push:
+    branches: [main]
+    paths:
+      - templates/**
+      - orb/**
+      - samples/**
+      - .github/workflows/ci-wrappers.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-wrappers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The first release with --format sarif.
+  KV_VERSION: v0.11.0
+  # Fingerprint of kv-cli's built-in default contract, which samples/ uses
+  # because no .kovallent.yaml sits above it. Adding one changes this value.
+  SAMPLES_CONTRACT: a6edcff00199c1cf
+
+jobs:
+  script:
+    name: Wrapper script on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run each case and check its exit code
+        shell: bash
+        run: |
+          fail=0
+          results=()
+          # case <name> <expected exit code> [VAR=value ...]
+          case_() {
+            local name=$1 want=$2 got=0
+            shift 2
+            local sarif="$RUNNER_TEMP/$name.sarif"
+            echo "::group::$name (expect exit $want)"
+            env -i PATH="$PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+              KV_VERSION="$KV_VERSION" KV_SARIF="$sarif" "$@" \
+              bash orb/src/scripts/audit.sh || got=$?
+            # kv-cli writes a SARIF log whenever it gets as far as auditing.
+            if [ "$got" = 0 ] || [ "$got" = 1 ] || [ "$got" = 3 ]; then
+              jq -e '.version == "2.1.0" and (.runs | length == 1)' "$sarif" > /dev/null \
+                || { echo "::error title=CI wrappers::$name: no valid SARIF log"; fail=1; }
+            fi
+            echo "::endgroup::"
+            if [ "$got" = "$want" ]; then
+              results+=("ok    $name: exit $got")
+            else
+              results+=("FAIL  $name: expected exit $want, got $got")
+              echo "::error title=CI wrappers::$name: expected exit $want, got $got"
+              fail=1
+            fi
+          }
+
+          # GitLab: the fingerprint arrives expanded, unset variables as empty.
+          case_ "gitlab samples (findings)" 1 \
+            KV_PATHS=samples/ KV_STRICT=true KV_EXPECT_CONTRACT="$SAMPLES_CONTRACT"
+          case_ "gitlab compliant.py" 0 \
+            KV_PATHS=samples/compliant.py KV_STRICT=true KV_EXPECT_CONTRACT="$SAMPLES_CONTRACT"
+          case_ "gitlab unset variable (tool error)" 2 \
+            KV_PATHS=samples/compliant.py KV_STRICT=true KV_EXPECT_CONTRACT=
+          case_ "gitlab wrong fingerprint (drift)" 3 \
+            KV_PATHS=samples/compliant.py KV_STRICT=true KV_EXPECT_CONTRACT=0000000000000000
+          case_ "gitlab strict false" 0 \
+            KV_PATHS=samples/compliant.py KV_STRICT=false KV_EXPECT_CONTRACT="$SAMPLES_CONTRACT"
+
+          # CircleCI: the orb passes the name of the variable, not its value.
+          case_ "circleci samples (findings)" 1 \
+            KV_PATHS=samples/ KV_STRICT=true \
+            KV_EXPECT_CONTRACT_VAR=KOVALLENT_CONTRACT_SHA KOVALLENT_CONTRACT_SHA="$SAMPLES_CONTRACT"
+          case_ "circleci compliant.py" 0 \
+            KV_PATHS=samples/compliant.py KV_STRICT=true \
+            KV_EXPECT_CONTRACT_VAR=KOVALLENT_CONTRACT_SHA KOVALLENT_CONTRACT_SHA="$SAMPLES_CONTRACT"
+          case_ "circleci unset variable (tool error)" 2 \
+            KV_PATHS=samples/compliant.py KV_STRICT=true KV_EXPECT_CONTRACT_VAR=KOVALLENT_CONTRACT_SHA
+
+          printf '%s\n' "${results[@]}"
+          exit "$fail"
