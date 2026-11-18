@@ -64,6 +64,11 @@ infrastructure:
 
 ## Upgrading
 
+**Upgrading to 0.10.0.** Fingerprints do not change, but two behaviours do, and both can change your findings.
+
+- **KV003's name rule waits for a framework.** `infrastructure.key_patterns` (by default `*warehouse*`, `*catalog*`, `*cluster_id*`, `*workspace_url*`, `*bucket*`, plus any you added) now applies only in Python files where a framework profile is detected. In other Python files, a `warehouse = "PROD_WH"` is no longer reported. Value patterns, such as `s3://` URIs, still apply everywhere, and so do each profile's own key rules where the profile is detected. To keep 0.9.0's behaviour, set `infrastructure.global_key_patterns_require_framework: false`. Unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
+- **Framework decorators are resolved through imports.** A decorator a profile owns or governs, such as `@table`, `@view`, `@udf`, `@pandas_udf` or Airflow's `@task`, now counts only if the file imports it from that framework (`from dlt import table`, `import pyspark.sql.functions as F` then `@F.pandas_udf`). A decorator imported from elsewhere or defined in the file, such as Flask's `@app.view` or a local `def table(f): ...`, no longer exempts its function, so the function is checked against the contract and may now get KV001. A decorator whose name is bound nowhere in the file is still matched by name, as before.
+
 **Upgrading to 0.7.1.** Fingerprints do not change. A credential assigned on a line after a syntax error, such as `password = "s3cr3t"`, is now reported as KV002; its detail says it was read from a line that does not parse. Load the value from the environment as for any KV002. Fixing only the syntax error does not clear it, because the file then parses and the credential is found the usual way.
 
 **Upgrading to 0.7.0.** Fingerprints do not change. A literal inside a Jinja template is now reported: `{{ env_var('DBT_PASSWORD', 's3cr3t') }}` falls back to a hardcoded password, so it is KV002. Remove the fallback, or use a placeholder such as `'changeme'`.

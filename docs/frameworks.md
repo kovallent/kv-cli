@@ -13,7 +13,11 @@ Run `kv-cli frameworks` for the live list. Each profile is scoped to files that 
 
 **Signatures a framework owns are exempt from `KV001`.** A `@dlt.table` function takes no arguments because DLT calls it; `def model(dbt, session)` is fixed by dbt. Injecting `target_environment` there would break the pipeline, so the exemption overrides the user's own name patterns — a function called `daily_sales_job` matches `*_job`, but under `@dlt.table` it is left alone. Airflow's `@dag` is owned for the same reason: its parameters become DAG params shown in the UI and in `{{ params.* }}`, so adding them silently changes the DAG.
 
+**An owned or governed decorator must come from the framework.** `@table`, `@view`, `@udf`, `@pandas_udf` and `@task` are common names, so a decorator counts only when the file imports it from the framework: `from dlt import table`, or `import pyspark.sql.functions as F` for `@F.pandas_udf`. A decorator imported from anywhere else, or defined in the file, such as Flask's `@app.view` or a local `def table(f): ...`, exempts nothing: its function is checked like any other, and the decorator does not make the file count as a framework file. A decorator whose name the file never binds still matches by name, since such code cannot run unless a star import supplies it.
+
 User `exempt_name_patterns` still win over framework rules, so `@task def _internal_step()` stays out of scope.
+
+The contract's own KV003 name rule, `infrastructure.key_patterns` (`*warehouse*`, `*bucket*` and the rest), waits for a framework too: by default it applies only in files where a profile is detected. See [KV003](rules/KV003.md).
 
 A profile can also work the other way: `governed_decorators` puts functions **into** `KV001` scope. Airflow's `@task` is the one case — TaskFlow tasks are called from your own DAG body, so the contract parameter can be threaded through at the call site. Declaring it on the profile means the behaviour no longer depends on your contract happening to list a decorator named `task`.
 

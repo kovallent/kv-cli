@@ -141,6 +141,10 @@
           },
           "type": "array"
         },
+        "global_key_patterns_require_framework": {
+          "description": "Apply `key_patterns` only in files where a framework profile applies.\nIn a file that uses no data framework, `warehouse` or `bucket` is as\nlikely to be a CLI option or a test fixture as a deployment target, so\nthe default skips the key rule there. `value_patterns` and each\nprofile's own key rules apply as before. Set to `false` for 0.9.0's\nbehaviour: `key_patterns` in every Python file.",
+          "type": "boolean"
+        },
         "ignore_marker": {
           "default": "kovallent:allow-infra",
           "type": "string"

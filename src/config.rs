@@ -106,6 +106,22 @@ pub struct InfraConfig {
     /// identifier, e.g. a `cluster_id_column`. Checked before key patterns.
     #[serde(default = "default_infra_exempt")]
     pub exempt_key_patterns: Vec<String>,
+    /// Apply `key_patterns` only in files where a framework profile applies.
+    /// In a file that uses no data framework, `warehouse` or `bucket` is as
+    /// likely to be a CLI option or a test fixture as a deployment target, so
+    /// the default skips the key rule there. `value_patterns` and each
+    /// profile's own key rules apply as before. Set to `false` for 0.9.0's
+    /// behaviour: `key_patterns` in every Python file.
+    //
+    // Left out of the serialized contract while it holds its default, so the
+    // built-in contract, and every contract that does not set it, keeps the
+    // fingerprint it had before the field existed (ADR 0001).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub global_key_patterns_require_framework: bool,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 // Per-field defaults delegate to each section's `Default`, so omitting a key
@@ -210,6 +226,7 @@ impl Default for InfraConfig {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            global_key_patterns_require_framework: true,
         }
     }
 }
@@ -1185,6 +1202,10 @@ infrastructure:
     - "*cluster_id*"
     - "*workspace_url*"
     - "*bucket*"
+  # key_patterns apply only in files that use a data framework (a profile
+  # is detected). Value patterns apply everywhere. false: key_patterns in
+  # every Python file, as before 0.10.0.
+  global_key_patterns_require_framework: true
   value_patterns:
     - name: object_store_uri
       regex: '\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\s\x22'']+'
