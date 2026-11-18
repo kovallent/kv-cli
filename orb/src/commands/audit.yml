@@ -1,0 +1,47 @@
+description: >
+  Install a released kv-cli binary, verified against the release's
+  SHA256SUMS, run `kv-cli audit --format sarif` in the working directory,
+  and store the SARIF log as an artifact. The step exits with kv-cli's exit
+  code: 0 compliant, 1 findings, 2 tool error, 3 contract drift. Run it after
+  `checkout`.
+
+parameters:
+  version:
+    type: string
+    default: v0.11.0
+    description: >
+      kv-cli release to run, for example v0.11.0. Defaults to the release this
+      version of the orb was published with.
+  paths:
+    type: string
+    default: "."
+    description: >
+      Files or directories to audit, separated by spaces or newlines, relative
+      to the working directory.
+  strict:
+    type: boolean
+    default: true
+    description: Treat warnings as gating (`--strict`).
+  expect-contract:
+    type: env_var_name
+    description: >
+      Name of the environment variable holding the fingerprint the contract
+      must have, such as KOVALLENT_CONTRACT_SHA. Keep it where pull-request
+      authors cannot edit it. An unset or empty variable makes kv-cli exit 2,
+      so a gate whose variable was never set fails instead of passing.
+
+steps:
+  - run:
+      name: kv-cli audit
+      environment:
+        KV_VERSION: << parameters.version >>
+        KV_PATHS: << parameters.paths >>
+        KV_STRICT: << parameters.strict >>
+        KV_EXPECT_CONTRACT_VAR: << parameters.expect-contract >>
+        KV_SARIF: kv-cli.sarif
+      command: <<include(scripts/audit.sh)>>
+  # store_artifacts runs even when the step above has failed, which is when
+  # the log is most useful.
+  - store_artifacts:
+      path: kv-cli.sarif
+      destination: kv-cli.sarif

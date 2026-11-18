@@ -38,4 +38,9 @@ The same tag runs `.github/workflows/wheels.yml`, which builds seven wheels (Lin
 
 **After each PyPI publish, bump and tag the pre-commit mirror to the same version.** In [kovallent/kv-cli-pre-commit](https://github.com/kovallent/kv-cli-pre-commit), set `version`, the `kv-cli==` pin in `pyproject.toml` and the README's `rev:` to `X.Y.Z`, then push the tag `vX.Y.Z`. Its CI fails if the four disagree. The README's pre-commit snippet here names that mirror at `rev: vX.Y.Z`, so the mirror's tag has to exist before the release is announced.
 
+**After each release, publish the CircleCI orb and the GitLab component at the same version.** Their `version` default and the pins in `docs/ci.md` name the release in `Cargo.toml` (a test fails otherwise), so version `X.Y.Z` of either installs kv-cli `vX.Y.Z`.
+
+- **Orb:** `circleci orb pack orb/src > orb.yml`, `circleci orb validate orb.yml`, then `circleci orb publish orb.yml kovallent/kv-cli@X.Y.Z`.
+- **Component:** in the GitLab component project, at the release commit, push the tag `X.Y.Z` (no `v`: the CI/CD Catalog needs a semantic version). Its tag pipeline's `release` job publishes it.
+
 The tap update needs a repository secret, `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token limited to `kovallent/homebrew-tap`, with **Contents: Read and write**. Without it, the release still publishes, but the `homebrew` job fails and brew users stay on the previous version. Fine-grained tokens expire, so renew it before the expiry date you chose.

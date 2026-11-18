@@ -1,0 +1,41 @@
+description: >
+  Check out the code and run the `audit` command. kv-cli's exit code is the
+  job's result, so make this job a required status check to block merges.
+
+docker:
+  # Bash, curl, tar and sha256sum on glibc: the Linux release binaries cannot
+  # run on Alpine (musl).
+  - image: cimg/base:current
+
+parameters:
+  version:
+    type: string
+    default: v0.11.0
+    description: >
+      kv-cli release to run, for example v0.11.0. Defaults to the release this
+      version of the orb was published with.
+  paths:
+    type: string
+    default: "."
+    description: >
+      Files or directories to audit, separated by spaces or newlines, relative
+      to the checkout.
+  strict:
+    type: boolean
+    default: true
+    description: Treat warnings as gating (`--strict`).
+  expect-contract:
+    type: env_var_name
+    description: >
+      Name of the environment variable holding the fingerprint the contract
+      must have, such as KOVALLENT_CONTRACT_SHA. Keep it where pull-request
+      authors cannot edit it. An unset or empty variable makes kv-cli exit 2,
+      so a gate whose variable was never set fails instead of passing.
+
+steps:
+  - checkout
+  - audit:
+      version: << parameters.version >>
+      paths: << parameters.paths >>
+      strict: << parameters.strict >>
+      expect-contract: << parameters.expect-contract >>

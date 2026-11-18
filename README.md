@@ -172,7 +172,11 @@ jobs:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 
-To upload the JSON report, set `upload-url`. The Action authenticates with a GitHub Actions OIDC token, so **the calling workflow needs `permissions: id-token: write`**. The upload is best-effort and never changes the result. [CI with the GitHub Action](docs/ci.md) covers every input, making the job a required status check, and protecting `.github/workflows/` with `CODEOWNERS`.
+To upload the JSON report, set `upload-url`. The Action authenticates with a GitHub Actions OIDC token, so **the calling workflow needs `permissions: id-token: write`**. The upload is best-effort and never changes the result. [CI](docs/ci.md) covers every input, making the job a required status check, and protecting `.github/workflows/` with `CODEOWNERS`.
+
+### With GitLab CI/CD or CircleCI
+
+A [GitLab CI/CD component](docs/ci.md#gitlab-cicd) and a [CircleCI orb](docs/ci.md#circleci) do what the Action does: they install the release binary, verify it against `SHA256SUMS`, run `kv-cli audit --format sarif`, keep the SARIF log as an artifact, and exit with kv-cli's exit code. They have no upload.
 
 ### Without the Action
 
@@ -336,7 +340,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 - **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), also available offline as `kv-cli explain <code>`.
 - [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
 - [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
-- [CI with the GitHub Action](docs/ci.md): the Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF.
+- [CI](docs/ci.md): the GitHub Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF, and the GitLab CI/CD component and CircleCI orb.
 - [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
 - [JSON payload](docs/json-payload.md): the `--format json` schema.
 - [How it works](docs/how-it-works.md): the AST scanner, config scanners and what `fix` changes.

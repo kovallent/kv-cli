@@ -1917,3 +1917,319 @@ fn a_skipped_file_is_a_sarif_notification() {
         "audited on a partial parse; some findings may be hidden"
     );
 }
+
+// --- GitLab component and CircleCI orb --------------------------------------
+
+fn repo_file(path: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// `templates/kv-cli.yml` as GitLab reads it: the `spec` header, then the job.
+fn gitlab_component() -> (serde_yaml::Value, serde_yaml::Value) {
+    use serde::Deserialize;
+    let text = repo_file("templates/kv-cli.yml");
+    let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(&text)
+        .map(|doc| serde_yaml::Value::deserialize(doc).unwrap())
+        .collect();
+    assert_eq!(docs.len(), 2, "a component is a spec header and a body");
+    (docs[0].clone(), docs[1].clone())
+}
+
+fn orb_part(path: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(&repo_file(&format!("orb/src/{path}"))).unwrap()
+}
+
+/// The GitLab component and the CircleCI orb run one script: the orb
+/// includes `orb/src/scripts/audit.sh`, and the component carries a
+/// byte-identical copy. The install, the SHA256SUMS check and the exit code
+/// are reviewed, and tested below, once.
+#[test]
+fn ci_wrappers_run_the_same_script() {
+    let script = repo_file("orb/src/scripts/audit.sh");
+
+    let (_, body) = gitlab_component();
+    let steps = body["kv-cli-audit"]["script"].as_sequence().unwrap();
+    assert_eq!(
+        steps.last().and_then(|s| s.as_str()),
+        Some(script.as_str()),
+        "the script in templates/kv-cli.yml differs from orb/src/scripts/audit.sh"
+    );
+
+    let command = orb_part("commands/audit.yml");
+    assert_eq!(
+        command["steps"][0]["run"]["command"].as_str(),
+        Some("<<include(scripts/audit.sh)>>")
+    );
+
+    // `<<` opens CircleCI parameter syntax even inside an included script,
+    // and `$[[` opens GitLab input interpolation, so neither may appear.
+    assert!(!script.contains("<<"), "the script must not contain `<<`");
+    assert!(!script.contains("$[["), "the script must not contain `$[[`");
+}
+
+/// Both wrappers take the Action's inputs, minus its GitHub-only ones, with
+/// the Action's defaults. `version` defaults to this release, so a wrapper
+/// published with a release installs that release, and every documented pin
+/// names it.
+#[test]
+fn ci_wrappers_take_the_actions_inputs_and_pin_this_release() {
+    let version = env!("CARGO_PKG_VERSION");
+    let tag = format!("v{version}");
+    let names = ["version", "paths", "strict", "expect-contract"];
+
+    let action: serde_yaml::Value = serde_yaml::from_str(&repo_file("action.yml")).unwrap();
+    let inputs = &action["inputs"];
+    for name in names {
+        assert!(
+            inputs.get(name).is_some(),
+            "action.yml has no `{name}` input"
+        );
+    }
+    assert_eq!(inputs["paths"]["default"].as_str(), Some("."));
+    assert_eq!(inputs["strict"]["default"].as_str(), Some("true"));
+
+    let keys = |m: &serde_yaml::Value| -> Vec<String> {
+        m.as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (header, _) = gitlab_component();
+    let wrappers = [
+        ("templates/kv-cli.yml", header["spec"]["inputs"].clone()),
+        (
+            "orb command",
+            orb_part("commands/audit.yml")["parameters"].clone(),
+        ),
+        ("orb job", orb_part("jobs/audit.yml")["parameters"].clone()),
+    ];
+    for (what, params) in &wrappers {
+        assert_eq!(keys(params), names, "{what} inputs");
+        assert_eq!(
+            params["version"]["default"].as_str(),
+            Some(tag.as_str()),
+            "{what} version"
+        );
+        assert_eq!(
+            params["paths"]["default"].as_str(),
+            Some("."),
+            "{what} paths"
+        );
+        assert_eq!(
+            params["strict"]["default"].as_bool(),
+            Some(true),
+            "{what} strict"
+        );
+        assert!(
+            params["expect-contract"].get("default").is_none(),
+            "{what}: expect-contract must be required, as in action.yml"
+        );
+    }
+
+    // The orb example and docs/ci.md pin this release, and nothing else.
+    let example = orb_part("examples/gate.yml");
+    assert_eq!(
+        example["usage"]["orbs"]["kv-cli"].as_str(),
+        Some(format!("kovallent/kv-cli@{version}").as_str())
+    );
+    let docs = repo_file("docs/ci.md");
+    for (what, pattern) in [
+        (
+            "GitLab component",
+            r"component: \S+/kovallent/kv-cli/kv-cli@(\S+)",
+        ),
+        ("CircleCI orb", r"kv-cli: kovallent/kv-cli@(\S+)"),
+    ] {
+        let pins: Vec<&str> = regex::Regex::new(pattern)
+            .unwrap()
+            .captures_iter(&docs)
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
+        assert!(!pins.is_empty(), "docs/ci.md has no {what} pin");
+        for pin in pins {
+            assert_eq!(pin, version, "docs/ci.md {what} pin is stale");
+        }
+    }
+}
+
+/// The release asset name the wrapper script asks for on this machine,
+/// worked out from `uname` the way the script does.
+#[cfg(unix)]
+fn wrapper_asset() -> String {
+    let uname = |flag: &str| {
+        let out = Command::new("uname")
+            .arg(flag)
+            .output()
+            .expect("uname runs");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let target = match (uname("-s").as_str(), uname("-m").as_str()) {
+        ("Linux", "x86_64" | "amd64") => "x86_64-unknown-linux-gnu",
+        ("Linux", "aarch64" | "arm64") => "aarch64-unknown-linux-gnu",
+        ("Darwin", "x86_64") => "x86_64-apple-darwin",
+        ("Darwin", "arm64") => "aarch64-apple-darwin",
+        other => panic!("no kv-cli release asset for {other:?}"),
+    };
+    format!("kv-cli-{target}.tar.gz")
+}
+
+/// The wrapper script installs only what the release's SHA256SUMS vouches
+/// for, and exits with kv-cli's exit code. It runs offline against a fake
+/// release holding this build of kv-cli: `curl` is a stand-in on PATH that
+/// serves files from the release directory and logs every URL it is given.
+#[cfg(unix)]
+#[test]
+fn ci_wrapper_script_verifies_sha256sums_and_passes_the_exit_code() {
+    use sha2::{Digest, Sha256};
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = tempdir("ci-wrapper");
+    let release = dir.join("release");
+    let stub = dir.join("stub");
+    let pkg = dir.join("pkg");
+    for d in [&release, &stub, &pkg] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    let asset = wrapper_asset();
+    std::fs::copy(bin(), pkg.join("kv-cli")).unwrap();
+    let tar = Command::new("sh")
+        .arg("-c")
+        .arg(r#"tar -cf - -C "$1" kv-cli | gzip -1 > "$2""#)
+        .args(["sh", pkg.to_str().unwrap()])
+        .arg(release.join(&asset))
+        .status()
+        .unwrap();
+    assert!(tar.success());
+    let sum = Sha256::digest(std::fs::read(release.join(&asset)).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let sums = |text: &str| std::fs::write(release.join("SHA256SUMS"), text).unwrap();
+
+    write(
+        &stub,
+        "curl",
+        "#!/bin/sh\n\
+         # Stand-in for curl: serve release files and log each URL.\n\
+         out= url=\n\
+         while [ $# -gt 0 ]; do\n\
+         \x20 case \"$1\" in -o) out=$2; shift ;; -*) ;; *) url=$1 ;; esac\n\
+         \x20 shift\n\
+         done\n\
+         echo \"$url\" >> \"$FAKE_RELEASE/requests.log\"\n\
+         [ -f \"$FAKE_RELEASE/${url##*/}\" ] || exit 22\n\
+         cp \"$FAKE_RELEASE/${url##*/}\" \"$out\"\n",
+    );
+    std::fs::set_permissions(
+        stub.join("curl"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let sarif = dir.join("kv-cli.sarif");
+    let run = |vars: &[(&str, &str)]| {
+        let _ = std::fs::remove_file(&sarif);
+        let _ = std::fs::remove_file(release.join("requests.log"));
+        let out = Command::new("bash")
+            .arg(repo.join("orb/src/scripts/audit.sh"))
+            .current_dir(repo)
+            .env_clear()
+            .env("PATH", &path)
+            .env("TMPDIR", &dir)
+            .env("FAKE_RELEASE", &release)
+            .env("KV_VERSION", concat!("v", env!("CARGO_PKG_VERSION")))
+            .env("KV_STRICT", "true")
+            .env("KV_SARIF", &sarif)
+            .envs(vars.iter().copied())
+            .output()
+            .expect("bash runs");
+        let requests = std::fs::read_to_string(release.join("requests.log")).unwrap_or_default();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            requests,
+        )
+    };
+    let contract = [("KV_EXPECT_CONTRACT", "a6edcff00199c1cf")];
+
+    // A good release: kv-cli's own exit code comes through, with its log.
+    sums(&format!("{sum}  {asset}\n"));
+    let (code, stdout, stderr, requests) = run(&[contract[0], ("KV_PATHS", "samples/")]);
+    assert_eq!(code, Some(1), "samples/ has findings\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains(&format!("Verified {asset} against SHA256SUMS")),
+        "{stdout}"
+    );
+    let base = concat!(
+        "https://github.com/kovallent/kv-cli/releases/download/v",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(requests, format!("{base}/{asset}\n{base}/SHA256SUMS\n"));
+    let log: serde_json::Value = serde_json::from_slice(&std::fs::read(&sarif).unwrap()).unwrap();
+    assert_eq!(log["version"], "2.1.0");
+    assert!(!log["runs"][0]["results"].as_array().unwrap().is_empty());
+
+    let (code, ..) = run(&[contract[0], ("KV_PATHS", "samples/compliant.py")]);
+    assert_eq!(code, Some(0));
+    // The CircleCI form: the name of the variable holding the fingerprint.
+    let (code, ..) = run(&[
+        ("KV_EXPECT_CONTRACT_VAR", "KOVALLENT_CONTRACT_SHA"),
+        ("KOVALLENT_CONTRACT_SHA", "a6edcff00199c1cf"),
+        ("KV_PATHS", "samples/compliant.py"),
+    ]);
+    assert_eq!(code, Some(0));
+    let (code, ..) = run(&[("KV_PATHS", "samples/compliant.py")]);
+    assert_eq!(code, Some(2), "an unset expect-contract is a tool error");
+    let (code, ..) = run(&[
+        ("KV_EXPECT_CONTRACT", "0000000000000000"),
+        ("KV_PATHS", "samples/compliant.py"),
+    ]);
+    assert_eq!(code, Some(3), "a wrong expect-contract is contract drift");
+
+    // SHA256SUMS that does not vouch for the download: exit 2, and kv-cli
+    // never runs, so no log is written.
+    let wrong = format!("{:0>64}", "1");
+    for (case, text, says) in [
+        (
+            "mismatch",
+            format!("{wrong}  {asset}\n"),
+            "checksum mismatch",
+        ),
+        (
+            "no entry",
+            format!("{sum}  kv-cli-other.tar.gz\n"),
+            "has 0 entries",
+        ),
+        (
+            "two entries",
+            format!("{sum}  {asset}\n{sum}  {asset}\n"),
+            "has 2 entries",
+        ),
+    ] {
+        sums(&text);
+        let (code, stdout, stderr, _) = run(&contract);
+        assert_eq!(code, Some(2), "{case}\n{stdout}\n{stderr}");
+        assert!(stderr.contains(says), "{case}: {stderr}");
+        assert!(
+            !stdout.contains("Installed"),
+            "{case}: kv-cli was installed\n{stdout}"
+        );
+        assert!(!sarif.exists(), "{case}: kv-cli ran");
+    }
+
+    // A typo in `strict` fails before anything is downloaded.
+    let (code, _, stderr, requests) = run(&[contract[0], ("KV_STRICT", "ture")]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("must be true or false"), "{stderr}");
+    assert!(
+        requests.is_empty(),
+        "downloaded before validating: {requests}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,12 @@
+version: 2.1
+
+description: >
+  Gate a pull request on kv-cli's exit code. Installs a released kv-cli
+  binary, verified against the release's SHA256SUMS, runs
+  `kv-cli audit --format sarif`, and stores the SARIF log as an artifact.
+  The gate is kv-cli's exit code, computed in the job from the code and the
+  contract in the checkout; no Kovallent service is consulted.
+
+display:
+  home_url: https://github.com/kovallent/kv-cli
+  source_url: https://github.com/kovallent/kv-cli
