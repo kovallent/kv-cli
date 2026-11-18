@@ -69,6 +69,16 @@ pub fn fix_source(engine: &Engine, path: &Path, source: &str) -> FixReport {
     if engine.contract.fix.externalize_secrets {
         needs_os_import = collect_secret_edits(engine, &ctx, source, &a, &mut edits, &mut report);
     }
+    // KV004: never renamed, because a rename breaks every caller. The same
+    // findings `audit` reports, each left to a human.
+    for f in ctx.naming_findings(&display(&report.file), &a) {
+        report.skipped.push(format!(
+            "{}:{} {} - rename it and its callers by hand",
+            display(&report.file),
+            f.line,
+            f.message
+        ));
+    }
 
     if edits.is_empty() {
         return report;

@@ -1,6 +1,6 @@
 # Contract configuration (`.kovallent.yaml`)
 
-`.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), and the secret detectors. Run `kv-cli init` for a fully commented template.
+`.kovallent.yaml` drives everything: which files are scanned, which parameters are required (with the annotation and default `fix` writes), which functions are governed (by name pattern, decorator, or `all_functions`), the secret detectors, and any naming rules for functions (`KV004`). Run `kv-cli init` for a fully commented template.
 
 Any key you leave out keeps its default, so a contract can be as small as the rules you change — `kv-cli contract show` prints the effective contract with every inherited default marked.
 
@@ -37,12 +37,13 @@ Mistakes in a contract are caught at three points, each before they can quietly 
 
   It takes contract files by name too (`kv-cli contract check svc/.kovallent.yaml`), which is how the `kv-cli-contract` pre-commit hook runs it.
 
-- **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line), a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled.
+- **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line, or, as a naming pattern, require nothing of a name), a naming rule has no name or shares one, a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled.
 
 ## How patterns match
 
 - **Paths** (`scan.include`, `scan.exclude`) follow `.gitignore` rules, relative to the folder holding the contract — whichever folder you scan, so `kv-cli audit src` and `kv-cli audit .` agree. `*` stays within one folder (`src/*.py` is not `src/deep/a.py`); `**` spans any number of folders; a pattern with no `/` matches the file name at any depth (`*.py`). Files named on the command line need no `include` match, but `exclude` applies to them.
 - **Names** — function names, decorators, secret and infrastructure keys — are matched ignoring case, with `*` and `?`. Key names are also tried in snake_case, so `*private_key*` matches `privateKey`.
+- **Naming patterns** (`naming.rules[].pattern`) are regexes, not wildcards, matched against the whole function name and case-sensitive unless the pattern says `(?i)`. `applies_to: in_scope` checks governed and framework-exempt functions, `all_functions` every function, and `applies_to.exempt_name_patterns` wins over both. See [`KV004`](rules/KV004.md).
 - **Why a function is governed** is stated on each KV001 finding: `in scope: name matches applies_to.name_patterns "deploy*"`, a decorator, `all_functions`, or a framework profile — the contract's own rules first.
 
 ```yaml

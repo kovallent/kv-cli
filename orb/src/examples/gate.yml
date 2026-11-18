@@ -6,7 +6,7 @@ description: >
 usage:
   version: 2.1
   orbs:
-    kv-cli: kovallent/kv-cli@0.11.0
+    kv-cli: kovallent/kv-cli@0.12.0
   workflows:
     kovallent:
       jobs:

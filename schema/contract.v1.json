@@ -196,6 +196,78 @@
       },
       "type": "object"
     },
+    "NamingConfig": {
+      "additionalProperties": false,
+      "description": "KV004: a function whose name does not match a naming rule. Report-only:\n`kv-cli fix` never renames a function, because a rename breaks every\ncaller.",
+      "properties": {
+        "rules": {
+          "default": [],
+          "description": "Each rule checks a set of functions against one pattern. With no\nrules, KV004 reports nothing.",
+          "items": {
+            "$ref": "#/definitions/NamingRule"
+          },
+          "type": "array"
+        },
+        "severity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Severity"
+            }
+          ],
+          "default": "warning",
+          "description": "Severity of every KV004 finding. Defaults to `warning`, so adopting a\nnaming rule does not break CI on day one; `--strict` gates on it."
+        }
+      },
+      "type": "object"
+    },
+    "NamingRule": {
+      "additionalProperties": false,
+      "description": "One naming rule: the functions it checks, and the pattern their names\nmust match.",
+      "properties": {
+        "applies_to": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NamingScope"
+            }
+          ],
+          "default": "in_scope",
+          "description": "Which functions the rule checks. `applies_to.exempt_name_patterns`\nstill wins either way."
+        },
+        "message": {
+          "default": "",
+          "description": "Why the rule exists, shown under each finding.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Names the rule in findings, as their `subject`.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "A regex the whole function name must match, e.g.\n`^[a-z][a-z0-9_]*$`. It must not match the empty string.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "NamingScope": {
+      "description": "The functions a naming rule checks.",
+      "oneOf": [
+        {
+          "const": "in_scope",
+          "description": "Functions in scope of the parameter contract, framework-exempt ones\nincluded: a framework owns a signature, not a name.",
+          "type": "string"
+        },
+        {
+          "const": "all_functions",
+          "description": "Every function definition.",
+          "type": "string"
+        }
+      ]
+    },
     "RequiredParameter": {
       "additionalProperties": false,
       "description": "A parameter that in-scope functions are required to accept.",
@@ -574,6 +646,14 @@
         ]
       },
       "description": "KV003: identifiers that should vary by environment."
+    },
+    "naming": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/NamingConfig"
+        }
+      ],
+      "description": "KV004: naming rules for functions. None by default, so KV004 reports\nnothing until a contract adds one."
     },
     "parameters": {
       "default": [

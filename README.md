@@ -8,13 +8,14 @@
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/kovallent/kv-cli/releases)
 [![Discussions](https://img.shields.io/badge/discussions-open-purple)](https://github.com/kovallent/kv-cli/discussions)
 
-Some pipeline bugs are syntactically fine and pass their tests. They break only when the code runs somewhere other than the author's laptop. `kv-cli` catches three kinds before the code leaves the workstation:
+Some pipeline bugs are syntactically fine and pass their tests. They break only when the code runs somewhere other than the author's laptop. `kv-cli` catches three kinds before the code leaves the workstation, and checks function names against your own conventions if your contract sets any:
 
 | Rule | Catches | Severity |
 | --- | --- | --- |
 | [`KV001`](docs/rules/KV001.md) | A governed function missing a required parameter such as `target_environment` | per parameter |
 | [`KV002`](docs/rules/KV002.md) | A hardcoded credential, in code, notebooks or config | error |
 | [`KV003`](docs/rules/KV003.md) | Infrastructure pinned to one environment: a warehouse, bucket, cluster ID or endpoint | warning |
+| [`KV004`](docs/rules/KV004.md) | A function name that breaks a naming rule in the contract. There are none by default. | warning |
 
 It is a single binary with no runtime dependencies. It parses your code locally with tree-sitter, needs no account and makes no network call. Run `kv-cli explain KV002` for any rule's reference, offline.
 
@@ -167,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.11.0
+      - uses: kovallent/kv-cli@v0.12.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -193,7 +194,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.11.0
+          KV_VERSION: v0.12.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -206,7 +207,7 @@ jobs:
       - run: kv-cli audit --strict
 ```
 
-`--strict` fails on warnings too, `KV003` included. Drop it to gate on errors only.
+`--strict` fails on warnings too, `KV003` and `KV004` included. Drop it to gate on errors only.
 
 Exit codes are a stable interface, and each one is a problem for a different owner:
 
@@ -249,7 +250,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.11.0
+    rev: v0.12.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -294,7 +295,7 @@ A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It 
 
 Every command takes `--help`, with examples.
 
-To suppress one finding, add a trailing `# kovallent:allow-secret` (`KV002`) or `# kovallent:allow-infra` (`KV003`). To exempt a function from `KV001`, add its name to `applies_to.exempt_name_patterns`.
+To suppress one finding, add a trailing `# kovallent:allow-secret` (`KV002`) or `# kovallent:allow-infra` (`KV003`). To exempt a function from `KV001` and `KV004`, add its name to `applies_to.exempt_name_patterns`.
 
 ---
 
@@ -337,7 +338,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 
 ## Documentation
 
-- **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), also available offline as `kv-cli explain <code>`.
+- **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), [KV004](docs/rules/KV004.md), also available offline as `kv-cli explain <code>`.
 - [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
 - [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
 - [CI](docs/ci.md): the GitHub Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF, and the GitLab CI/CD component and CircleCI orb.
@@ -350,7 +351,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.11.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.12.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.

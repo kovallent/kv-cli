@@ -17,11 +17,11 @@ Config files are handled by line scanners rather than parsers — `src/yamlscan.
 
 ## Where each rule applies
 
-| Files | KV001 | KV002 | KV003 |
-| --- | --- | --- | --- |
-| Python (`.py`) | ✓ | ✓ | ✓ |
-| Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | |
-| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | |
+| Files | KV001 | KV002 | KV003 | KV004 |
+| --- | --- | --- | --- | --- |
+| Python (`.py`) | ✓ | ✓ | ✓ | ✓ |
+| Notebooks (`.ipynb`) — code cells, plus value patterns over outputs and markdown | | ✓ | | |
+| Config: YAML, `.env`, TOML, INI/`.cfg`, JSON | | ✓ | | |
 
 Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
 
@@ -29,4 +29,4 @@ Config files are where environment-specific values belong, so `KV003` never appl
 
 ## What `fix` changes
 
-`fix` inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`; an existing backup is never overwritten, so it always holds the source as it was before the first `fix`. When a credential is moved out of the source, `fix` lists the backups that still hold it in plaintext — add `*.kvbak` to `.gitignore` and delete them after review — and reminds you to rotate it: a value that was ever committed is in git history whatever the file says now.
+`fix` never renames a function, because a rename breaks every caller, so each `KV004` finding is listed as a `manual:` item. It inserts missing parameters into the signature (before `**kwargs`, preserving multi-line layout) and rewrites hardcoded secrets to `os.environ["NAME"]`, adding `import os` when needed. `audit` and `fix` share one list of flagged bindings, so they can never disagree about what is a secret. Backups go to `.kvbak`; an existing backup is never overwritten, so it always holds the source as it was before the first `fix`. When a credential is moved out of the source, `fix` lists the backups that still hold it in plaintext — add `*.kvbak` to `.gitignore` and delete them after review — and reminds you to rotate it: a value that was ever committed is in git history whatever the file says now.
