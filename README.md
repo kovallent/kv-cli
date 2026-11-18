@@ -167,7 +167,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.10.0
+      - uses: kovallent/kv-cli@v0.11.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -189,7 +189,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.10.0
+          KV_VERSION: v0.11.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -213,7 +213,7 @@ Exit codes are a stable interface, and each one is a problem for a different own
 | **2** | Tool error, including "no files to audit" | Whoever operates the gate |
 | **3** | Contract drift (`--expect-contract`) | Whoever owns the contract |
 
-After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json`, or after a failing run, and it makes no network call.
+After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json` or `--format sarif`, or after a failing run, and it makes no network call.
 
 ### Stop a pull request from weakening the contract
 
@@ -245,7 +245,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.10.0
+    rev: v0.11.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -279,7 +279,7 @@ A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It 
 | Command | Purpose |
 | --- | --- |
 | `kv-cli init` | Write a commented `.kovallent.yaml` and report what it enables. `--force` overwrites. |
-| `kv-cli audit [PATHS]` | Scan for violations. `--strict`, `--format json`, `--config`, `--expect-contract`. |
+| `kv-cli audit [PATHS]` | Scan for violations. `--strict`, `--format json` or `sarif`, `--config`, `--expect-contract`. |
 | `kv-cli fix [PATHS]` | Apply the standard fixes, backing up each file to `.kvbak`. `--dry-run`, `--no-backup`. |
 | `kv-cli explain [CODE]` | Print a rule's reference: what it catches, how to fix it, how to suppress it. |
 | `kv-cli contract check` | Validate the contract without scanning code, listing every problem with its line. |
@@ -336,7 +336,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 - **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), also available offline as `kv-cli explain <code>`.
 - [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
 - [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
-- [CI with the GitHub Action](docs/ci.md): the Action's inputs, required status checks, protecting the workflow, uploading with OIDC.
+- [CI with the GitHub Action](docs/ci.md): the Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF.
 - [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
 - [JSON payload](docs/json-payload.md): the `--format json` schema.
 - [How it works](docs/how-it-works.md): the AST scanner, config scanners and what `fix` changes.
@@ -346,7 +346,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.10.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.11.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.

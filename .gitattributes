@@ -1,0 +1,6 @@
+# Text files are stored and checked out with LF on every platform. The rule
+# docs are compiled into the binary with include_str!, and golden files are
+# compared byte for byte, so a CRLF checkout (core.autocrlf on Windows) would
+# change both. tests/corpus/.gitattributes overrides this for case files,
+# which must keep their exact bytes.
+* text=auto eol=lf

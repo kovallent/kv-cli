@@ -1,0 +1,643 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "kv-cli",
+          "version": "0.11.0",
+          "informationUri": "https://github.com/kovallent/kv-cli",
+          "rules": [
+            {
+              "id": "KV001",
+              "shortDescription": {
+                "text": "missing contract parameter"
+              },
+              "fullDescription": {
+                "text": "A governed function that does not declare a parameter the contract requires. The function runs and passes its tests. In production it quietly uses whatever the author's machine assumed, because nothing passes it the target environment."
+              },
+              "help": {
+                "text": "# KV001: missing contract parameter\n\nSeverity: set per parameter in the contract. In the default contract,\n`target_environment` is an error and `dry_run` is a warning.\n\n## What it catches\n\nA governed function that does not declare a parameter the contract requires.\nThe function runs and passes its tests. In production it quietly uses\nwhatever the author's machine assumed, because nothing passes it the target\nenvironment.\n\n```python\ndef deploy_service(name):                 # KV001: no target_environment\n    ...\n```\n\n## How to fix it\n\nDeclare the parameter, then pass it through from the call site:\n\n```python\ndef deploy_service(name, target_environment: str = \"dev\", dry_run: bool = False):\n    ...\n```\n\n`kv-cli fix` inserts the parameter with the annotation and default the\ncontract sets. It goes before `**kwargs` and keeps a multi-line signature's\nlayout. `fix` changes only the signature, so you still have to pass the real\nvalue at each call site.\n\n## Which functions are governed\n\nA function is governed when it matches any `applies_to` rule:\n\n- `name_patterns`, e.g. `deploy*`, `run_*`, `*_job`;\n- `decorators`, e.g. `task`, `kovallent.task`;\n- `all_functions: true`, which governs every function.\n\nEach finding says which rule matched:\n`in scope: name matches applies_to.name_patterns \"deploy*\"`.\n\nA function is never governed when:\n\n- its name matches `exempt_name_patterns` (`_*` and `test_*` by default),\n  which is checked first;\n- a framework owns its signature, for example dbt's `def model(dbt, session)`\n  or Databricks' `@dlt.table`. Adding a parameter there would break the\n  pipeline. `kv-cli frameworks` lists every owned signature.\n\nAirflow's `@task` is governed but report-only. `fix` prints a `manual:` item\ninstead of inserting a default, because an inserted default would read\n\"dev\" in every environment while looking correct.\n\n## How to turn it off for a function\n\nThere is no per-line marker for KV001. Exempt the function by name instead:\n\n```yaml\napplies_to:\n  exempt_name_patterns: [\"_*\", \"test_*\", \"legacy_*\"]\n```\n\n## Contract keys\n\n`parameters`, `applies_to`, `frameworks`, `fix.insert_missing_parameters`\n",
+                "markdown": "# KV001: missing contract parameter\n\nSeverity: set per parameter in the contract. In the default contract,\n`target_environment` is an error and `dry_run` is a warning.\n\n## What it catches\n\nA governed function that does not declare a parameter the contract requires.\nThe function runs and passes its tests. In production it quietly uses\nwhatever the author's machine assumed, because nothing passes it the target\nenvironment.\n\n```python\ndef deploy_service(name):                 # KV001: no target_environment\n    ...\n```\n\n## How to fix it\n\nDeclare the parameter, then pass it through from the call site:\n\n```python\ndef deploy_service(name, target_environment: str = \"dev\", dry_run: bool = False):\n    ...\n```\n\n`kv-cli fix` inserts the parameter with the annotation and default the\ncontract sets. It goes before `**kwargs` and keeps a multi-line signature's\nlayout. `fix` changes only the signature, so you still have to pass the real\nvalue at each call site.\n\n## Which functions are governed\n\nA function is governed when it matches any `applies_to` rule:\n\n- `name_patterns`, e.g. `deploy*`, `run_*`, `*_job`;\n- `decorators`, e.g. `task`, `kovallent.task`;\n- `all_functions: true`, which governs every function.\n\nEach finding says which rule matched:\n`in scope: name matches applies_to.name_patterns \"deploy*\"`.\n\nA function is never governed when:\n\n- its name matches `exempt_name_patterns` (`_*` and `test_*` by default),\n  which is checked first;\n- a framework owns its signature, for example dbt's `def model(dbt, session)`\n  or Databricks' `@dlt.table`. Adding a parameter there would break the\n  pipeline. `kv-cli frameworks` lists every owned signature.\n\nAirflow's `@task` is governed but report-only. `fix` prints a `manual:` item\ninstead of inserting a default, because an inserted default would read\n\"dev\" in every environment while looking correct.\n\n## How to turn it off for a function\n\nThere is no per-line marker for KV001. Exempt the function by name instead:\n\n```yaml\napplies_to:\n  exempt_name_patterns: [\"_*\", \"test_*\", \"legacy_*\"]\n```\n\n## Contract keys\n\n`parameters`, `applies_to`, `frameworks`, `fix.insert_missing_parameters`\n"
+              },
+              "helpUri": "https://github.com/kovallent/kv-cli/blob/v0.11.0/docs/rules/KV001.md"
+            },
+            {
+              "id": "KV002",
+              "shortDescription": {
+                "text": "hardcoded credential"
+              },
+              "fullDescription": {
+                "text": "A credential written into source, a notebook or a config file. kv-cli reports a literal when either of these rules matches."
+              },
+              "help": {
+                "text": "# KV002: hardcoded credential\n\nSeverity: always an error.\n\n## What it catches\n\nA credential written into source, a notebook or a config file. kv-cli reports\na literal when either of these rules matches.\n\n1. Its shape. A value pattern matches it under any name and anywhere in the\n   file, including comments, notebook outputs and split strings such as\n   `\"ghp_abc\" \"def\"`. The shapes cover AWS keys, GitHub, Slack, OpenAI,\n   Anthropic, Stripe and Google keys, JWTs, PEM private keys and URLs with a\n   password.\n2. Its name. It is assigned to, or compared with, a name that matches\n   `secrets.key_patterns`, such as `*password*`, `*token*` or `*api_key*`.\n\n```python\nDB_PASSWORD = \"s3cr3t-value-1234\"         # KV002: name rule\nif password == \"s3cr3t-value-1234\":       # KV002: comparison\n```\n\nThe output redacts the value, shown as `value \"s3…\" (<redacted>, 17 chars)`,\nso the CI log doesn't leak the credential.\n\n## What it ignores\n\nThese exceptions apply to the name rule only. A literal that matches a shape\nis always reported.\n\n- Names that refer to a credential without holding one: `secret_name`,\n  `token_url`, `credentials_path` (`secrets.exempt_key_patterns`).\n- Placeholders such as `changeme`, `your-api-key-here` and `<token>`\n  (`allow_values`, `placeholder_patterns`).\n- References such as `${VAR}`, `{{ env_var('X') }}` and f-string\n  substitutions. A template is judged by what it writes down, so a\n  hardcoded fallback is still reported: `{{ env_var('X', 's3cr3t') }}`,\n  `{{ 's3cr3t' }}`, or a `{% if %}` branch that is a literal.\n- Values shorter than `min_value_length`.\n\nNames are matched as written and in snake_case, so `privateKey` matches\n`*private_key*`.\n\n## How to fix it\n\nRead the value from the environment or a secret store:\n\n```python\nimport os\nDB_PASSWORD = os.environ[\"DB_PASSWORD\"]\n```\n\n`kv-cli fix` makes this rewrite and adds `import os` if it is missing. A\nhardcoded default in a function signature is left as a `manual:` item,\nbecause `os.environ[...]` in a default is read once, at import time.\n\nAfterwards, rotate the credential. A value that was ever committed is still\nin git history, whatever the file says now.\n\n## How to suppress one line\n\n```python\nlegacy_token = \"abcd1234efgh\"  # kovallent:allow-secret\n```\n\nThe marker counts only inside a comment. JSON has no comments, so exclude a\nfixture file with `scan.exclude` instead.\n\n## Contract keys\n\n`secrets.key_patterns`, `secrets.value_patterns`,\n`secrets.exempt_key_patterns`, `secrets.allow_values`,\n`secrets.placeholder_patterns`, `secrets.min_value_length`,\n`secrets.ignore_marker`, `fix.externalize_secrets`, `fix.env_var_prefix`\n",
+                "markdown": "# KV002: hardcoded credential\n\nSeverity: always an error.\n\n## What it catches\n\nA credential written into source, a notebook or a config file. kv-cli reports\na literal when either of these rules matches.\n\n1. Its shape. A value pattern matches it under any name and anywhere in the\n   file, including comments, notebook outputs and split strings such as\n   `\"ghp_abc\" \"def\"`. The shapes cover AWS keys, GitHub, Slack, OpenAI,\n   Anthropic, Stripe and Google keys, JWTs, PEM private keys and URLs with a\n   password.\n2. Its name. It is assigned to, or compared with, a name that matches\n   `secrets.key_patterns`, such as `*password*`, `*token*` or `*api_key*`.\n\n```python\nDB_PASSWORD = \"s3cr3t-value-1234\"         # KV002: name rule\nif password == \"s3cr3t-value-1234\":       # KV002: comparison\n```\n\nThe output redacts the value, shown as `value \"s3…\" (<redacted>, 17 chars)`,\nso the CI log doesn't leak the credential.\n\n## What it ignores\n\nThese exceptions apply to the name rule only. A literal that matches a shape\nis always reported.\n\n- Names that refer to a credential without holding one: `secret_name`,\n  `token_url`, `credentials_path` (`secrets.exempt_key_patterns`).\n- Placeholders such as `changeme`, `your-api-key-here` and `<token>`\n  (`allow_values`, `placeholder_patterns`).\n- References such as `${VAR}`, `{{ env_var('X') }}` and f-string\n  substitutions. A template is judged by what it writes down, so a\n  hardcoded fallback is still reported: `{{ env_var('X', 's3cr3t') }}`,\n  `{{ 's3cr3t' }}`, or a `{% if %}` branch that is a literal.\n- Values shorter than `min_value_length`.\n\nNames are matched as written and in snake_case, so `privateKey` matches\n`*private_key*`.\n\n## How to fix it\n\nRead the value from the environment or a secret store:\n\n```python\nimport os\nDB_PASSWORD = os.environ[\"DB_PASSWORD\"]\n```\n\n`kv-cli fix` makes this rewrite and adds `import os` if it is missing. A\nhardcoded default in a function signature is left as a `manual:` item,\nbecause `os.environ[...]` in a default is read once, at import time.\n\nAfterwards, rotate the credential. A value that was ever committed is still\nin git history, whatever the file says now.\n\n## How to suppress one line\n\n```python\nlegacy_token = \"abcd1234efgh\"  # kovallent:allow-secret\n```\n\nThe marker counts only inside a comment. JSON has no comments, so exclude a\nfixture file with `scan.exclude` instead.\n\n## Contract keys\n\n`secrets.key_patterns`, `secrets.value_patterns`,\n`secrets.exempt_key_patterns`, `secrets.allow_values`,\n`secrets.placeholder_patterns`, `secrets.min_value_length`,\n`secrets.ignore_marker`, `fix.externalize_secrets`, `fix.env_var_prefix`\n"
+              },
+              "helpUri": "https://github.com/kovallent/kv-cli/blob/v0.11.0/docs/rules/KV002.md"
+            },
+            {
+              "id": "KV003",
+              "shortDescription": {
+                "text": "pinned infrastructure identifier"
+              },
+              "fullDescription": {
+                "text": "An identifier that ties code to one environment, such as a warehouse, catalog, bucket, cluster ID, workspace URL, broker or JDBC endpoint. The code works in that one environment and either breaks in the others or, worse, writes to the wrong one."
+              },
+              "help": {
+                "text": "# KV003: pinned infrastructure identifier\n\nSeverity: a warning by default, so turning it on doesn't break CI on day one.\nSet `infrastructure.severity: error` to gate on it, or run `audit --strict`.\n\n## What it catches\n\nAn identifier that ties code to one environment, such as a warehouse,\ncatalog, bucket, cluster ID, workspace URL, broker or JDBC endpoint. The\ncode works in that one environment and either breaks in the others or,\nworse, writes to the wrong one.\n\n```python\nfrom snowflake.snowpark import Session\n\nWAREHOUSE = \"ANALYTICS_PROD_WH\"           # KV003: name rule\ndf.write.parquet(\"s3://acme-prod-orders/\") # KV003: object-store URI\n```\n\nPython files only. Config files are where environment-specific values\nbelong, so KV003 never applies to them.\n\nThe name rule, `infrastructure.key_patterns`, applies only in files that use\na data framework, that is, where a framework profile is detected. In a file\nthat imports none, a `warehouse` or `bucket` is as likely to be a CLI option\nor a test fixture as a deployment target. Value patterns, such as the\nobject-store URI above, apply in every Python file. To apply the name rule in\nevery Python file, as before 0.10.0, set\n`infrastructure.global_key_patterns_require_framework: false`.\n\nFramework profiles add their own identifiers in files that use the\nframework. For example, Snowpark adds `account` and `role`, and Airflow adds\n`conn_id`, `pool` and `queue`. `kv-cli frameworks` lists them all.\n\n## How to fix it\n\nDerive the value from the target environment:\n\n```python\nWAREHOUSES = {\"dev\": \"ANALYTICS_DEV_WH\", \"prod\": \"ANALYTICS_PROD_WH\"}\n\ndef run_report(target_environment: str = \"dev\"):\n    warehouse = WAREHOUSES[target_environment]\n```\n\n`kv-cli fix` never rewrites these, because the right replacement is a\ndeployment decision.\n\n## What it ignores\n\n- Values in `infrastructure.allow_values`, such as `local`, `dev` or `test`.\n- Names in `infrastructure.exempt_key_patterns`, such as `*_column` or\n  `*_type`.\n- Values shorter than `min_value_length`.\n- Comparisons such as `if catalog == \"prod\"`. Those branch on an environment\n  rather than pin one.\n\n## How to suppress one line\n\n```python\nLEGACY_BUCKET = \"s3://acme-archive/\"  # kovallent:allow-infra\n```\n\n## Contract keys\n\n`infrastructure.enabled`, `infrastructure.severity`,\n`infrastructure.key_patterns`,\n`infrastructure.global_key_patterns_require_framework`,\n`infrastructure.value_patterns`,\n`infrastructure.allow_values`, `infrastructure.exempt_key_patterns`,\n`infrastructure.ignore_marker`\n",
+                "markdown": "# KV003: pinned infrastructure identifier\n\nSeverity: a warning by default, so turning it on doesn't break CI on day one.\nSet `infrastructure.severity: error` to gate on it, or run `audit --strict`.\n\n## What it catches\n\nAn identifier that ties code to one environment, such as a warehouse,\ncatalog, bucket, cluster ID, workspace URL, broker or JDBC endpoint. The\ncode works in that one environment and either breaks in the others or,\nworse, writes to the wrong one.\n\n```python\nfrom snowflake.snowpark import Session\n\nWAREHOUSE = \"ANALYTICS_PROD_WH\"           # KV003: name rule\ndf.write.parquet(\"s3://acme-prod-orders/\") # KV003: object-store URI\n```\n\nPython files only. Config files are where environment-specific values\nbelong, so KV003 never applies to them.\n\nThe name rule, `infrastructure.key_patterns`, applies only in files that use\na data framework, that is, where a framework profile is detected. In a file\nthat imports none, a `warehouse` or `bucket` is as likely to be a CLI option\nor a test fixture as a deployment target. Value patterns, such as the\nobject-store URI above, apply in every Python file. To apply the name rule in\nevery Python file, as before 0.10.0, set\n`infrastructure.global_key_patterns_require_framework: false`.\n\nFramework profiles add their own identifiers in files that use the\nframework. For example, Snowpark adds `account` and `role`, and Airflow adds\n`conn_id`, `pool` and `queue`. `kv-cli frameworks` lists them all.\n\n## How to fix it\n\nDerive the value from the target environment:\n\n```python\nWAREHOUSES = {\"dev\": \"ANALYTICS_DEV_WH\", \"prod\": \"ANALYTICS_PROD_WH\"}\n\ndef run_report(target_environment: str = \"dev\"):\n    warehouse = WAREHOUSES[target_environment]\n```\n\n`kv-cli fix` never rewrites these, because the right replacement is a\ndeployment decision.\n\n## What it ignores\n\n- Values in `infrastructure.allow_values`, such as `local`, `dev` or `test`.\n- Names in `infrastructure.exempt_key_patterns`, such as `*_column` or\n  `*_type`.\n- Values shorter than `min_value_length`.\n- Comparisons such as `if catalog == \"prod\"`. Those branch on an environment\n  rather than pin one.\n\n## How to suppress one line\n\n```python\nLEGACY_BUCKET = \"s3://acme-archive/\"  # kovallent:allow-infra\n```\n\n## Contract keys\n\n`infrastructure.enabled`, `infrastructure.severity`,\n`infrastructure.key_patterns`,\n`infrastructure.global_key_patterns_require_framework`,\n`infrastructure.value_patterns`,\n`infrastructure.allow_values`, `infrastructure.exempt_key_patterns`,\n`infrastructure.ignore_marker`\n"
+              },
+              "helpUri": "https://github.com/kovallent/kv-cli/blob/v0.11.0/docs/rules/KV003.md"
+            }
+          ]
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolExecutionNotifications": []
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`DB_PASSWORD` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 11
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "4f6e4a6c5511b0b5"
+          },
+          "properties": {
+            "symbol": "DB_PASSWORD",
+            "subject": "key_pattern",
+            "detail": "value \"s3…\" (<redacted>, 20 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`AWS_ACCESS_KEY` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 12
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "052fb99afc922f58"
+          },
+          "properties": {
+            "symbol": "AWS_ACCESS_KEY",
+            "subject": "key_pattern",
+            "detail": "value \"AK…\" (<redacted>, 20 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`api_token` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 16
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "519c4499835f8b9b"
+          },
+          "properties": {
+            "symbol": "api_token",
+            "subject": "key_pattern",
+            "detail": "value \"gh…\" (<redacted>, 41 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`deploy_service` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 20
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "3a997e1365e457ab"
+          },
+          "properties": {
+            "symbol": "deploy_service",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: name matches applies_to.name_patterns \"deploy*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`deploy_service` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 20
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "9a9d5df417b2af64"
+          },
+          "properties": {
+            "symbol": "deploy_service",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: name matches applies_to.name_patterns \"deploy*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`orchestrate` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "8a9e3c04f803af29"
+          },
+          "properties": {
+            "symbol": "orchestrate",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: decorator @kovallent.task matches applies_to.decorators \"kovallent.task\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`orchestrate` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "f6526db2b4c41fb6"
+          },
+          "properties": {
+            "symbol": "orchestrate",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: decorator @kovallent.task matches applies_to.decorators \"kovallent.task\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`run_migration` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 34
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "bbb6579ab0734441"
+          },
+          "properties": {
+            "symbol": "run_migration",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`run_migration` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 34
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "5e64a948b272844b"
+          },
+          "properties": {
+            "symbol": "run_migration",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`orchestrate_batch` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 75
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "b06e4760d58252bd"
+          },
+          "properties": {
+            "symbol": "orchestrate_batch",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: decorator @kovallent.task matches applies_to.decorators \"kovallent.task\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`orchestrate_batch` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 75
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "0fa107c730e0819b"
+          },
+          "properties": {
+            "symbol": "orchestrate_batch",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: decorator @kovallent.task matches applies_to.decorators \"kovallent.task\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`DB_SECRET` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 80
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "0a771e4b85d2e477"
+          },
+          "properties": {
+            "symbol": "DB_SECRET",
+            "subject": "key_pattern",
+            "detail": "value \"s3…\" (<redacted>, 20 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`run_upload` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 83
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "53d55bdb57d78793"
+          },
+          "properties": {
+            "symbol": "run_upload",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`run_upload` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 83
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "754d66ebf5bae0fc"
+          },
+          "properties": {
+            "symbol": "run_upload",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`upload_token` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 85
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "7ce4d64092e4056c"
+          },
+          "properties": {
+            "symbol": "upload_token",
+            "subject": "key_pattern",
+            "detail": "value \"ab…\" (<redacted>, 16 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`api_key` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 86
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "0d588c36b2d2f498"
+          },
+          "properties": {
+            "symbol": "api_key",
+            "subject": "key_pattern",
+            "detail": "value \"ab…\" (<redacted>, 16 chars) - load it from the environment or a secret store"
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "`run_with_default` is missing contract parameter `target_environment`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 90
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "4144eea2495aaf88"
+          },
+          "properties": {
+            "symbol": "run_with_default",
+            "subject": "target_environment",
+            "detail": "expected signature to declare `target_environment: str = \"dev\"`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "`run_with_default` is missing contract parameter `dry_run`"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 90
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "66264153fafa53a2"
+          },
+          "properties": {
+            "symbol": "run_with_default",
+            "subject": "dry_run",
+            "detail": "expected signature to declare `dry_run: bool = False`\nin scope: name matches applies_to.name_patterns \"run_*\"",
+            "report_only": false
+          }
+        },
+        {
+          "ruleId": "KV002",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "`password` is assigned a hardcoded literal"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "deploy.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 90
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "kovallent/v1": "1d433bbd57cfa4af"
+          },
+          "properties": {
+            "symbol": "password",
+            "subject": "key_pattern",
+            "detail": "value \"ab…\" (<redacted>, 12 chars) - load it from the environment or a secret store"
+          }
+        }
+      ],
+      "properties": {
+        "schema_version": 1,
+        "contract_sha256": "a6edcff00199c1cf",
+        "contract_path": null,
+        "scope": {
+          "functions_total": 10,
+          "functions_in_scope": 7,
+          "functions_report_only": 0,
+          "functions_exempt_framework": 0,
+          "functions_exempt_user": 2,
+          "functions_out_of_scope": 1
+        }
+      }
+    }
+  ]
+}

@@ -15,6 +15,40 @@ Nothing yet.
 
 ---
 
+## [0.11.0] — 2026-11-18
+
+SARIF output for code-scanning tools. Contract fingerprints, the JSON payload
+and exit codes are unchanged.
+
+### Added
+
+- **`kv-cli audit --format sarif`** writes one SARIF 2.1.0 log to stdout,
+  built from the same findings and run as `--format json`.
+  - `tool.driver` names kv-cli and its version, with one rule each for KV001,
+    KV002 and KV003, described with the text `kv-cli explain` prints: the
+    title, the first paragraph of "What it catches", and the whole page as
+    help.
+  - Each finding is one result: its code as `ruleId`, `level` from its
+    intrinsic severity (`--strict` does not change it, as in JSON), its
+    message, and its file (the same normalized path as `path`) and line.
+  - `partialFingerprints` carries the finding's fingerprint under
+    `kovallent/v1`, equal to its JSON `fingerprint`.
+  - Result properties carry `symbol`, `subject`, `detail`, `framework` and
+    `report_only` as in JSON. A KV002 detail stays redacted.
+  - Run properties carry the scope block, `contract_sha256`, `contract_path`
+    and `schema_version`, so no result travels without its scope.
+  - Files in `skipped` are `invocations[0].toolExecutionNotifications` at
+    level `warning`, so a partial parse is never silent.
+  - Exit codes are unchanged (0, 1, 2, 3), and no star line follows SARIF.
+  - Tests validate the output against the SARIF 2.1.0 schema, vendored in
+    `tests/fixtures`, so they make no network call.
+- **docs/ci.md: Code scanning with SARIF.** Uploading the log with
+  `github/codeql-action/upload-sarif` (`security-events: write`), in addition
+  to the exit-code gate, never in place of it: a code-scanning alert does not
+  block a merge unless a ruleset makes it.
+
+---
+
 ## [0.10.0] — 2026-11-18
 
 Two precision fixes for a first run. **Contract fingerprints are unchanged,
