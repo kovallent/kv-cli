@@ -49,7 +49,18 @@ pub fn models(engine: &Engine, paths: &[PathBuf], project: &Path) -> Vec<PathBuf
     let mut candidates = Vec::new();
     for p in paths {
         if p.is_dir() {
-            walk(engine, p, &project, &mut candidates);
+            // Where `p` sits inside the project, so each path is matched
+            // against `scan.exclude` the way the main walk matches it.
+            let prefix = p
+                .canonicalize()
+                .ok()
+                .and_then(|r| {
+                    r.strip_prefix(&project)
+                        .ok()
+                        .map(|rel| crate::audit::relative_slash(Path::new(""), rel))
+                })
+                .unwrap_or_default();
+            walk(engine, p, p, &prefix, &project, &mut candidates);
         } else if is_sql(p) && !engine.is_excluded(&crate::audit::normalize_path(&project, p)) {
             candidates.push(p.clone());
         }
@@ -77,13 +88,23 @@ fn is_sql(path: &Path) -> bool {
 /// Every `.sql` file under `dir`, whatever `scan.include` says, pruning what
 /// `scan.exclude` covers and package folders. Symlinks are followed only to a
 /// file inside the project, as the main walk follows them.
-fn walk(engine: &Engine, dir: &Path, project: &Path, out: &mut Vec<PathBuf>) {
+fn walk(
+    engine: &Engine,
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    project: &Path,
+    out: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let rel = crate::audit::normalize_path(project, &path);
+        let rel = match crate::audit::relative_slash(root, &path) {
+            r if prefix.is_empty() => r,
+            r => format!("{prefix}/{r}"),
+        };
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -95,7 +116,7 @@ fn walk(engine: &Engine, dir: &Path, project: &Path, out: &mut Vec<PathBuf>) {
             {
                 continue;
             }
-            walk(engine, &path, project, out);
+            walk(engine, root, &path, prefix, project, out);
             continue;
         }
         if !is_sql(&path) || engine.is_excluded(&rel) {

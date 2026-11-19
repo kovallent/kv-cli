@@ -200,6 +200,9 @@ pub struct Collected {
     pub symlinks_not_followed: usize,
     /// Files named on the command line that `scan.exclude` covers.
     pub named_excluded: usize,
+    /// The files that are dbt SQL models, by canonical path. They are in
+    /// `files` too; see `sql::discover`.
+    pub sql_models: std::collections::HashSet<PathBuf>,
 }
 
 /// A framework profile with its regexes compiled.
@@ -1566,7 +1569,7 @@ fn redact(value: &str) -> String {
     format!("\"{head}…\" (<redacted>, {n} chars)")
 }
 
-fn relative_slash(root: &Path, path: &Path) -> String {
+pub(crate) fn relative_slash(root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     rel.components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())

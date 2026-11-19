@@ -21,6 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     SyntaxError,
+    /// A dbt SQL model that no dialect parses, or whose Jinja can't be
+    /// neutralised. Read through its tokens instead; handled like
+    /// `syntax_error`. Usually kv-cli's limit, not the author's syntax.
+    SqlNotParsed,
     Unreadable,
 }
 
@@ -53,6 +57,18 @@ impl SkippedFile {
             reason: SkipReason::SyntaxError,
             severity: Severity::Warning,
             detail: Some("audited on a partial parse; some findings may be hidden".into()),
+        }
+    }
+
+    /// A dbt SQL model that couldn't be parsed. Like a syntax error, a
+    /// warning that gates under `--strict`. `cause` says why and what was
+    /// checked instead.
+    pub fn sql_not_parsed(path: String, cause: String) -> Self {
+        Self {
+            path,
+            reason: SkipReason::SqlNotParsed,
+            severity: Severity::Warning,
+            detail: Some(cause),
         }
     }
 
@@ -97,7 +113,11 @@ pub enum FileAnalysis {
     /// `targets:` and `variables:`, pinned infrastructure (KV003). The scope
     /// is always zero.
     CredentialsAndInfrastructure,
-    /// A syntax error: audited on a partial parse. Also listed in `skipped`.
+    /// A dbt SQL model, parsed in full. The scope is always zero: SQL adds
+    /// nothing to the function counts.
+    Sql,
+    /// A syntax error, or a SQL model no dialect parses: audited on a
+    /// partial parse or its tokens. Also listed in `skipped`.
     Partial,
     /// The file could not be read at all. Also listed in `skipped`.
     #[serde(rename = "none")]

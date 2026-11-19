@@ -142,6 +142,7 @@ fn notification(s: &SkippedFile) -> Notification<'_> {
         message: Message {
             text: s.detail.as_deref().unwrap_or(match s.reason {
                 SkipReason::SyntaxError => "syntax_error",
+                SkipReason::SqlNotParsed => "sql_not_parsed",
                 SkipReason::Unreadable => "unreadable",
             }),
         },
