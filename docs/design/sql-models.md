@@ -1,6 +1,6 @@
 # Design: SQL models
 
-**Status:** proposed, with the owner's decisions of 2026-11-19 recorded below. Implementation starts only after the owner approves this revision.
+**Status:** ready for owner approval. Every owner decision of 2026-11-19 is recorded below, and each remaining question carries a recommendation that approving this document accepts. Implementation starts only after that approval.
 **Scope of this document:** decisions only. No parser, no new dependency and no change under `src/` come with it.
 
 ## Context
@@ -34,20 +34,37 @@ The constraints carry over from the rest of kv-cli:
 
 1. **On by default, at the contract's infrastructure severity.** SQL findings use `infrastructure.severity`, a warning by default, so nothing gates unless `--strict`. The opt-out is `sql.enabled: false`. `sql.enabled` defaults to `true` and is left out of the serialized contract at that default, so the default fingerprint (`a6edcff00199c1cf`) doesn't move.
 2. **Accept `sqlparser-rs`, pinned to one minor version:** `sqlparser = "0.64"` in `Cargo.toml`. Cargo reads a caret requirement on a `0.x` version as `>=0.64.0, <0.65.0`, so patch releases arrive and minor releases don't. Moving to 0.65 is a deliberate change, gated by the CI parse-coverage check (exit criterion 5).
-3. **Stage 1 ships the three-part rule only.** The two-part rule sits behind `sql.two_part_names`, which defaults to `false`.
-   - **My reading, to confirm:** this decision is about the relation-name rules, so the `USE …` rule and the object-store rule over string literals stay in stage 1 as proposed. The recall pass below measures both. If "three-part only" was meant to exclude them too, stage 1 shrinks to `three_part_name` alone, and the effort drops by about a day.
-4. **One finding per table reference.** `subject` is the normalised relation name, so two hardcoded relations in one model get distinct fingerprints.
-5. **The fingerprint of a SQL finding** is kv-cli's existing formula with these inputs:
+3. **Stage 1 ships three rules:**
+   - **the three-part relation rule** (`three_part_name`);
+   - **`USE WAREHOUSE` and `USE DATABASE`** (`use_warehouse`, `use_database`);
+   - **hardcoded object-store paths in `COPY INTO` and `LOCATION`** (`object_store_uri`): a URI matching the `object_store_uri` value pattern, written as a string literal in a `COPY INTO … FROM`/`TO` or a `LOCATION` clause.
+
+   The two-part rule sits behind `sql.two_part_names`, which defaults to `false`. `USE SCHEMA`, `USE ROLE`, JDBC URLs and object-store paths written anywhere else (`read_parquet('gs://…')`, `read_files(…)`) are left for a later stage.
+4. **The pinned thing is the subject, for every stage-1 rule.** `subject` is the normalised relation name, the normalised warehouse or database name, or the URI. So two hardcoded relations, two `USE` statements or two paths in one model get distinct fingerprints, and there is one finding per pinned thing.
+5. **The fingerprint of a SQL finding** is kv-cli's existing formula:
 
    ```text
    fingerprint = hex(sha256(path ‖ 0x00 ‖ "KV003" ‖ 0x00 ‖ symbol ‖ 0x00 ‖ subject))[0..16]
 
-   path    = project-relative, forward-slashed path   models/orders.sql
-   symbol  = the model name, its file stem            orders
-   subject = the normalised relation name             analytics_prod.raw.orders
+   path    = the project-relative, forward-slashed path   models/orders.sql
+   symbol  = the model name, its file stem                orders
+   subject = the pinned thing, per rule below
    ```
 
-   That gives `803e1305b4fe391a` for `ANALYTICS_PROD.RAW.ORDERS` in `models/orders.sql`. A second hardcoded relation in the same model, `ANALYTICS_PROD.RAW.CUSTOMERS`, gets `424c475cee1fe19b`. The line number is excluded, as for every finding. Decision 6 gives the normalisation and the subjects for the other rules.
+   | Rule (`detector`) | Written in `models/orders.sql` | `subject` | Fingerprint |
+   | --- | --- | --- | --- |
+   | `three_part_name` | `ANALYTICS_PROD.RAW.ORDERS` | `analytics_prod.raw.orders` | `803e1305b4fe391a` |
+   | `three_part_name` | `ANALYTICS_PROD.RAW.CUSTOMERS` | `analytics_prod.raw.customers` | `424c475cee1fe19b` |
+   | `use_warehouse` | `USE WAREHOUSE ANALYTICS_PROD_WH` | `analytics_prod_wh` | `d75a9af72edda500` |
+   | `use_database` | `USE DATABASE ANALYTICS_PROD` | `analytics_prod` | `5e8f993e74e79fb0` |
+   | `object_store_uri` | `COPY INTO … FROM 's3://acme-prod-landing/orders/'` | `s3://acme-prod-landing/orders/` | `b4a82d9189588c25` |
+   | `object_store_uri` | `LOCATION 's3://acme-prod-lake/orders/'` | `s3://acme-prod-lake/orders/` | `05590ba43600a2e8` |
+   | `two_part_name` (opt-in) | `RAW.ORDERS` | `raw.orders` | `8fe8c3b68a003809` |
+
+   - **Names** (relations, warehouses, databases) are normalised: quoting stripped, each part lower-cased, parts joined with `.`.
+   - **A URI is the subject exactly as the pattern matched it,** not lower-cased, because bucket and key paths are case-sensitive.
+   - **The line number is excluded,** as for every finding.
+   - **The detector isn't part of the fingerprint,** so `USE WAREHOUSE analytics` and `USE DATABASE analytics` in the same model would share one. That's accepted as rare.
 
 ## Summary of recommendations
 
@@ -56,9 +73,9 @@ The constraints carry over from the rest of kv-cli:
 | 1 | Which files | `.sql` under `model-paths` and `snapshot-paths` of each `dbt_project.yml`. Not every `.sql` file; no analyses, macros or tests in stage one. |
 | 2 | Jinja | (a) Neutralise to same-length placeholders, with the refinements the spike needed. A model that doesn't parse after that is `skipped`, `analysis: partial`. |
 | 3 | Grammar | `sqlparser-rs`, pinned to `0.64`, with the generic dialect, plus its tokenizer as the fallback for files that fail to parse. Not a tree-sitter SQL grammar. **Decided.** |
-| 4 | KV003 on SQL | Literal three-part relation names, `USE …` statements, and object-store paths in string literals, minus a short allow list. Literal two-part names only with `sql.two_part_names: true`. **Decided** (see decision 3 above for one point to confirm). |
+| 4 | KV003 on SQL | Literal three-part relation names, `USE WAREHOUSE`/`USE DATABASE`, and object-store paths in `COPY INTO` and `LOCATION`, minus a short allow list. Literal two-part names only with `sql.two_part_names: true`. **Decided.** |
 | 5 | KV001 on SQL | Not applicable. SQL files add nothing to the scope block's function counts. |
-| 6 | Identity | `symbol` = model name (file stem), `subject` = the normalised relation name: one finding per table reference. No existing fingerprint changes. **Decided.** |
+| 6 | Identity | `symbol` = model name (file stem), `subject` = the pinned thing (normalised relation, normalised warehouse or database name, or URI): one finding each. No existing fingerprint changes. **Decided.** |
 | 7 | Contract | A `sql:` section, left out of the serialized contract at its default: on by default (`sql.enabled: true`), two-part names off (`sql.two_part_names: false`). `scan.include` is unchanged. |
 | 8 | Exit criteria | A golden test for `ANALYTICS_PROD.RAW.ORDERS`, and a pure-SQL dbt fixture that produces findings. |
 
@@ -243,8 +260,8 @@ The reasons:
 - **`three_part_name`:** a `database.schema.table` relation (in `FROM`/`JOIN`, or the target of `INSERT INTO`, `MERGE INTO`, `UPDATE`, `DELETE`) written as a literal: not a `ref()`/`source()` placeholder, and not on the allow list. This is the graphic's `ANALYTICS_PROD.RAW.ORDERS`. **On in stage 1.**
 - **`two_part_name`:** a `schema.table` relation whose schema is a literal. In dbt, schemas usually vary by target (`dbt_alice` in dev, `analytics` in prod), so a literal schema pins the model to one. **Off by default (owner decision);** `sql.two_part_names: true` turns it on.
   - **Exception:** a two-part name whose first part is a CTE or table alias in scope is a correlated reference, not a schema. Examples are BigQuery's `from orders o, o.items` and Snowflake's `lateral flatten(input => o.items)`. Only the AST can tell these apart.
-- **`use_statement`:** `USE WAREHOUSE`, `USE DATABASE`, `USE SCHEMA`, `USE ROLE`.
-- **Object-store paths:** a string literal matching `infrastructure.value_patterns` (`object_store_uri`, `jdbc_url`), so `COPY INTO … FROM 's3://prod-…'`, `LOCATION 's3://…'` and `read_parquet('gs://…')` are all covered by the rules Python and bundles already use. The `detector` is the value pattern's name.
+- **`use_warehouse` and `use_database`:** `USE WAREHOUSE …` and `USE DATABASE …`. **In stage 1.**
+- **`object_store_uri`:** an object-store URI written as a string literal in a `COPY INTO … FROM`/`TO` or a `LOCATION` clause. It's matched by the same `object_store_uri` value pattern that Python and bundle files use (`s3://`, `s3a://`, `gs://`, `gcs://`, `abfs(s)://`, `wasb(s)://`). **In stage 1.**
   - **A string containing a Jinja placeholder is templated and skipped.** `'s3://{{ var("bucket") }}/x'` neutralises to `'s3://kv______________/x'`, which would otherwise match. The same goes for `'/Volumes/{{ target.database }}/…'`, which appears in the corpus.
 
 **Legitimately literal**
@@ -252,7 +269,7 @@ The reasons:
 - CTE names and table aliases, which are always one part.
 - Any name with an `information_schema` part, including Snowflake's `db.information_schema.tables` and BigQuery's `region-us.INFORMATION_SCHEMA.JOBS`.
 - System catalogues and databases: `pg_catalog`, Snowflake's `snowflake.account_usage` and `snowflake.organization_usage`.
-- System and table functions: `current_database()`, `unnest(…)`, `flatten(…)`, `generate_series(…)`, `table(…)`, `read_files(…)`, whose path argument the value rule judges.
+- System and table functions: `current_database()`, `unnest(…)`, `flatten(…)`, `generate_series(…)`, `table(…)`, `read_files(…)`. A path passed to one of these is left to a later stage.
 - `ref()`/`source()` placeholders, and any identifier inside a placeholder's span.
 
 The allow list is `sql.allow_names`, wildcard patterns over the dotted name with the defaults above; the contract's `infrastructure.allow_values` also applies. A trailing `-- kovallent:allow-infra` comment silences a line, as in Python.
@@ -291,12 +308,15 @@ The rules then ran as proposed: sqlparser-rs's AST under `GenericDialect` when t
 | `COPY INTO 's3://…'` | Postgres `infos_communes` | no | yes | tokens |
 
 - **10 of 10 caught:** 2 from the AST and 8 through tokens. The value rule always reads string literals from tokens, so the `COPY INTO` and `LOCATION` seeds are token hits whether or not the file parses.
+- **The spike predates two decisions, neither of which changes what it caught:**
+  - **Scope of the value rule.** The spike's value rule matched *any* string literal. Every value seed sits directly in a `COPY INTO … FROM` or `LOCATION` clause, so the stage-1 rule, scoped to those clauses, covers the same seeds. The spike didn't implement the scoping itself.
+  - **Subject format.** Its subjects carried the rule as a prefix (`warehouse analytics_prod_wh`), which the decided subjects drop.
 - **Six seeded files fell back to tokens.** Three already failed to parse unseeded. In the other three, the seed itself isn't generic SQL: `USE WAREHOUSE` once and `COPY INTO` twice. Rerun with each project's native dialect, `SnowflakeDialect` parses the `USE WAREHOUSE` and catches it from the AST. The seeded `COPY INTO` parses under no dialect and is still caught through tokens.
 - **Inside Jinja: not caught as proposed.** A copy of `infos_iris` has a `ref()` replaced by `{{ 'ANALYTICS_PROD.RAW.ORDERS' }}`, and the neutraliser turns it into a placeholder like any other `{{ … }}`. With literal pass-through (decision 2) it is caught, from the AST, so I recommend that refinement for stage 1.
 - **No false positives:** the same rules over the 30 unseeded models report nothing. Three of those models use the token fallback.
 - **Caveat:** the seeds are synthetic and sit where the rules look. The pass shows the rules and the fallback work end to end. It doesn't measure recall on real-world code.
 
-**Later stage, not stage one:** apply the same rules to string literals inside Jinja, mainly `pre_hook`/`post_hook` in `config()` and the hooks in `dbt_project.yml`. Also apply `infrastructure.key_patterns` to `config()` keyword arguments, so `snowflake_warehouse='PROD_WH'` is caught. That last one needs care, because `schema='staging'` in `config()` is a custom-schema *suffix* by design, not a pin.
+**Later stage, not stage one:** `USE SCHEMA` and `USE ROLE`; JDBC URLs; object-store paths outside `COPY INTO` and `LOCATION`, such as `read_parquet('gs://…')` and `read_files('s3://…')`. Also apply the same rules to string literals inside Jinja, mainly `pre_hook`/`post_hook` in `config()` and the hooks in `dbt_project.yml`. Also apply `infrastructure.key_patterns` to `config()` keyword arguments, so `snowflake_warehouse='PROD_WH'` is caught. That last one needs care, because `schema='staging'` in `config()` is a custom-schema *suffix* by design, not a pin.
 
 **Decided:** `two_part_name` ships off by default, behind `sql.two_part_names`, because a literal schema is a pin only where schemas vary by target. **What would change my mind** about turning it on by default: evidence that most customers' schemas do vary by target, for example from the opt-in's own findings once it ships.
 
@@ -325,7 +345,7 @@ What this means for the payload:
 
 ## 6. Identity
 
-**Decided:** `symbol` = the model name, which is the **file stem**; `subject` = the normalised name of the thing pinned, so there is **one finding per table reference**. The formula is in the [owner decisions](#owner-decisions-2026-11-19).
+**Decided:** `symbol` = the model name, which is the **file stem**; `subject` = the pinned thing, so there is **one finding per pinned thing**. The formula and a worked fingerprint for each rule are in the [owner decisions](#owner-decisions-2026-11-19).
 
 - **The file stem, not `alias`.** The stem is dbt's own identity for a model (`model.<project>.<stem>`) and is known without rendering anything. `alias` only renames the warehouse relation, often through Jinja, which is blanked.
 - **A versioned model** (`orders_v2.sql`) keeps its stem, so each version is its own symbol.
@@ -337,10 +357,11 @@ What this means for the payload:
   | --- | --- | --- |
   | `three_part_name` | the normalised relation | `analytics_prod.raw.orders` |
   | `two_part_name` (opt-in) | the normalised relation | `raw.orders` |
-  | `use_statement` | the object kind and normalised name | `warehouse analytics_prod_wh` |
-  | `object_store_uri`, `jdbc_url` | the detector and the literal | `object_store_uri s3://acme-prod-landing/orders/` |
+  | `use_warehouse` | the normalised warehouse name | `analytics_prod_wh` |
+  | `use_database` | the normalised database name | `analytics_prod` |
+  | `object_store_uri` | the URI, exactly as matched | `s3://acme-prod-landing/orders/` |
 
-  The owner decided the subject for table references. The last two rows extend the same principle (the pinned thing is the subject) to the other rules, so two paths in one model also stay distinct. That extension is my proposal, listed below.
+  As with relations, the same warehouse, database or URI written twice in one model is one finding.
 
 **Existing fingerprints don't change.** A finding's fingerprint is `sha256(path \0 code \0 symbol \0 subject)` over the normalised path. Adding SQL files adds findings, but it changes none of the inputs to a Python, notebook or config finding: the same paths, codes, symbols and subjects. The contract's fingerprint is covered by decision 7. Two things change, and both are payload rather than identity: `files_scanned`, and `run.files` gaining entries. The implementation should carry a test that the existing findings on `samples/` keep their fingerprints byte for byte.
 
@@ -367,14 +388,17 @@ sql:
 - **`dialect`** pins the parse to one dialect. At its default, `generic`, kv-cli tries `GenericDialect` and then each supported dialect before the token fallback (decision 3).
 - **Payload changes are additive** (`schema_version` stays 1):
   - `run.files[].analysis` gains `sql`.
-  - SQL KV003 findings use the existing `hardcoded_infrastructure` kind, with `detector` set to the rule and `key` set to the relation name.
+  - SQL KV003 findings use the existing `hardcoded_infrastructure` kind:
+    - **`detector`** is the rule (`three_part_name`, `two_part_name`, `use_warehouse`, `use_database`, `object_store_uri`).
+    - **`key`** is the name as written, for the relation and `USE` rules.
+    - **`key` is absent** for `object_store_uri`, which is a value rule, as in Python.
 
 **Decided:** `sql.enabled` defaults to `true`, and SQL findings use `infrastructure.severity`, a warning by default. As with 0.13.0's bundle files, that means new warnings for existing users, and `sql.enabled: false` is the named opt-out.
 
 ## 8. Exit criteria
 
 1. **The graphic's example is a real detection.** A fixture model `select … from ANALYTICS_PROD.RAW.ORDERS` produces one KV003 `three_part_name` warning on the right line. Golden tests pin its text line, its JSON finding (at `models/orders.sql`: `symbol: orders`, `subject: analytics_prod.raw.orders`, fingerprint `803e1305b4fe391a`) and its SARIF result.
-2. **A pure-SQL dbt project produces findings instead of an empty pass.** That's `samples/dbt_sql/`: a `dbt_project.yml`, models with `ref()`, `source()`, a CTE, an alias, an `information_schema` query, two literal three-part names in one model, a literal schema, and an `s3://` path in a `COPY INTO`. It reports exactly the pinned ones, and the others stay clean. The two three-part names are two findings with distinct fingerprints. The literal schema is reported only with `sql.two_part_names: true`. Without `--strict` it exits `0` with warnings; with `--strict` it exits `1`.
+2. **A pure-SQL dbt project produces findings instead of an empty pass.** That's `samples/dbt_sql/`: a `dbt_project.yml`, models with `ref()`, `source()`, a CTE, an alias, an `information_schema` query, two literal three-part names in one model, a literal schema, `USE WAREHOUSE` and `USE DATABASE` statements, and `s3://` paths in a `COPY INTO` and a `LOCATION`. It reports exactly the pinned ones, and the others stay clean. Each finding's fingerprint is pinned by a golden test, using the formula in the owner decisions. The two three-part names are two findings with distinct fingerprints. The literal schema is reported only with `sql.two_part_names: true`. Without `--strict` it exits `0` with warnings; with `--strict` it exits `1`.
 3. **A model whose Jinja can't be neutralised is `skipped` with `analysis: partial`,** never clean, with fixtures for an unterminated tag and a fragment-rendering macro.
 4. **No existing fingerprint moves:** neither the findings on `samples/` nor the default contract's.
 5. **A parse-coverage check in CI** over a committed sample of real models. Licences permitting, that's a handful of the Appendix A models plus synthetic ones per dialect, with sqlparser-rs's full-parse rate reported per dialect, so a dependency upgrade that regresses coverage is visible.
@@ -385,7 +409,7 @@ sql:
 | Stage | Work | Estimate |
 | --- | --- | --- |
 | 0 | This document, the spike, the recall pass, owner decisions | done, pending approval of this revision |
-| 1: KV003 on SQL | `dbt_project.yml` discovery and path keys (1 d); the neutraliser with its refinements, literal pass-through and tests (2.5 d); sqlparser-rs integration, spans, dialect retry, token fallback, `partial` handling (3.5 d); the three-part, `USE` and value rules, the opt-in two-part rule, scope-aware exceptions, allow list (3 d); payload, schemas, text, SARIF, docs (2 d); fixtures, goldens, recall test, CI coverage check (2 d) | **about 14 days** (3 weeks), binary +2.3 MB; about 1 day less if stage 1 drops the `USE` and value rules |
+| 1: KV003 on SQL | `dbt_project.yml` discovery and path keys (1 d); the neutraliser with its refinements, literal pass-through and tests (2.5 d); sqlparser-rs integration, spans, dialect retry, token fallback, `partial` handling (3.5 d); the three-part, `USE WAREHOUSE`/`USE DATABASE` and `COPY INTO`/`LOCATION` rules, the opt-in two-part rule, scope-aware exceptions, allow list (3 d); payload, schemas, text, SARIF, docs (2 d); fixtures, goldens, recall test, CI coverage check (2 d) | **about 14 days** (3 weeks), binary +2.3 MB |
 | 2: KV001 on SQL | Recommendation (c): document "not applicable", payload semantics, consumer guidance | **1 day** |
 | 2, if (a) is chosen instead | Opt-in `var('target_environment')` rule, contract field, tests | +3 to 4 days |
 | Later | Jinja string literals and hooks (`pre_hook`, `post_hook`, project hooks) under the same rules | 2 to 3 days |
@@ -397,18 +421,21 @@ sql:
 **Decided on 2026-11-19** (recorded in [owner decisions](#owner-decisions-2026-11-19)):
 - on by default, at `infrastructure.severity`, with `sql.enabled: false` as the opt-out, skipped from serialization at its default;
 - `sqlparser-rs`, pinned to `0.64`;
-- stage 1 ships the three-part rule; the two-part rule sits behind `sql.two_part_names`, default off;
-- one finding per table reference, with `subject` = the normalised relation name.
+- stage 1 ships the three-part relation rule, `USE WAREHOUSE`/`USE DATABASE`, and object-store paths in `COPY INTO` and `LOCATION`. The two-part rule sits behind `sql.two_part_names`, default off;
+- the pinned thing is the subject for every stage-1 rule (the normalised relation, warehouse or database name, or the URI), so there is one finding per pinned thing.
 
-**Still open:**
-1. **"Three-part rule only."** Does it cover only the relation-name rules (my reading: `USE` and the value rule stay in stage 1), or should stage 1 ship `three_part_name` alone?
-2. **The subject for the other rules.** Extend "the pinned thing is the subject" to `use_statement` and the value rule, as decision 6 proposes?
-3. **Literal pass-through and the dialect retry** in stage 1, as the recall pass suggests?
-4. **Stage-one paths.** Is `model-paths` plus `snapshot-paths` right, leaving out analyses and singular tests?
-5. **KV001.** Confirm "not applicable to SQL", and the scope semantics: zero function counts, `analysis: sql`, 0 of 0 read as "no KV001 evidence".
-6. **Skip reason.** For a model whose Jinja can't be neutralised, reuse `syntax_error` with a detail, or add a skip reason such as `template` (additive)?
-7. **The allow list.** Are the default `sql.allow_names` entries right? Should BigQuery public datasets (`bigquery-public-data.*`), which are the same in every environment, be added?
-8. **The CI corpus.** Which real models may be committed for the coverage check, given their licences?
+**Accepted by approving this document.** These are the remaining recommendations; the owner can override any of them at approval:
+1. **Literal pass-through and the dialect retry ship in stage 1,** as the recall pass suggests (decisions 2 and 3).
+2. **Stage-one paths are `model-paths` and `snapshot-paths`.** Analyses and singular tests are later opt-ins (decision 1).
+3. **KV001 doesn't apply to SQL.** SQL files add nothing to the scope block's function counts, they're listed with `analysis: sql`, and a pure-SQL project's 0 of 0 reads as "no KV001 evidence" (decision 5).
+4. **A model that can't be fully parsed gets a new skip reason, `sql_not_parsed`** (additive; `schema_version` stays 1), with a detail naming the cause. It's handled like `syntax_error`: a warning, which gates under `--strict`. Most such failures are kv-cli's own limits, such as a macro that renders a SQL fragment or a dialect gap, not the author's syntax, so `syntax_error` would point the author at a fault they don't have.
+5. **The default `sql.allow_names`** are the entries in decision 7, plus `bigquery-public-data.*`, whose public datasets are the same in every environment.
+6. **The CI corpus** (exit criterion 5) commits only models whose licence allows it, plus synthetic models per dialect. Of the spike's six projects, that's only `Velir/dbt-ga4`, which is MIT like kv-cli, with attribution. The others can't be committed:
+   - `cal-itp/data-infra` is AGPL-3.0;
+   - `datacoves/balboa`, `make-open-data` and `dbt-databricks-adventureworks` have no licence file at their root;
+   - `dbt-databricks-c360` is under a proprietary Databricks licence.
+
+**Note for the owner on `dbt-databricks-c360`:** its licence says that without an agreement with Databricks you "may not use the Software or view, copy or compile the Source Code". The spike's `fetch.sh` downloads four of its models, and Appendix A links to them. If Kovallent has no such agreement, those four should be replaced with models from a permissively licensed Databricks project and the spike rerun; until then, its Databricks row rests on them.
 
 ## Appendix A: the 30 models
 
