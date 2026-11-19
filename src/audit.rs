@@ -451,20 +451,46 @@ impl Engine {
 
     #[cfg(test)]
     pub fn audit_yaml(&self, path: &str, source: &str) -> Vec<Finding> {
-        self.audit_config(path, source, ConfigKind::Yaml, None)
+        self.audit_config(path, source, ConfigKind::Yaml, None, false)
     }
 
-    /// Audit a config file - YAML, `.env`, INI, TOML, JSON - for credentials.
+    /// Audit a config file - YAML, `.env`, INI, TOML, JSON - for credentials,
+    /// and a Databricks asset bundle file for pinned infrastructure too.
     ///
     /// `path` is the file's project-relative path, as findings report it.
     /// `location` is the file on disk, when there is one: it identifies a
     /// GitHub Actions workflow even when the project root is not the
     /// repository root, as when pre-commit names only a workflow file and
-    /// no contract is found.
+    /// no contract is found. `bundle` says the file belongs to an asset
+    /// bundle (see [`crate::bundle::files`]).
     ///
-    /// KV003 is deliberately not applied: a per-environment config file is
-    /// exactly where environment-specific values belong.
+    /// KV003 applies to bundle files only: other config files, dbt's
+    /// `profiles.yml` above all, are exactly where per-environment values
+    /// belong, while a bundle declares its per-target values under
+    /// `targets:` and `variables:`.
     pub fn audit_config(
+        &self,
+        path: &str,
+        source: &str,
+        kind: ConfigKind,
+        location: Option<&Path>,
+        bundle: bool,
+    ) -> Vec<Finding> {
+        let mut out = self.credentials_in_config(path, source, kind, location);
+        if bundle && kind == ConfigKind::Yaml && self.checks_bundles() {
+            self.bundle_infra(path, source, &mut out);
+            out.sort_by_key(|f| (f.line, f.code));
+        }
+        out
+    }
+
+    /// Whether bundle files get KV003: `infrastructure.enabled` and
+    /// `infrastructure.bundle_files`.
+    pub fn checks_bundles(&self) -> bool {
+        self.contract.infrastructure.enabled && self.contract.infrastructure.bundle_files
+    }
+
+    fn credentials_in_config(
         &self,
         path: &str,
         source: &str,
@@ -555,6 +581,108 @@ impl Engine {
         self.raw_secret_values(path, source, &ctx, Some(kind), &|_| false, &mut out);
         out.sort_by_key(|f| (f.line, f.code));
         out
+    }
+
+    /// KV003 in a Databricks asset bundle file. A scalar is pinned when it is
+    /// outside `targets:` and `variables:` (where a bundle declares what
+    /// varies), is not a substitution such as `${var.x}`, and matches an
+    /// infrastructure rule: a key in `key_patterns` or the databricks
+    /// profile's infrastructure keys, or a value in `value_patterns`.
+    /// `allow_values`, `exempt_key_patterns` and `min_value_length` apply to
+    /// the key rule and the ignore marker to both, as in Python. A line
+    /// already reported as a credential is reported once, as the credential.
+    ///
+    /// The finding's `symbol` is the scalar's dotted path, so the fingerprint
+    /// survives a line shift and tells two `cluster_id`s apart.
+    fn bundle_infra(&self, path: &str, source: &str, out: &mut Vec<Finding>) {
+        let cfg = &self.contract.infrastructure;
+        let ctx = self.bundle_context();
+        let credentials: HashSet<usize> = out.iter().map(|f| f.line).collect();
+        for e in yamlscan::entries(source) {
+            if matches!(e.section(), Some("targets" | "variables")) {
+                continue;
+            }
+            let value = e.value.trim();
+            if value.is_empty() || value.contains("${") || credentials.contains(&e.line) {
+                continue;
+            }
+            if !cfg.ignore_marker.is_empty() && e.comment.contains(&cfg.ignore_marker) {
+                continue;
+            }
+            let symbol = e.dotted();
+            let written = value.chars().count() >= cfg.min_value_length
+                && !is_placeholder(value, &cfg.allow_values, &[]);
+            let key_rule = e.key().filter(|_| written).and_then(|k| {
+                ctx.matches_key(
+                    k,
+                    |p| p.infra_keys,
+                    |e| &e.contract.infrastructure.key_patterns,
+                    |e| &e.contract.infrastructure.exempt_key_patterns,
+                )
+            });
+            let (subject, framework, message, shown) = if let Some(framework) = key_rule {
+                (
+                    "key_pattern".to_string(),
+                    framework,
+                    format!("`{symbol}` is pinned to `{}`", truncate(value)),
+                    value,
+                )
+            } else if let Some((name, m)) = self
+                .infra_values
+                .iter()
+                .find_map(|(name, re)| re.find(value).map(|m| (name, m.as_str())))
+            {
+                (
+                    name.clone(),
+                    None,
+                    format!("environment-specific identifier ({name}) at `{symbol}`"),
+                    m,
+                )
+            } else {
+                continue;
+            };
+            out.push(Finding {
+                fingerprint: finding_fingerprint(path, CODE_HARDCODED_INFRA, &symbol, &subject),
+                path: path.to_string(),
+                line: e.line,
+                code: CODE_HARDCODED_INFRA,
+                severity: cfg.severity,
+                message,
+                detail: Some(format!(
+                    "`{}` should vary by target - set it under `targets:`, or declare a \
+                     variable and use `${{var.<name>}}`",
+                    truncate(shown)
+                )),
+                framework,
+                report_only: None,
+                kind: FindingKind::HardcodedInfrastructure {
+                    key: (subject == "key_pattern")
+                        .then(|| e.key().unwrap_or_default().to_string()),
+                    detector: subject.clone(),
+                },
+                symbol,
+                subject,
+            });
+        }
+    }
+
+    /// Context for a bundle file's KV003 pass: the databricks profile
+    /// applies, since a bundle is Databricks configuration by definition,
+    /// unless the contract turns the profile off.
+    fn bundle_context(&self) -> FileContext<'_> {
+        let active = self
+            .frameworks
+            .iter()
+            .filter(|f| match self.explicitly_enabled(f) {
+                Some(decided) => decided,
+                None => self.contract.frameworks.is_auto() && f.profile.name == "databricks",
+            })
+            .collect();
+        FileContext {
+            engine: self,
+            active,
+            names: python::Names::default(),
+        }
     }
 
     /// Audit a Jupyter notebook for credentials.
@@ -2626,7 +2754,7 @@ jobs:
 
     fn config(name: &str, src: &str) -> Vec<Finding> {
         let kind = ConfigKind::of(Path::new(name)).expect("a config file name");
-        engine().audit_config(name, src, kind, None)
+        engine().audit_config(name, src, kind, None, false)
     }
 
     #[test]
@@ -2941,5 +3069,137 @@ jobs:
         let after = kv004(naming(SNAKE), &format!("import os\n\n\n{TASKS}"));
         assert_ne!(before[0].line, after[0].line);
         assert_eq!(before[0].fingerprint, after[0].fingerprint);
+    }
+
+    // --- KV003 in Databricks asset bundles -----------------------------------
+
+    fn bundle_kv003(contract: Contract, src: &str) -> Vec<Finding> {
+        Engine::new(contract)
+            .unwrap()
+            .audit_config("resources/jobs.yml", src, ConfigKind::Yaml, None, true)
+            .into_iter()
+            .filter(|f| f.code == CODE_HARDCODED_INFRA)
+            .collect()
+    }
+
+    fn symbols(findings: &[Finding]) -> Vec<(&str, &str)> {
+        findings
+            .iter()
+            .map(|f| (f.symbol.as_str(), f.subject.as_str()))
+            .collect()
+    }
+
+    const JOBS: &str = "resources:\n  jobs:\n    nightly:\n      tasks:\n        - task_key: load\n          existing_cluster_id: 0923-164208-prdclstr\n          parameters:\n            - s3://prod-orders/raw/\n";
+
+    /// Outside `targets:` and `variables:`, a key or value rule reports the
+    /// scalar, by its dotted path; under them, and as a substitution, it is a
+    /// declared per-target value.
+    #[test]
+    fn bundle_scalars_are_pinned_outside_targets_and_variables() {
+        let src = format!(
+            "{JOBS}targets:\n  dev:\n    resources:\n      jobs:\n        nightly:\n          tasks:\n            - existing_cluster_id: 0101-000000-devclstr\n              warehouse_bucket: s3://dev-orders/\nvariables:\n  landing:\n    default: s3://prod-landing/\n  warehouse_id:\n    lookup:\n      warehouse: Prod SQL\nother:\n  warehouse_id: ${{var.warehouse_id}}\n  bucket: s3://${{bundle.target}}-orders/\n"
+        );
+        let f = bundle_kv003(Contract::default(), &src);
+        assert_eq!(
+            symbols(&f),
+            [
+                (
+                    "resources.jobs.nightly.tasks[0].existing_cluster_id",
+                    "key_pattern"
+                ),
+                (
+                    "resources.jobs.nightly.tasks[0].parameters[0]",
+                    "object_store_uri"
+                ),
+            ]
+        );
+        assert!(f.iter().all(|f| f.severity == Severity::Warning));
+        assert_eq!(f[0].framework, None);
+        assert!(matches!(
+            &f[0].kind,
+            FindingKind::HardcodedInfrastructure { detector, key: Some(k) }
+                if detector == "key_pattern" && k == "existing_cluster_id"
+        ));
+        assert_eq!(
+            f[1].fingerprint,
+            finding_fingerprint(
+                "resources/jobs.yml",
+                "KV003",
+                "resources.jobs.nightly.tasks[0].parameters[0]",
+                "object_store_uri"
+            )
+        );
+    }
+
+    /// `allow_values`, `exempt_key_patterns` and `min_value_length` filter
+    /// the key rule, and the ignore marker silences either rule, as in Python.
+    #[test]
+    fn bundle_filters_apply_as_they_do_for_python() {
+        let src = "jobs:\n  catalog: main\n  cluster_id_column: abc123\n  cluster_id: ab\n  warehouse_id: 4b9f1e2d7c3a5e60  # kovallent:allow-infra\n  path: s3://prod-orders/ # kovallent:allow-infra\n";
+        assert_eq!(symbols(&bundle_kv003(Contract::default(), src)), []);
+        let c = Contract::from_yaml("version: 1\ninfrastructure:\n  exempt_key_patterns: []\n  allow_values: []\n  min_value_length: 1\n  ignore_marker: ''\n").unwrap();
+        assert_eq!(bundle_kv003(c, src).len(), 5);
+    }
+
+    /// The databricks profile's infrastructure keys apply in a bundle file,
+    /// unless the contract turns the profile off.
+    #[test]
+    fn bundle_files_use_the_databricks_profile_keys() {
+        let src = "jobs:\n  instance_pool_id: 0101-pool-abcdef\n";
+        let f = bundle_kv003(Contract::default(), src);
+        assert_eq!(symbols(&f), [("jobs.instance_pool_id", "key_pattern")]);
+        assert_eq!(f[0].framework, Some("databricks"));
+        let off =
+            Contract::from_yaml("version: 1\nframeworks:\n  disable: [databricks]\n").unwrap();
+        assert!(bundle_kv003(off, src).is_empty());
+    }
+
+    /// A value already reported as a credential is reported once, as the
+    /// credential.
+    #[test]
+    fn a_bundle_credential_is_not_also_kv003() {
+        let src = "jobs:\n  catalog_password: s3cr3t-value-1234\n";
+        let all = Engine::new(Contract::default()).unwrap().audit_config(
+            "databricks.yml",
+            src,
+            ConfigKind::Yaml,
+            None,
+            true,
+        );
+        assert_eq!(
+            all.iter().map(|f| f.code).collect::<Vec<_>>(),
+            [CODE_HARDCODED_SECRET]
+        );
+    }
+
+    /// The fingerprint follows the dotted path, not the line: moving a job
+    /// keeps it, and two `cluster_id`s in different jobs stay apart.
+    #[test]
+    fn a_bundle_fingerprint_survives_a_line_shift() {
+        let before = bundle_kv003(Contract::default(), JOBS);
+        let after = bundle_kv003(Contract::default(), &format!("# moved\n\n{JOBS}"));
+        assert_ne!(before[0].line, after[0].line);
+        assert_eq!(before[0].fingerprint, after[0].fingerprint);
+        let two =
+            "a:\n  cluster_id: 0923-164208-prdclstr\nb:\n  cluster_id: 0923-164208-prdclstr\n";
+        let f = bundle_kv003(Contract::default(), two);
+        assert_eq!(f.len(), 2);
+        assert_ne!(f[0].fingerprint, f[1].fingerprint);
+    }
+
+    /// `bundle_files: false`, or KV003 turned off, leaves a bundle file
+    /// credentials-only; a file that is not a bundle file never gets KV003.
+    #[test]
+    fn bundle_kv003_has_its_switches() {
+        for yaml in [
+            "version: 1\ninfrastructure:\n  bundle_files: false\n",
+            "version: 1\ninfrastructure:\n  enabled: false\n",
+        ] {
+            let c = Contract::from_yaml(yaml).unwrap();
+            assert!(!Engine::new(c.clone()).unwrap().checks_bundles(), "{yaml}");
+            assert!(bundle_kv003(c, JOBS).is_empty(), "{yaml}");
+        }
+        let not_bundle = engine().audit_config("jobs.yml", JOBS, ConfigKind::Yaml, None, false);
+        assert!(not_bundle.is_empty(), "{not_bundle:#?}");
     }
 }

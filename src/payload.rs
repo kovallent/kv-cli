@@ -93,6 +93,10 @@ pub enum FileAnalysis {
     /// YAML, `.env*`, TOML, INI/cfg, JSON and notebooks: scanned for
     /// credentials only, so the scope is always zero.
     CredentialsOnly,
+    /// A Databricks asset bundle file: scanned for credentials and, outside
+    /// `targets:` and `variables:`, pinned infrastructure (KV003). The scope
+    /// is always zero.
+    CredentialsAndInfrastructure,
     /// A syntax error: audited on a partial parse. Also listed in `skipped`.
     Partial,
     /// The file could not be read at all. Also listed in `skipped`.

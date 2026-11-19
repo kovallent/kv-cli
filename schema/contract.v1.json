@@ -123,6 +123,10 @@
           },
           "type": "array"
         },
+        "bundle_files": {
+          "description": "Apply KV003 to Databricks asset bundle files: `databricks.yml` or\n`databricks.yaml`, and the YAML files its `include:` globs name. A\nbundle declares what varies under `targets:` and `variables:`, so an\nidentifier anywhere else is pinned by mistake. `false` leaves every\nYAML file credentials-only, as before 0.13.0.",
+          "type": "boolean"
+        },
         "enabled": {
           "default": true,
           "type": "boolean"

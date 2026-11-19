@@ -89,7 +89,9 @@ pub fn check_files(payload: &serde_json::Value) {
             Some(&"unreadable") => assert_eq!(analysis, "none", "{f:#}"),
             Some(other) => panic!("unknown skip reason {other}"),
             None => assert!(
-                analysis == "full" || analysis == "credentials_only",
+                analysis == "full"
+                    || analysis == "credentials_only"
+                    || analysis == "credentials_and_infrastructure",
                 "{f:#}"
             ),
         }
@@ -111,7 +113,7 @@ pub fn check_files(payload: &serde_json::Value) {
             n("functions_report_only") <= n("functions_in_scope"),
             "{f:#}"
         );
-        if analysis == "credentials_only" || analysis == "none" {
+        if analysis != "full" && analysis != "partial" {
             assert_eq!(n("functions_total"), 0, "{f:#}");
         }
         for k in SCOPE_KEYS {

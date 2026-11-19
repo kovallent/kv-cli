@@ -65,6 +65,8 @@ infrastructure:
 
 ## Upgrading
 
+**Upgrading to 0.13.0.** Fingerprints do not change, but a repository with a Databricks asset bundle may see **new KV003 warnings in `databricks.yml`** and in the files its `include:` names. A value outside `targets:` and `variables:` whose key or value names infrastructure, such as a hardcoded `existing_cluster_id` or an `s3://` path in a task parameter, is now reported. They are warnings, so nothing gates unless you run `--strict`. Move the value under `targets:` or into a variable. To opt out, set `infrastructure.bundle_files: false`; unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
+
 **Upgrading to 0.10.0.** Fingerprints do not change, but two behaviours do, and both can change your findings.
 
 - **KV003's name rule waits for a framework.** `infrastructure.key_patterns` (by default `*warehouse*`, `*catalog*`, `*cluster_id*`, `*workspace_url*`, `*bucket*`, plus any you added) now applies only in Python files where a framework profile is detected. In other Python files, a `warehouse = "PROD_WH"` is no longer reported. Value patterns, such as `s3://` URIs, still apply everywhere, and so do each profile's own key rules where the profile is detected. To keep 0.9.0's behaviour, set `infrastructure.global_key_patterns_require_framework: false`. Unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
