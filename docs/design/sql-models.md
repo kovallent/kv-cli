@@ -1,6 +1,6 @@
 # Design: SQL models
 
-**Status:** ready for owner approval. Every owner decision of 2026-11-19 is recorded below, and each remaining question carries a recommendation that approving this document accepts. Implementation starts only after that approval.
+**Status:** Approved 2026-11-19; implementation in progress.
 **Licence revision:** the owner's licence decisions are applied. Four of the seven Databricks models were replaced with models from MIT and Apache-2.0 projects, and the spike was rerun. Every table in this document comes from that rerun ([Appendix A](#appendix-a-the-30-models)).
 **Scope of this document:** decisions only. No parser, no new dependency and no change under `src/` come with it.
 
@@ -404,7 +404,7 @@ What this means for the payload:
 ```yaml
 sql:
   enabled: true                       # default (owner decision); false: .sql files are never read, as before
-  paths: [model-paths, snapshot-paths] # default; add analysis-paths or test-paths to opt in
+  paths: [model-paths, snapshot-paths] # default, and the only keys stage 1 accepts; analysis-paths and test-paths are a later stage
   dialect: generic                    # default; snowflake | bigquery | databricks | postgres
   allow_names:                        # default list; matched against the dotted name, ignoring case
     - "*.information_schema.*"

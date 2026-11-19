@@ -11,6 +11,7 @@ mod notebook;
 mod payload;
 mod python;
 mod sarif;
+mod sql;
 mod yamlscan;
 
 use audit::{Engine, Finding, Scope};

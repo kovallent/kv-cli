@@ -530,6 +530,62 @@
       ],
       "type": "string"
     },
+    "SqlConfig": {
+      "additionalProperties": false,
+      "description": "dbt SQL models, found through each `dbt_project.yml`. A model is read\nwhen it sits under one of the project's `paths`; KV003 then applies to it\nunder `infrastructure`'s settings.",
+      "properties": {
+        "allow_names": {
+          "description": "Dotted names that are the same in every environment, matched against\nthe whole normalised name, ignoring case. `*` matches any run of\ncharacters, dots included.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dialect": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SqlDialect"
+            }
+          ],
+          "description": "Parse with this dialect only. At `generic`, the default, kv-cli tries\nthe generic dialect and then each supported dialect in turn."
+        },
+        "enabled": {
+          "description": "`false`: `.sql` files are never read, as before 0.14.0.",
+          "type": "boolean"
+        },
+        "paths": {
+          "description": "Which `dbt_project.yml` path keys hold the models to read:\n`model-paths` (`source-paths` before dbt 1.0) and `snapshot-paths`.\nAnalyses and singular tests are a later stage, not yet accepted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "two_part_names": {
+          "description": "Also report two-part `schema.table` names written as literals.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "SqlDialect": {
+      "description": "The SQL dialect a model is parsed with.",
+      "oneOf": [
+        {
+          "enum": [
+            "snowflake",
+            "bigquery",
+            "databricks",
+            "postgres"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "generic",
+          "description": "The generic dialect first, then each dialect below in turn.",
+          "type": "string"
+        }
+      ]
+    },
     "ValuePattern": {
       "additionalProperties": false,
       "properties": {
@@ -837,6 +893,14 @@
           }
         ]
       }
+    },
+    "sql": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SqlConfig"
+        }
+      ],
+      "description": "dbt SQL models: which are read, and how. KV003 applies to them under\n`infrastructure`'s settings; see docs/design/sql-models.md."
     },
     "version": {
       "default": 1,
