@@ -1,6 +1,7 @@
 # Design: SQL models
 
 **Status:** ready for owner approval. Every owner decision of 2026-11-19 is recorded below, and each remaining question carries a recommendation that approving this document accepts. Implementation starts only after that approval.
+**Licence revision:** the owner's licence decisions are applied. Four of the seven Databricks models were replaced with models from MIT and Apache-2.0 projects, and the spike was rerun. Every table in this document comes from that rerun ([Appendix A](#appendix-a-the-30-models)).
 **Scope of this document:** decisions only. No parser, no new dependency and no change under `src/` come with it.
 
 ## Context
@@ -65,19 +66,30 @@ The constraints carry over from the rest of kv-cli:
    - **A URI is the subject exactly as the pattern matched it,** not lower-cased, because bucket and key paths are case-sensitive.
    - **The line number is excluded,** as for every finding.
    - **The detector isn't part of the fingerprint,** so `USE WAREHOUSE analytics` and `USE DATABASE analytics` in the same model would share one. That's accepted as rare.
+6. **A model that can't be fully parsed is skipped with a new reason, `sql_not_parsed`.**
+   - It's additive: `schema_version` stays 1.
+   - Its detail names the cause.
+   - It's handled like `syntax_error`: a warning that gates under `--strict`. The file is `analysis: partial` and never clean.
+
+   Most such failures are kv-cli's own limits, not the author's syntax: a macro that renders a SQL fragment, say, or a dialect gap. `syntax_error` would point the author at a fault they don't have.
+7. **The CI parse-coverage corpus (exit criterion 5) is permissive plus synthetic.** It commits only these:
+   - **Permissively licensed models:** from projects with an MIT, Apache-2.0 or BSD licence at the repository root. Each is pinned to a commit and committed with its project's licence and attribution beside it.
+   - **Synthetic models:** written for kv-cli, and labelled synthetic in the file.
+
+   Three of the spike's projects qualify, covering BigQuery and Databricks: `Velir/dbt-ga4` (MIT), `joanasoares0/dbt-databricks-pipeline` (MIT) and `AndreaBozzo/dlt-dbt-databricks` (Apache-2.0). The spike found no permissive Snowflake or Postgres project, so those two dialects start with synthetic models only. Kovallent has no Databricks agreement, so nothing from `databricks-demos/dbt-databricks-c360` is used.
 
 ## Summary of recommendations
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
 | 1 | Which files | `.sql` under `model-paths` and `snapshot-paths` of each `dbt_project.yml`. Not every `.sql` file; no analyses, macros or tests in stage one. |
-| 2 | Jinja | (a) Neutralise to same-length placeholders, with the refinements the spike needed. A model that doesn't parse after that is `skipped`, `analysis: partial`. |
+| 2 | Jinja | (a) Neutralise to same-length placeholders, with the refinements the spike needed. A model that doesn't parse after that is `skipped` with reason `sql_not_parsed`, `analysis: partial` (**decided**). |
 | 3 | Grammar | `sqlparser-rs`, pinned to `0.64`, with the generic dialect, plus its tokenizer as the fallback for files that fail to parse. Not a tree-sitter SQL grammar. **Decided.** |
 | 4 | KV003 on SQL | Literal three-part relation names, `USE WAREHOUSE`/`USE DATABASE`, and object-store paths in `COPY INTO` and `LOCATION`, minus a short allow list. Literal two-part names only with `sql.two_part_names: true`. **Decided.** |
 | 5 | KV001 on SQL | Not applicable. SQL files add nothing to the scope block's function counts. |
 | 6 | Identity | `symbol` = model name (file stem), `subject` = the pinned thing (normalised relation, normalised warehouse or database name, or URI): one finding each. No existing fingerprint changes. **Decided.** |
 | 7 | Contract | A `sql:` section, left out of the serialized contract at its default: on by default (`sql.enabled: true`), two-part names off (`sql.two_part_names: false`). `scan.include` is unchanged. |
-| 8 | Exit criteria | A golden test for `ANALYTICS_PROD.RAW.ORDERS`, and a pure-SQL dbt fixture that produces findings. |
+| 8 | Exit criteria | A golden test for `ANALYTICS_PROD.RAW.ORDERS`, a pure-SQL dbt fixture that produces findings, and a CI parse-coverage check over a permissive-plus-synthetic corpus (**decided**). |
 
 ---
 
@@ -115,7 +127,7 @@ Discovery details:
 
 ## 2. Jinja
 
-kv-cli can't render Jinja: rendering needs `dbt compile`, the project's packages, often a warehouse connection (`run_query`), and a target. A model has Jinja almost everywhere. In the spike corpus, 22 of 30 models contain `{% … %}`, and every model fails to parse until its Jinja is dealt with: 30 of 30 with both parsers.
+kv-cli can't render Jinja: rendering needs `dbt compile`, the project's packages, often a warehouse connection (`run_query`), and a target. A model has Jinja almost everywhere. In the spike corpus, all 30 models contain `{{ … }}`, and 10 also contain `{% … %}`. Every model fails to parse until its Jinja is dealt with: 30 of 30 with both parsers.
 
 **Options**
 
@@ -146,7 +158,7 @@ Also, `{{ config(…) }}` renders nothing, so it is blanked rather than turned i
 
 A fourth refinement came out of the [recall pass](#recall-pass): **literal pass-through.** A `{{ … }}` that is nothing but one quoted string renders as that string, padded with spaces to the tag's length, so line numbers stay exact. `{{ 'ANALYTICS_PROD.RAW.ORDERS' }}` then reads as the name it writes. Without it, the recall pass's Jinja seed is missed; with it, it's caught.
 
-**A model whose Jinja can't be neutralised** is `skipped` with `analysis: partial` and is never clean. "Can't be neutralised" means one of these:
+**A model whose Jinja can't be neutralised** is `skipped` with reason `sql_not_parsed` (owner decision 6) and `analysis: partial`, and is never clean. "Can't be neutralised" means one of these:
 
 - an unterminated tag;
 - a `{% raw %}` block;
@@ -156,7 +168,9 @@ The spike's three remaining failures show which constructs this catches:
 
 - a macro that renders a column-list fragment: `select * {{ ga4.stage_user_properties(…) }} from`;
 - a macro that renders a whole subquery: `from ({{ preparer_dvf_biens_immobilier(millesime) }})`;
-- one real dialect gap, Databricks' `stream read_files(…, format=>'csv')`.
+- a Jinja expression that renders punctuation: a `{% for %}` loop emits one column per keyword, with the separating comma written as `{{- "," if not loop.last }}`. The placeholder lands where the comma should be.
+
+No real model hit a sqlparser-rs dialect gap: all three failures come from Jinja. A synthetic Databricks model shows one gap: `stream read_files(…, format => 'json')` fails under every dialect. Yet `read_files(…, format => 'json')` and `stream read_files(…)` each parse on their own, according to the spike's probes ([Appendix B](#appendix-b-how-the-spike-ran)).
 
 The fallback in decision 3 still reads such a file for KV003 and reports what it finds, the way a Python partial parse does.
 
@@ -168,14 +182,20 @@ The fallback in decision 3 still reads such a file for KV003 and reports what it
 
 ## 3. Grammar and dialects
 
-**What I measured.** A throwaway spike parsed 30 real dbt models from public projects. Each is pinned to a commit and listed in [Appendix A](#appendix-a-the-30-models). The spike lives on the branch [`spike/sql-parsers`](https://github.com/kovallent/kv-cli/tree/50293e840a6c06975648b0b75c43ca49fbd0aefe), which is never merged, at commit `50293e8`; [Appendix B](#appendix-b-how-the-spike-ran) says how to rerun it.
+**What I measured.** A throwaway spike parsed 30 real dbt models from public projects. Each is pinned to a commit and listed in [Appendix A](#appendix-a-the-30-models). The spike lives on the branch [`spike/sql-parsers`](https://github.com/kovallent/kv-cli/tree/30910996043b01d037e09ef24e6bde3fb9d59268), which is never merged, at commit `3091099`. [Appendix B](#appendix-b-how-the-spike-ran) says how to rerun it. The branch doesn't contain the models: the spike fetches each one from its project at the pinned commit when it runs.
 
 | Dialect | Models | Projects |
 | --- | --- | --- |
 | Snowflake | 8 | `datacoves/balboa` |
 | BigQuery | 8 | `cal-itp/data-infra`, `Velir/dbt-ga4` |
-| Databricks | 7 | `databricks-demos/dbt-databricks-c360`, `pietheinstrengholt/dbt-databricks-adventureworks` |
+| Databricks | 7 | `pietheinstrengholt/dbt-databricks-adventureworks`, `joanasoares0/dbt-databricks-pipeline`, `AndreaBozzo/dlt-dbt-databricks` |
 | Postgres | 7 | `make-open-data/make-open-data` |
+
+The spike also reads two **synthetic** Databricks models, written for it and labelled as such. They use syntax the real models don't:
+- `stream read_files(…)` with named arguments, over a `/Volumes/…` path that varies by target;
+- `from_json`, `explode`, `::` casts, `named_struct` and `QUALIFY`.
+
+They're reported separately and count towards no rate below.
 
 The parsers:
 
@@ -191,34 +211,44 @@ Every model was neutralised with decision 2's refined option (a) first. A model 
 | --- | --- | --- | --- | --- |
 | Snowflake | 8 | 0 (0%) | 0 (0%) | 3 (38%) |
 | BigQuery | 8 | 1 (12%) | 5 (62%) | 4 (50%) |
-| Databricks | 7 | 1 (14%) | 1 (14%) | 1 (14%) |
+| Databricks | 7 | 1 (14%) | 1 (14%) | 2 (29%) |
 | Postgres | 7 | 1 (14%) | 2 (29%) | 4 (57%) |
-| **All** | **30** | **3 (10%)** | **8 (27%)** | **12 (40%)** |
+| **All** | **30** | **3 (10%)** | **8 (27%)** | **13 (43%)** |
 
-**These rates are indicative only.** The Snowflake and Postgres rows each come from one project (`datacoves/balboa` and `make-open-data`), and BigQuery and Databricks from two each. A row partly reflects one team's style, so a different project could move it by several models either way. Exit criterion 5's coverage check, over more projects, is where the numbers get firmer.
+Of the two synthetic Databricks models, the streaming one fails in all three parsers and the other fails only in tree-sitter-sql-bigquery.
+
+**These rates are indicative only.** The Snowflake and Postgres rows each come from one project (`datacoves/balboa` and `make-open-data`), BigQuery from two and Databricks from three. A row partly reflects one team's style, so a different project could move it by several models either way. Exit criterion 5's coverage check, over more projects, is where the numbers get firmer.
 
 **Other measurements**
 
 - **Raw Jinja, unneutralised:** 30 of 30 fail in both sqlparser-rs and tree-sitter-sequel.
 - **Naive option (a):** 6 of 30 fail in sqlparser-rs and 10 of 30 in tree-sitter-sequel. The neutraliser matters as much as the grammar.
-- **`GenericDialect` gave exactly the same results** as each native dialect on the 30 models: 3 of 30, the same files. The recall pass found its limit, though. Snowflake-only statements such as `USE WAREHOUSE` and `COPY INTO` make `GenericDialect` reject the whole file, which then falls back to tokens and is reported `partial`; `SnowflakeDialect` parses the `USE WAREHOUSE`. Hence the retry in the recommendation below.
-- **Causes, sqlparser-rs:** the three failures in decision 2 (two macros rendering SQL fragments, one Databricks named-argument call).
-- **Causes, tree-sitter-sequel:** those three, plus BigQuery's `SELECT * EXCEPT(…)` (2 models), `QUALIFY`, an array literal `[…]`, and `FIRST_VALUE(x IGNORE NULLS) OVER (w)` with a named `WINDOW w AS (…)` clause. It also leaves one zero-width `MISSING` node in a Postgres model that sqlparser-rs parses. Separate probes confirmed that `IGNORE NULLS` and named windows each fail on their own in tree-sitter-sequel and parse in sqlparser-rs.
+- **`GenericDialect` gave exactly the same results** as each native dialect on the 30 models: 3 of 30, the same files. Retrying under each dialect rescues none of the three. The recall pass found `GenericDialect`'s limit, though. Snowflake-only statements such as `USE WAREHOUSE` and `COPY INTO` make `GenericDialect` reject the whole file, which then falls back to tokens and is reported `partial`; `SnowflakeDialect` parses the `USE WAREHOUSE`. Hence the retry in the recommendation below.
+- **Causes, sqlparser-rs:** the three failures in decision 2: two macros rendering SQL fragments, and one loop rendering a comma.
+- **Causes, tree-sitter-sequel:**
+  - the same three;
+  - BigQuery's `SELECT * EXCEPT(…)`, in 2 models;
+  - BigQuery's trailing comma at the end of a select list, when a `WHERE` or `QUALIFY` follows, in 2 models;
+  - `FIRST_VALUE(x IGNORE NULLS) OVER (w)` with a named `WINDOW w AS (…)` clause;
+  - one zero-width `MISSING` node in a Postgres model that sqlparser-rs parses.
+
+  One-line probes confirm each construct apart from the Postgres node: `EXCEPT(…)`, the trailing comma before `WHERE` or `QUALIFY`, `IGNORE NULLS` and named windows each fail on their own in tree-sitter-sequel and parse in sqlparser-rs. `QUALIFY` on its own parses in both.
+- **Correction:** the previous revision listed `QUALIFY` and an array literal among tree-sitter-sequel's causes. The probes show that `QUALIFY` alone parses and the error came from the trailing comma before it. No failing model has an array literal outside Jinja.
 
 **Error tolerance**
 
 This is where tree-sitter earned its place for Python, so it was measured directly:
 
-- **tree-sitter-sequel localises errors.** In the median failing file, 17% of the non-whitespace text sits inside `ERROR` nodes. Table references outside errors versus the `from`/`join` references counted in the source:
+- **tree-sitter-sequel localises errors.** In the median failing file, 17% of the non-whitespace text sits inside `ERROR` nodes. The table below compares two counts. "Found" is the table references tree-sitter-sequel finds outside its error nodes. "Counted from tokens" is the `from`/`join` targets counted from sqlparser-rs's tokens:
 
-  | Dialect | Found | Counted in source |
+  | Dialect | Found | Counted from tokens |
   | --- | --- | --- |
   | Snowflake | 31 | 30 |
-  | Databricks | 19 | 19 |
-  | Postgres | 47 | 45 |
-  | BigQuery | 43 | 77 |
+  | Databricks | 25 | 25 |
+  | Postgres | 47 | 48 |
+  | BigQuery | 43 | 74 |
 
-  The source counts are a regex estimate, which is why "found" can exceed them. On BigQuery, a construct it doesn't know can swallow most of a file: 74% of one model's text ends up inside error nodes after an `EXCEPT(…)`, and 96% of another's after named windows.
+  The token counts are approximate. A comma-joined second table isn't counted, which is why "found" can exceed them. BigQuery has another 4 references inside error nodes. On BigQuery, a construct it doesn't know can swallow most of a file: 74% of one model's text ends up inside error nodes after an `EXCEPT(…)`, and 96% of another's after named windows.
 - **sqlparser-rs is all-or-nothing.** A failing file yields no AST, and 0.64.0 has no recovery API.
 - **sqlparser-rs's tokenizer, on its own, succeeded on all 30 models.** Its tokens carry line and column. The AST carries source spans too: `Spanned` is implemented for `ObjectName` and `TableFactor`.
 
@@ -262,7 +292,7 @@ The reasons:
   - **Exception:** a two-part name whose first part is a CTE or table alias in scope is a correlated reference, not a schema. Examples are BigQuery's `from orders o, o.items` and Snowflake's `lateral flatten(input => o.items)`. Only the AST can tell these apart.
 - **`use_warehouse` and `use_database`:** `USE WAREHOUSE …` and `USE DATABASE …`. **In stage 1.**
 - **`object_store_uri`:** an object-store URI written as a string literal in a `COPY INTO … FROM`/`TO` or a `LOCATION` clause. It's matched by the same `object_store_uri` value pattern that Python and bundle files use (`s3://`, `s3a://`, `gs://`, `gcs://`, `abfs(s)://`, `wasb(s)://`). **In stage 1.**
-  - **A string containing a Jinja placeholder is templated and skipped.** `'s3://{{ var("bucket") }}/x'` neutralises to `'s3://kv______________/x'`, which would otherwise match. The same goes for `'/Volumes/{{ target.database }}/…'`, which appears in the corpus.
+  - **A string containing a Jinja placeholder is templated and skipped.** `'s3://{{ var("bucket") }}/x'` neutralises to `'s3://kv______________/x'`, which would otherwise match. The same goes for `'/Volumes/{{ target.catalog }}/…'`, as in the synthetic streaming model.
 
 **Legitimately literal**
 
@@ -278,11 +308,11 @@ The allow list is `sql.allow_names`, wildcard patterns over the dotted name with
 - **Line:** the relation's own line, from its span.
 - **Message:** names the relation and suggests `{{ ref() }}` or `{{ source() }}`.
 
-**Evidence on precision.** In the 30 real models there are 174 `from`/`join` targets:
-- 62 are `ref()`/`source()` placeholders;
-- 105 are CTE names or aliases;
-- 6 are table functions or subqueries;
-- **none** is a literal two- or three-part name.
+**Evidence on precision.** Counting from sqlparser-rs's tokens, the 30 real models have 177 `from`/`join` targets:
+- 64 are `ref()`/`source()` placeholders;
+- 108 are CTE names;
+- 5 are table functions (2) or subqueries (3);
+- **none** is a literal name: no one-part name outside a CTE, and no two- or three-part name.
 
 Well-kept dbt projects already avoid the pattern, so these rules should be quiet on disciplined code. Their value is in projects that bypass `ref()`/`source()`, which is the graphic's case.
 
@@ -302,7 +332,7 @@ The rules then ran as proposed: sqlparser-rs's AST under `GenericDialect` when t
 | three-part relation | BigQuery `stg_littlepay__micropayments` | yes | yes | AST |
 | three-part relation | BigQuery `stg_ga4__events` | no | yes | tokens |
 | `LOCATION 's3://…'` | BigQuery `stg_ga4__user_properties` | yes | yes | tokens |
-| `COPY INTO 's3://…'` | Databricks `dbt_c360_bronze_events` | no | yes | tokens |
+| `COPY INTO 's3://…'` | Databricks `stg_job_postings` | no | yes | tokens |
 | `LOCATION 's3://…'` | Databricks `dim_customers` | yes | yes | tokens |
 | `USE WAREHOUSE` | Postgres `ventes_immobilieres` | no | yes | tokens |
 | `COPY INTO 's3://…'` | Postgres `infos_communes` | no | yes | tokens |
@@ -313,7 +343,9 @@ The rules then ran as proposed: sqlparser-rs's AST under `GenericDialect` when t
   - **Subject format.** Its subjects carried the rule as a prefix (`warehouse analytics_prod_wh`), which the decided subjects drop.
 - **Six seeded files fell back to tokens.** Three already failed to parse unseeded. In the other three, the seed itself isn't generic SQL: `USE WAREHOUSE` once and `COPY INTO` twice. Rerun with each project's native dialect, `SnowflakeDialect` parses the `USE WAREHOUSE` and catches it from the AST. The seeded `COPY INTO` parses under no dialect and is still caught through tokens.
 - **Inside Jinja: not caught as proposed.** A copy of `infos_iris` has a `ref()` replaced by `{{ 'ANALYTICS_PROD.RAW.ORDERS' }}`, and the neutraliser turns it into a placeholder like any other `{{ … }}`. With literal pass-through (decision 2) it is caught, from the AST, so I recommend that refinement for stage 1.
-- **No false positives:** the same rules over the 30 unseeded models report nothing. Three of those models use the token fallback.
+- **No false positives:**
+  - The same rules over the 30 unseeded real models report nothing. Three of those models use the token fallback.
+  - Nor do they report anything on the two synthetic models. One of those uses the fallback, and its `/Volumes/{{ … }}` path is skipped as templated.
 - **Caveat:** the seeds are synthetic and sit where the rules look. The pass shows the rules and the fallback work end to end. It doesn't measure recall on real-world code.
 
 **Later stage, not stage one:** `USE SCHEMA` and `USE ROLE`; JDBC URLs; object-store paths outside `COPY INTO` and `LOCATION`, such as `read_parquet('gs://…')` and `read_files('s3://…')`. Also apply the same rules to string literals inside Jinja, mainly `pre_hook`/`post_hook` in `config()` and the hooks in `dbt_project.yml`. Also apply `infrastructure.key_patterns` to `config()` keyword arguments, so `snowflake_warehouse='PROD_WH'` is caught. That last one needs care, because `schema='staging'` in `config()` is a custom-schema *suffix* by design, not a pin.
@@ -401,7 +433,10 @@ sql:
 2. **A pure-SQL dbt project produces findings instead of an empty pass.** That's `samples/dbt_sql/`: a `dbt_project.yml`, models with `ref()`, `source()`, a CTE, an alias, an `information_schema` query, two literal three-part names in one model, a literal schema, `USE WAREHOUSE` and `USE DATABASE` statements, and `s3://` paths in a `COPY INTO` and a `LOCATION`. It reports exactly the pinned ones, and the others stay clean. Each finding's fingerprint is pinned by a golden test, using the formula in the owner decisions. The two three-part names are two findings with distinct fingerprints. The literal schema is reported only with `sql.two_part_names: true`. Without `--strict` it exits `0` with warnings; with `--strict` it exits `1`.
 3. **A model whose Jinja can't be neutralised is `skipped` with `analysis: partial`,** never clean, with fixtures for an unterminated tag and a fragment-rendering macro.
 4. **No existing fingerprint moves:** neither the findings on `samples/` nor the default contract's.
-5. **A parse-coverage check in CI** over a committed sample of real models. Licences permitting, that's a handful of the Appendix A models plus synthetic ones per dialect, with sqlparser-rs's full-parse rate reported per dialect, so a dependency upgrade that regresses coverage is visible.
+5. **A parse-coverage check in CI** over the permissive-plus-synthetic corpus (owner decision 7). sqlparser-rs's full-parse rate is reported per dialect, so a dependency upgrade that regresses coverage is visible.
+   - **Permissive models** come from projects with an MIT, Apache-2.0 or BSD licence at the root, are pinned to a commit, and are committed with their licence and attribution beside them.
+   - **Synthetic models** are labelled synthetic in the file.
+   - **No other third-party model is committed.**
 6. **The recall pass becomes a test:** a seeded fixture per rule, including `{{ 'ANALYTICS_PROD.RAW.ORDERS' }}`, which literal pass-through catches.
 
 ## Effort
@@ -422,24 +457,40 @@ sql:
 - on by default, at `infrastructure.severity`, with `sql.enabled: false` as the opt-out, skipped from serialization at its default;
 - `sqlparser-rs`, pinned to `0.64`;
 - stage 1 ships the three-part relation rule, `USE WAREHOUSE`/`USE DATABASE`, and object-store paths in `COPY INTO` and `LOCATION`. The two-part rule sits behind `sql.two_part_names`, default off;
-- the pinned thing is the subject for every stage-1 rule (the normalised relation, warehouse or database name, or the URI), so there is one finding per pinned thing.
+- the pinned thing is the subject for every stage-1 rule (the normalised relation, warehouse or database name, or the URI), so there is one finding per pinned thing;
+- a model that can't be fully parsed is skipped with the new reason `sql_not_parsed`, handled like `syntax_error` (owner decision 6);
+- the CI parse-coverage corpus is permissive plus synthetic: models from MIT, Apache-2.0 or BSD projects, pinned and committed with their licence and attribution, plus labelled synthetic models (owner decision 7).
 
 **Accepted by approving this document.** These are the remaining recommendations; the owner can override any of them at approval:
 1. **Literal pass-through and the dialect retry ship in stage 1,** as the recall pass suggests (decisions 2 and 3).
 2. **Stage-one paths are `model-paths` and `snapshot-paths`.** Analyses and singular tests are later opt-ins (decision 1).
 3. **KV001 doesn't apply to SQL.** SQL files add nothing to the scope block's function counts, they're listed with `analysis: sql`, and a pure-SQL project's 0 of 0 reads as "no KV001 evidence" (decision 5).
-4. **A model that can't be fully parsed gets a new skip reason, `sql_not_parsed`** (additive; `schema_version` stays 1), with a detail naming the cause. It's handled like `syntax_error`: a warning, which gates under `--strict`. Most such failures are kv-cli's own limits, such as a macro that renders a SQL fragment or a dialect gap, not the author's syntax, so `syntax_error` would point the author at a fault they don't have.
-5. **The default `sql.allow_names`** are the entries in decision 7, plus `bigquery-public-data.*`, whose public datasets are the same in every environment.
-6. **The CI corpus** (exit criterion 5) commits only models whose licence allows it, plus synthetic models per dialect. Of the spike's six projects, that's only `Velir/dbt-ga4`, which is MIT like kv-cli, with attribution. The others can't be committed:
-   - `cal-itp/data-infra` is AGPL-3.0;
-   - `datacoves/balboa`, `make-open-data` and `dbt-databricks-adventureworks` have no licence file at their root;
-   - `dbt-databricks-c360` is under a proprietary Databricks licence.
-
-**Note for the owner on `dbt-databricks-c360`:** its licence says that without an agreement with Databricks you "may not use the Software or view, copy or compile the Source Code". The spike's `fetch.sh` downloads four of its models, and Appendix A links to them. If Kovallent has no such agreement, those four should be replaced with models from a permissively licensed Databricks project and the spike rerun; until then, its Databricks row rests on them.
+4. **The default `sql.allow_names`** are the entries in decision 7, plus `bigquery-public-data.*`, whose public datasets are the same in every environment.
 
 ## Appendix A: the 30 models
 
-Each model is pinned to the commit the spike read. The Snowflake and Postgres rows come from one project each, so the per-dialect rates are indicative only.
+**Third-party models are fetched at test time, not redistributed.** The spike's `fetch.sh` downloads each model from its project at the pinned commit below whenever the spike runs. Neither this repository nor the `spike/sql-parsers` branch contains a third-party model. The branch commits these, and nothing more:
+- the list of paths, pins and licences;
+- the harness;
+- its results, which hold flags, counts and positions but no text from a model;
+- the synthetic models and one-line probes written for the spike.
+
+**Licences and pins.** Each licence is as found at the project's repository root at the pinned commit:
+
+| Project | Licence | Pinned commit | Models |
+| --- | --- | --- | --- |
+| `datacoves/balboa` | none at the root | [`2265a0740a04a499e52d676c383a6280968c19c6`](https://github.com/datacoves/balboa/tree/2265a0740a04a499e52d676c383a6280968c19c6) | 8 Snowflake |
+| `cal-itp/data-infra` | [AGPL-3.0](https://github.com/cal-itp/data-infra/blob/ea483eb034fc6fb58ee08a3f9363ee61c9913c02/LICENSE) | [`ea483eb034fc6fb58ee08a3f9363ee61c9913c02`](https://github.com/cal-itp/data-infra/tree/ea483eb034fc6fb58ee08a3f9363ee61c9913c02) | 4 BigQuery |
+| `Velir/dbt-ga4` | [MIT](https://github.com/Velir/dbt-ga4/blob/664be28505018ba6e5409a91e0aa1fce11d321dc/LICENSE) | [`664be28505018ba6e5409a91e0aa1fce11d321dc`](https://github.com/Velir/dbt-ga4/tree/664be28505018ba6e5409a91e0aa1fce11d321dc) | 4 BigQuery |
+| `pietheinstrengholt/dbt-databricks-adventureworks` | none at the root | [`3683050133966437dcf9f96732e4e117b686a7a6`](https://github.com/pietheinstrengholt/dbt-databricks-adventureworks/tree/3683050133966437dcf9f96732e4e117b686a7a6) | 3 Databricks |
+| `joanasoares0/dbt-databricks-pipeline` | [MIT](https://github.com/joanasoares0/dbt-databricks-pipeline/blob/45d0239e6a86574dd790e6c0d80b04e806171b7a/LICENSE) | [`45d0239e6a86574dd790e6c0d80b04e806171b7a`](https://github.com/joanasoares0/dbt-databricks-pipeline/tree/45d0239e6a86574dd790e6c0d80b04e806171b7a) | 2 Databricks |
+| `AndreaBozzo/dlt-dbt-databricks` | [Apache-2.0](https://github.com/AndreaBozzo/dlt-dbt-databricks/blob/52a7ee89be4ff693fe5469c35af96ffa47f0ee4b/LICENSE) | [`52a7ee89be4ff693fe5469c35af96ffa47f0ee4b`](https://github.com/AndreaBozzo/dlt-dbt-databricks/tree/52a7ee89be4ff693fe5469c35af96ffa47f0ee4b) | 2 Databricks |
+| `make-open-data/make-open-data` | none at the root | [`177caad0d3d21be49a287b787cb36803bfc4f203`](https://github.com/make-open-data/make-open-data/tree/177caad0d3d21be49a287b787cb36803bfc4f203) | 7 Postgres |
+| Synthetic, on `spike/sql-parsers` | written for the spike | `3091099` | 2 Databricks, in no rate |
+
+**The four Databricks models from MIT and Apache-2.0 projects replace four from `databricks-demos/dbt-databricks-c360`.** That project's licence forbids viewing or copying its source without an agreement with Databricks, and Kovallent has none. The spike branch was rewritten without them. It never held their source, only their paths and parser output derived from them.
+
+Each model below is pinned to the commit in the table above. The Snowflake and Postgres rows come from one project each, so the per-dialect rates are indicative only.
 
 | Dialect | Project | Model | Lines |
 | --- | --- | --- | --- |
@@ -459,10 +510,10 @@ Each model is pinned to the commit the spike read. The Snowflake and Postgres ro
 | BigQuery | `Velir/dbt-ga4` | [`models/staging/stg_ga4__user_properties.sql`](https://github.com/Velir/dbt-ga4/blob/664be28505018ba6e5409a91e0aa1fce11d321dc/models/staging/stg_ga4__user_properties.sql) | 70 |
 | BigQuery | `Velir/dbt-ga4` | [`models/staging/base/base_ga4__events.sql`](https://github.com/Velir/dbt-ga4/blob/664be28505018ba6e5409a91e0aa1fce11d321dc/models/staging/base/base_ga4__events.sql) | 36 |
 | BigQuery | `Velir/dbt-ga4` | [`models/marts/core/dim_ga4__sessions_daily.sql`](https://github.com/Velir/dbt-ga4/blob/664be28505018ba6e5409a91e0aa1fce11d321dc/models/marts/core/dim_ga4__sessions_daily.sql) | 175 |
-| Databricks | `databricks-demos/dbt-databricks-c360` | [`models/dbt_c360_bronze_events.sql`](https://github.com/databricks-demos/dbt-databricks-c360/blob/5ea27bd820c0ed2045fcf576e3131e39f0f520c8/models/dbt_c360_bronze_events.sql) | 8 |
-| Databricks | `databricks-demos/dbt-databricks-c360` | [`models/dbt_c360_silver_events.sql`](https://github.com/databricks-demos/dbt-databricks-c360/blob/5ea27bd820c0ed2045fcf576e3131e39f0f520c8/models/dbt_c360_silver_events.sql) | 13 |
-| Databricks | `databricks-demos/dbt-databricks-c360` | [`models/dbt_c360_silver_users.sql`](https://github.com/databricks-demos/dbt-databricks-c360/blob/5ea27bd820c0ed2045fcf576e3131e39f0f520c8/models/dbt_c360_silver_users.sql) | 19 |
-| Databricks | `databricks-demos/dbt-databricks-c360` | [`models/dbt_c360_gold_churn_features.sql`](https://github.com/databricks-demos/dbt-databricks-c360/blob/5ea27bd820c0ed2045fcf576e3131e39f0f520c8/models/dbt_c360_gold_churn_features.sql) | 35 |
+| Databricks | `joanasoares0/dbt-databricks-pipeline` | [`analytics/models/1_staging/stg_job_postings.sql`](https://github.com/joanasoares0/dbt-databricks-pipeline/blob/45d0239e6a86574dd790e6c0d80b04e806171b7a/analytics/models/1_staging/stg_job_postings.sql) | 101 |
+| Databricks | `joanasoares0/dbt-databricks-pipeline` | [`analytics/models/3_marts/fct_job_postings.sql`](https://github.com/joanasoares0/dbt-databricks-pipeline/blob/45d0239e6a86574dd790e6c0d80b04e806171b7a/analytics/models/3_marts/fct_job_postings.sql) | 45 |
+| Databricks | `AndreaBozzo/dlt-dbt-databricks` | [`transformation/dbt_databricks/models/staging/stg_claims.sql`](https://github.com/AndreaBozzo/dlt-dbt-databricks/blob/52a7ee89be4ff693fe5469c35af96ffa47f0ee4b/transformation/dbt_databricks/models/staging/stg_claims.sql) | 36 |
+| Databricks | `AndreaBozzo/dlt-dbt-databricks` | [`transformation/dbt_databricks/models/marts/mart_post_engagement.sql`](https://github.com/AndreaBozzo/dlt-dbt-databricks/blob/52a7ee89be4ff693fe5469c35af96ffa47f0ee4b/transformation/dbt_databricks/models/marts/mart_post_engagement.sql) | 35 |
 | Databricks | `pietheinstrengholt/dbt-databricks-adventureworks` | [`models/saleslt/marts/dim_customers.sql`](https://github.com/pietheinstrengholt/dbt-databricks-adventureworks/blob/3683050133966437dcf9f96732e4e117b686a7a6/models/saleslt/marts/dim_customers.sql) | 55 |
 | Databricks | `pietheinstrengholt/dbt-databricks-adventureworks` | [`models/saleslt/staging/stg_customer.sql`](https://github.com/pietheinstrengholt/dbt-databricks-adventureworks/blob/3683050133966437dcf9f96732e4e117b686a7a6/models/saleslt/staging/stg_customer.sql) | 21 |
 | Databricks | `pietheinstrengholt/dbt-databricks-adventureworks` | [`models/saleslt/staging/stg_address.sql`](https://github.com/pietheinstrengholt/dbt-databricks-adventureworks/blob/3683050133966437dcf9f96732e4e117b686a7a6/models/saleslt/staging/stg_address.sql) | 15 |
@@ -474,27 +525,42 @@ Each model is pinned to the commit the spike read. The Snowflake and Postgres ro
 | Postgres | `make-open-data/make-open-data` | [`1_data/intermediaires/foncier/ventes_immobilieres.sql`](https://github.com/make-open-data/make-open-data/blob/177caad0d3d21be49a287b787cb36803bfc4f203/1_data/intermediaires/foncier/ventes_immobilieres.sql) | 34 |
 | Postgres | `make-open-data/make-open-data` | [`1_data/prepare/datatourisme/place.sql`](https://github.com/make-open-data/make-open-data/blob/177caad0d3d21be49a287b787cb36803bfc4f203/1_data/prepare/datatourisme/place.sql) | 34 |
 
+**Synthetic models**, on the spike branch and labelled synthetic in each file:
+
+| Dialect | Model | Lines | Exercises |
+| --- | --- | --- | --- |
+| Databricks | [`synthetic/databricks/synthetic_streaming_events.sql`](https://github.com/kovallent/kv-cli/blob/30910996043b01d037e09ef24e6bde3fb9d59268/synthetic/databricks/synthetic_streaming_events.sql) | 15 | a streaming table over `stream read_files(…)` with named arguments, from a templated `/Volumes/…` path |
+| Databricks | [`synthetic/databricks/synthetic_user_features.sql`](https://github.com/kovallent/kv-cli/blob/30910996043b01d037e09ef24e6bde3fb9d59268/synthetic/databricks/synthetic_user_features.sql) | 30 | `from_json`, `explode`, `::` casts, `date_sub`, `datediff`, `named_struct`, `collect_list`, `QUALIFY` |
+
 ## Appendix B: how the spike ran
 
-The spike is on the branch [`spike/sql-parsers`](https://github.com/kovallent/kv-cli/tree/50293e840a6c06975648b0b75c43ca49fbd0aefe) at commit `50293e840a6c06975648b0b75c43ca49fbd0aefe`. It's an orphan branch, sharing no history with `main` and carrying no workflows, and it is never merged. To rerun it from a clone of that commit:
+The spike is on the branch [`spike/sql-parsers`](https://github.com/kovallent/kv-cli/tree/30910996043b01d037e09ef24e6bde3fb9d59268) at commit `30910996043b01d037e09ef24e6bde3fb9d59268`. It's an orphan branch, sharing no history with `main` and carrying no workflows, and it is never merged. It was rewritten for the licence revision: its earlier history listed the dropped `dbt-databricks-c360` models, so that history was replaced, not extended. To rerun it from a clone of that commit:
 
 ```bash
 ./fetch.sh
 ```
 
 ```bash
-cargo run --release -- parse corpus > results/parse.json
+cargo run --release -- parse corpus synthetic > results/parse.json
 ```
 
 ```bash
-cargo run --release -- recall corpus recall/seeds.json > results/recall.json
+cargo run --release -- recall corpus recall/seeds.json synthetic > results/recall.json
+```
+
+```bash
+cargo run --release -- probe < probes.sql > results/probes.txt
 ```
 
 ```bash
 python3 summarise.py results/parse.json results/recall.json
 ```
 
-`fetch.sh` downloads each model from its project at the commit in `corpus/manifest.json`, and `tree-sitter-sql-bigquery` 0.8.0 from crates.io, checked against its published checksum. Neither is committed: the models are other projects' code, and that grammar's generated `parser.c` is 32 MB. A clean clone of the commit, fetched and rerun, reproduced both committed result files byte for byte.
+**What's committed and what's fetched**
+- **Fetched at run time:** `fetch.sh` downloads each real model from its project at the commit in `corpus/manifest.json`, which also records each project's licence. It also downloads `tree-sitter-sql-bigquery` 0.8.0 from crates.io, checked against its published checksum.
+- **Never committed:** the downloaded models are other projects' code, and the BigQuery grammar's generated `parser.c` is 32 MB.
+- **Committed SQL:** only the two synthetic models in `synthetic/` and the one-line statements in `probes.sql`, all written for the spike.
+- **Reproducible:** a clean clone of the commit, fetched and rerun, reproduced all three committed result files byte for byte.
 
 **`parse`** has four steps:
 
@@ -504,20 +570,25 @@ python3 summarise.py results/parse.json results/recall.json
 
    Both versions keep the byte length and the line count; the harness asserts this for every model.
 2. **Parse** each version:
-   - with `sqlparser::Parser::parse_sql`, under the project's dialect and under `GenericDialect`;
+   - with `sqlparser::Parser::parse_sql`: under the project's dialect, under `GenericDialect`, and under `GenericDialect` retried with each dialect;
    - with `tree-sitter-sequel` and the `tree-sitter-sql-bigquery` grammar, both on the `tree-sitter` 0.26.12 runtime;
    - with sqlparser-rs's tokenizer alone.
 3. **Record** per model:
-   - whether the parse succeeded, and sqlparser-rs's error;
+   - whether each parse succeeded;
+   - sqlparser-rs's error, reduced to its position, the parser's own expectation and the class of the token it found (word, punctuation, Jinja placeholder), so the results carry no text from the model;
    - for tree-sitter: whether the tree has an `ERROR` or `MISSING` node, the share of non-whitespace text inside `ERROR` nodes, and the `relation` nodes inside and outside errors.
-4. **Estimate** the table references in each model with a regex over `from`/`join` targets. It's approximate: `extract(… from col)` counts, and comma-joined tables don't. This step ran in the first version of the spike; the committed harness records the tree-sitter `relation` counts it was compared against.
+4. **Count** the `from`/`join` targets from sqlparser-rs's tokens, by kind: placeholder, CTE, one-, two- or three-part name, table function, subquery. Comments and strings are ignored. `extract(… from x)`, `trim(… from x)`, `substring(… from …)` and `is distinct from` are skipped. A comma-joined second table isn't counted.
+
+Real and synthetic models are recorded alike, with a `synthetic` flag; `summarise.py` computes every rate over the real models only.
 
 **`recall`** applies each seed in `recall/seeds.json` to a copy of its model, and runs the proposed rules three ways:
 - as proposed (`GenericDialect`);
 - with literal pass-through;
 - under the project's native dialect.
 
-It reports whether each seed was caught, and how. It then runs the rules over the 30 unseeded models and lists every hit, each of which would be a false positive.
+It reports whether each seed was caught, and how. It then runs the rules over the 30 unseeded real models and the 2 synthetic ones and lists every hit, each of which would be a false positive. A hit is reported without its subject unless the seed wrote it.
+
+**`probe`** parses each line of `probes.sql` as one statement under every sqlparser-rs dialect and with tree-sitter-sequel. Decision 3's construct-level claims come from it, as does decision 2's on `stream read_files(…)`.
 
 The binary sizes come from three minimal programs built with kv-cli's `[profile.release]`:
 - tree-sitter with the Python grammar;
