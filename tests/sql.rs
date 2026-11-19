@@ -906,3 +906,181 @@ fn fix_lists_sql_findings_as_manual_items() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Compares `actual` with the golden file at `tests/fixtures/<name>`;
+/// `KV_GOLDEN_BLESS=1` rewrites it after an intended change.
+fn golden(name: &str, actual: &str) {
+    let path = repo().join("tests/fixtures").join(name);
+    if std::env::var_os("KV_GOLDEN_BLESS").is_some() {
+        std::fs::write(&path, actual).unwrap();
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("no golden {name}"));
+    assert_eq!(
+        actual, expected,
+        "{name}: rerun with KV_GOLDEN_BLESS=1 if intended"
+    );
+}
+
+/// `kv-cli <args>` from the repository root, without colour.
+fn repo_run(args: &[&str]) -> (Option<i32>, String) {
+    run(repo(), args)
+}
+
+/// The finding fingerprint formula from the owner decisions, computed here
+/// rather than taken from the binary.
+fn formula(path: &str, symbol: &str, subject: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{path}\0KV003\0{symbol}\0{subject}").as_bytes());
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()[..16]
+        .to_string()
+}
+
+/// Exit criterion 2: `samples/dbt_sql/` produces findings instead of an
+/// empty pass, exactly the pinned things, with every other model clean. Its
+/// text, JSON and SARIF are golden; it exits 0 with warnings, and 1 under
+/// `--strict`.
+#[test]
+fn the_sql_sample_is_golden() {
+    let (code, text) = repo_run(&["audit", "samples/dbt_sql/", "--show-clean"]);
+    assert_eq!(code, Some(0));
+    golden("dbt_sql.txt", &text);
+    let (strict, _) = repo_run(&["audit", "samples/dbt_sql/", "--strict"]);
+    assert_eq!(strict, Some(1));
+
+    let (_, payload) = audit_json(&["samples/dbt_sql/"]);
+    let run = &payload["run"];
+    let pinned = serde_json::json!({
+        "contract_sha256": run["contract_sha256"],
+        "files_scanned": run["files_scanned"],
+        "errors": run["errors"],
+        "warnings": run["warnings"],
+        "skipped": run["skipped"],
+        "files": run["files"],
+        "findings": payload["findings"],
+    });
+    golden(
+        "dbt_sql.json",
+        &(serde_json::to_string_pretty(&pinned).unwrap() + "\n"),
+    );
+
+    // Every fingerprint follows the owner decisions' formula; the two
+    // three-part names in one model are distinct, and are the spec's own.
+    let mut seen = BTreeSet::new();
+    for f in payload["findings"].as_array().unwrap() {
+        let fp = f["fingerprint"].as_str().unwrap();
+        assert_eq!(
+            fp,
+            formula(
+                f["path"].as_str().unwrap(),
+                f["symbol"].as_str().unwrap(),
+                f["subject"].as_str().unwrap()
+            )
+        );
+        assert!(seen.insert(fp.to_string()), "{fp} twice");
+    }
+    for fp in ["803e1305b4fe391a", "424c475cee1fe19b"] {
+        assert!(seen.contains(fp), "{fp}");
+    }
+    let detectors: BTreeSet<&str> = payload["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["detector"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        detectors,
+        [
+            "object_store_uri",
+            "three_part_name",
+            "use_database",
+            "use_warehouse"
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    // SARIF: the same findings, valid against the vendored 2.1.0 schema, and
+    // byte for byte apart from the tool version.
+    let (_, sarif) = repo_run(&["audit", "samples/dbt_sql/", "--format", "sarif"]);
+    let log: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/sarif-schema-2.1.0.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let errors: Vec<String> = validator.iter_errors(&log).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    let results = log["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 6);
+    let roadmap = results
+        .iter()
+        .find(|r| r["partialFingerprints"]["kovallent/v1"] == "803e1305b4fe391a")
+        .expect("the roadmap example's SARIF result");
+    assert_eq!(roadmap["ruleId"], "KV003");
+    assert_eq!(roadmap["level"], "warning");
+    assert_eq!(
+        roadmap["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "models/orders.sql"
+    );
+    assert_eq!(
+        roadmap["locations"][0]["physicalLocation"]["region"]["startLine"],
+        7
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    let normalized = sarif
+        .replace(
+            &format!("\"version\": \"{version}\""),
+            "\"version\": \"VERSION\"",
+        )
+        .replace(&format!("/blob/v{version}/"), "/blob/vVERSION/");
+    golden("dbt_sql.sarif", &normalized);
+}
+
+/// The literal schema in `samples/dbt_sql/` is reported only with
+/// `sql.two_part_names: true`.
+#[test]
+fn the_sql_samples_literal_schema_needs_the_opt_in() {
+    let sample = repo().join("samples/dbt_sql");
+    let mut files: Vec<(String, String)> = files_under(&sample)
+        .into_iter()
+        .map(|p| {
+            (
+                p.strip_prefix(&sample)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(&p).unwrap(),
+            )
+        })
+        .collect();
+    files.push((
+        ".kovallent.yaml".into(),
+        "version: 1\nsql:\n  two_part_names: true\n".into(),
+    ));
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let dir = project("sample-two-part", &refs);
+    let (_, payload) = audit_dir_json(&dir, &[]);
+    let two_part: Vec<_> = sql_findings(&payload)
+        .into_iter()
+        .filter(|(d, ..)| d == "two_part_name")
+        .collect();
+    assert_eq!(
+        two_part,
+        [(
+            "two_part_name".to_string(),
+            "raw.customers".to_string(),
+            6,
+            formula(
+                "models/marts/customer_regions.sql",
+                "customer_regions",
+                "raw.customers"
+            )
+        )]
+    );
+    assert_eq!(payload["findings"].as_array().unwrap().len(), 7);
+    let _ = std::fs::remove_dir_all(&dir);
+}
