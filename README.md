@@ -12,8 +12,9 @@ so its numbers can be rerun. It's an orphan branch: it shares no history with
   gives the project, the pinned commit, the path and the project's licence as
   found at its repository root. `fetch.sh` downloads each model at that commit
   into `corpus/<dialect>/`, which `.gitignore` keeps out of Git.
-- **The synthetic models in `synthetic/` were written for this spike** and are
-  labelled as such in each file. They're the only SQL committed here.
+- **The synthetic models in `synthetic/` and the one-line statements in
+  `probes.sql` were written for this spike.** Each synthetic model is labelled
+  as such. They're the only SQL committed here.
 - **The committed results hold no text from a real model.** `results/` keeps
   pass/fail flags, counts and positions. A parser error is reduced to the
   parser's own expectation, the class of the token it found and the position.
@@ -41,8 +42,10 @@ so its numbers can be rerun. It's an orphan branch: it shares no history with
   then run on each copy: sqlparser-rs's AST when the model parses, its
   tokenizer when it doesn't. The same rules also run over the unseeded real
   and synthetic models, where any hit would be a false positive.
-- **`probe`:** parses each line of stdin as one statement under every dialect,
-  to isolate a single construct.
+- **`probe`:** parses each line of stdin as one statement under every
+  sqlparser-rs dialect and with tree-sitter-sequel, to isolate a single
+  construct. `probes.sql` holds the statements the design document cites, all
+  written for this spike; `results/probes.txt` is their output.
 
 Rates are reported over the real models only; synthetic models are listed
 separately.
@@ -59,6 +62,10 @@ cargo run --release -- parse corpus synthetic > results/parse.json
 
 ```bash
 cargo run --release -- recall corpus recall/seeds.json synthetic > results/recall.json
+```
+
+```bash
+cargo run --release -- probe < probes.sql > results/probes.txt
 ```
 
 ```bash

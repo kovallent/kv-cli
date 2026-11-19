@@ -1,0 +1,14 @@
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select a from t qualify row_number() over (partition by a order by b desc) = 1
+generic,snowflake,bigquery                 ts-sequel ok     select a, b, from t
+generic,snowflake,bigquery                 ts-sequel fails  select a, b, from t where x = 1
+generic,snowflake,bigquery                 ts-sequel fails  select a, b, from t qualify row_number() over (partition by a order by b desc) = 1
+generic,bigquery,databricks                ts-sequel fails  select * except(a) from t
+generic,snowflake,bigquery                 ts-sequel fails  select first_value(x ignore nulls) over (partition by a) from t
+generic,bigquery,databricks,postgres       ts-sequel fails  select first_value(x) over (w) from t window w as (partition by a order by b)
+generic,bigquery                           ts-sequel fails  select first_value(x ignore nulls) over (w) from t window w as (partition by a order by b)
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select * from read_files('/Volumes/c/s/v', format => 'json')
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select * from stream read_files('/Volumes/c/s/v')
+fails in every dialect                     ts-sequel fails  select * from stream read_files('/Volumes/c/s/v', format => 'json')
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select from_json(payload, 'struct<a:int>') as p from t
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select explode(items) as item from t
+generic,snowflake,bigquery,databricks,postgres ts-sequel ok     select x::timestamp, named_struct('a', 1), _metadata.file_path from t

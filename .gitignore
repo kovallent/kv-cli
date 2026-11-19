@@ -1,4 +1,5 @@
-target/
-grammar-bq/
+target
+grammar-bq
 # Real models are fetched by fetch.sh at their pinned commits, never committed.
-corpus/*/
+corpus/*
+!corpus/manifest.json

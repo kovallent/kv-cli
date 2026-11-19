@@ -6,6 +6,7 @@
 //!   ./fetch.sh                                     # corpus + BigQuery grammar
 //!   cargo run --release -- parse corpus synthetic  > results/parse.json
 //!   cargo run --release -- recall corpus recall/seeds.json synthetic > results/recall.json
+//!   cargo run --release -- probe < probes.sql > results/probes.txt
 //!   python3 summarise.py results/parse.json results/recall.json
 //!
 //! The corpus is other projects' code, fetched at test time and never
@@ -775,10 +776,11 @@ fn cmd_recall(corpus: &str, seeds: &str, synthetic_root: Option<&str>) {
     );
 }
 
-/// `probe`: parse each `;`-free line of stdin as one statement under every
-/// dialect, for checking a single construct.
+/// `probe`: parse each line of stdin as one statement under every sqlparser-rs
+/// dialect and with tree-sitter-sequel, for checking a single construct.
 fn cmd_probe() {
     use std::io::BufRead;
+    let sequel: Language = tree_sitter_sequel::LANGUAGE.into();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         if line.trim().is_empty() {
@@ -793,7 +795,9 @@ fn cmd_probe() {
                 ok.push(name);
             }
         }
-        println!("{:<40} {}", if ok.is_empty() { "fails in every dialect".to_string() } else { ok.join(",") }, line);
+        let sp = if ok.is_empty() { "fails in every dialect".to_string() } else { ok.join(",") };
+        let ts = if ts_stats(&sequel, &line).clean { "ts-sequel ok" } else { "ts-sequel fails" };
+        println!("{sp:<42} {ts:<16} {line}");
     }
 }
 
