@@ -1,0 +1,46 @@
+[
+ {
+  "file": "snowflake/balboa__stg_personal_loans.sql",
+  "seed": "three_part"
+ },
+ {
+  "file": "snowflake/balboa__credits_variance.sql",
+  "seed": "use_warehouse"
+ },
+ {
+  "file": "snowflake/balboa__stg_query_history.sql",
+  "seed": "copy_into"
+ },
+ {
+  "file": "bigquery/data-infra__stg_littlepay__micropayments.sql",
+  "seed": "three_part"
+ },
+ {
+  "file": "bigquery/dbt-ga4__stg_ga4__events.sql",
+  "seed": "three_part"
+ },
+ {
+  "file": "bigquery/dbt-ga4__stg_ga4__user_properties.sql",
+  "seed": "location"
+ },
+ {
+  "file": "databricks/dbt-databricks-pipeline__stg_job_postings.sql",
+  "seed": "copy_into"
+ },
+ {
+  "file": "databricks/dbt-databricks-adventureworks__dim_customers.sql",
+  "seed": "location"
+ },
+ {
+  "file": "postgres/make-open-data__ventes_immobilieres.sql",
+  "seed": "use_warehouse"
+ },
+ {
+  "file": "postgres/make-open-data__infos_communes.sql",
+  "seed": "copy_into"
+ },
+ {
+  "file": "postgres/make-open-data__infos_iris.sql",
+  "seed": "jinja_three_part"
+ }
+]

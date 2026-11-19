@@ -1,0 +1,17 @@
+[package]
+name = "sql-parsers-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike for kv-cli's docs/design/sql-models.md. Never merged."
+
+[dependencies]
+regex = "1"
+serde_json = "1"
+sqlparser = { version = "=0.64.0", features = ["visitor"] }
+tree-sitter = "=0.26.12"
+tree-sitter-language = "=0.1.9"
+tree-sitter-sequel = "=0.3.13"
+
+[build-dependencies]
+cc = "1"

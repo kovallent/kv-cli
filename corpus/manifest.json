@@ -1,0 +1,242 @@
+[
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L1_inlets/account_usage/stg_query_history.sql",
+  "file": "snowflake/balboa__stg_query_history.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L1_inlets/loans/stg_personal_loans.sql",
+  "file": "snowflake/balboa__stg_personal_loans.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L2_bays/snowflake_usage/credits_variance.sql",
+  "file": "snowflake/balboa__credits_variance.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L3_coves/earthquake_analytics/earthquakes_around_the_world.sql",
+  "file": "snowflake/balboa__earthquakes_around_the_world.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L2_bays/country_demographics/us_population_unpivot.sql",
+  "file": "snowflake/balboa__us_population_unpivot.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L2_bays/covid_observations/total_covid_cases.sql",
+  "file": "snowflake/balboa__total_covid_cases.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L1_inlets/usgs__earthquake_data/stg_earthquakes.sql",
+  "file": "snowflake/balboa__stg_earthquakes.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "snowflake",
+  "repo": "datacoves/balboa",
+  "commit": "2265a0740a04a499e52d676c383a6280968c19c6",
+  "path": "transform/models/L3_coves/loan_analytics/loans_by_state__dynamic.sql",
+  "file": "snowflake/balboa__loans_by_state__dynamic.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "cal-itp/data-infra",
+  "commit": "ea483eb034fc6fb58ee08a3f9363ee61c9913c02",
+  "path": "warehouse/models/mart/payments/fct_payments_aggregations.sql",
+  "file": "bigquery/data-infra__fct_payments_aggregations.sql",
+  "licence": "AGPL-3.0"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "cal-itp/data-infra",
+  "commit": "ea483eb034fc6fb58ee08a3f9363ee61c9913c02",
+  "path": "warehouse/models/staging/payments/littlepay/stg_littlepay__micropayments.sql",
+  "file": "bigquery/data-infra__stg_littlepay__micropayments.sql",
+  "licence": "AGPL-3.0"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "cal-itp/data-infra",
+  "commit": "ea483eb034fc6fb58ee08a3f9363ee61c9913c02",
+  "path": "warehouse/models/mart/gtfs/fct_vehicle_locations.sql",
+  "file": "bigquery/data-infra__fct_vehicle_locations.sql",
+  "licence": "AGPL-3.0"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "cal-itp/data-infra",
+  "commit": "ea483eb034fc6fb58ee08a3f9363ee61c9913c02",
+  "path": "warehouse/models/staging/ntd_funding_and_expenses/stg_ntd__capital_expenditures_time_series__total.sql",
+  "file": "bigquery/data-infra__stg_ntd__capital_expenditures_time_series__total.sql",
+  "licence": "AGPL-3.0"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "Velir/dbt-ga4",
+  "commit": "664be28505018ba6e5409a91e0aa1fce11d321dc",
+  "path": "models/staging/stg_ga4__events.sql",
+  "file": "bigquery/dbt-ga4__stg_ga4__events.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "Velir/dbt-ga4",
+  "commit": "664be28505018ba6e5409a91e0aa1fce11d321dc",
+  "path": "models/staging/stg_ga4__user_properties.sql",
+  "file": "bigquery/dbt-ga4__stg_ga4__user_properties.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "Velir/dbt-ga4",
+  "commit": "664be28505018ba6e5409a91e0aa1fce11d321dc",
+  "path": "models/staging/base/base_ga4__events.sql",
+  "file": "bigquery/dbt-ga4__base_ga4__events.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "bigquery",
+  "repo": "Velir/dbt-ga4",
+  "commit": "664be28505018ba6e5409a91e0aa1fce11d321dc",
+  "path": "models/marts/core/dim_ga4__sessions_daily.sql",
+  "file": "bigquery/dbt-ga4__dim_ga4__sessions_daily.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "pietheinstrengholt/dbt-databricks-adventureworks",
+  "commit": "3683050133966437dcf9f96732e4e117b686a7a6",
+  "path": "models/saleslt/marts/dim_customers.sql",
+  "file": "databricks/dbt-databricks-adventureworks__dim_customers.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "pietheinstrengholt/dbt-databricks-adventureworks",
+  "commit": "3683050133966437dcf9f96732e4e117b686a7a6",
+  "path": "models/saleslt/staging/stg_customer.sql",
+  "file": "databricks/dbt-databricks-adventureworks__stg_customer.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "pietheinstrengholt/dbt-databricks-adventureworks",
+  "commit": "3683050133966437dcf9f96732e4e117b686a7a6",
+  "path": "models/saleslt/staging/stg_address.sql",
+  "file": "databricks/dbt-databricks-adventureworks__stg_address.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "joanasoares0/dbt-databricks-pipeline",
+  "commit": "45d0239e6a86574dd790e6c0d80b04e806171b7a",
+  "path": "analytics/models/1_staging/stg_job_postings.sql",
+  "file": "databricks/dbt-databricks-pipeline__stg_job_postings.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "joanasoares0/dbt-databricks-pipeline",
+  "commit": "45d0239e6a86574dd790e6c0d80b04e806171b7a",
+  "path": "analytics/models/3_marts/fct_job_postings.sql",
+  "file": "databricks/dbt-databricks-pipeline__fct_job_postings.sql",
+  "licence": "MIT"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "AndreaBozzo/dlt-dbt-databricks",
+  "commit": "52a7ee89be4ff693fe5469c35af96ffa47f0ee4b",
+  "path": "transformation/dbt_databricks/models/staging/stg_claims.sql",
+  "file": "databricks/dlt-dbt-databricks__stg_claims.sql",
+  "licence": "Apache-2.0"
+ },
+ {
+  "dialect": "databricks",
+  "repo": "AndreaBozzo/dlt-dbt-databricks",
+  "commit": "52a7ee89be4ff693fe5469c35af96ffa47f0ee4b",
+  "path": "transformation/dbt_databricks/models/marts/mart_post_engagement.sql",
+  "file": "databricks/dlt-dbt-databricks__mart_post_engagement.sql",
+  "licence": "Apache-2.0"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/emploi/besoin_main_oeuvre_departement.sql",
+  "file": "postgres/make-open-data__besoin_main_oeuvre_departement.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/geographie/infos_scot.sql",
+  "file": "postgres/make-open-data__infos_scot.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/geographie/commune_centroid_poste.sql",
+  "file": "postgres/make-open-data__commune_centroid_poste.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/geographie/infos_communes.sql",
+  "file": "postgres/make-open-data__infos_communes.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/geographie/infos_iris.sql",
+  "file": "postgres/make-open-data__infos_iris.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/intermediaires/foncier/ventes_immobilieres.sql",
+  "file": "postgres/make-open-data__ventes_immobilieres.sql",
+  "licence": "none at the repository root"
+ },
+ {
+  "dialect": "postgres",
+  "repo": "make-open-data/make-open-data",
+  "commit": "177caad0d3d21be49a287b787cb36803bfc4f203",
+  "path": "1_data/prepare/datatourisme/place.sql",
+  "file": "postgres/make-open-data__place.sql",
+  "licence": "none at the repository root"
+ }
+]

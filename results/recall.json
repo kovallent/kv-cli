@@ -1,0 +1,311 @@
+{
+  "seeds": [
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      },
+      "expect": {
+        "line": 10,
+        "rule": "three_part_name",
+        "subject": "analytics_prod.raw.orders"
+      },
+      "file": "snowflake/balboa__stg_personal_loans.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      },
+      "seed": "three_part",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "use_statement",
+        "subject": "warehouse analytics_prod_wh"
+      },
+      "file": "snowflake/balboa__credits_variance.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      },
+      "seed": "use_warehouse",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "object_store_uri",
+        "subject": "object_store_uri s3://acme-prod-landing/orders/"
+      },
+      "file": "snowflake/balboa__stg_query_history.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "seed": "copy_into",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      },
+      "expect": {
+        "line": 19,
+        "rule": "three_part_name",
+        "subject": "analytics_prod.raw.orders"
+      },
+      "file": "bigquery/data-infra__stg_littlepay__micropayments.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      },
+      "seed": "three_part",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 3,
+        "rule": "three_part_name",
+        "subject": "analytics_prod.raw.orders"
+      },
+      "file": "bigquery/dbt-ga4__stg_ga4__events.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "seed": "three_part",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "object_store_uri",
+        "subject": "object_store_uri s3://acme-prod-lake/orders/"
+      },
+      "file": "bigquery/dbt-ga4__stg_ga4__user_properties.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      },
+      "seed": "location",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "object_store_uri",
+        "subject": "object_store_uri s3://acme-prod-landing/orders/"
+      },
+      "file": "databricks/dbt-databricks-pipeline__stg_job_postings.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "seed": "copy_into",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "object_store_uri",
+        "subject": "object_store_uri s3://acme-prod-lake/orders/"
+      },
+      "file": "databricks/dbt-databricks-adventureworks__dim_customers.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      },
+      "seed": "location",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "use_statement",
+        "subject": "warehouse analytics_prod_wh"
+      },
+      "file": "postgres/make-open-data__ventes_immobilieres.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "seed": "use_warehouse",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "expect": {
+        "line": 1,
+        "rule": "object_store_uri",
+        "subject": "object_store_uri s3://acme-prod-landing/orders/"
+      },
+      "file": "postgres/make-open-data__infos_communes.sql",
+      "native_dialect": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      },
+      "seed": "copy_into",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": false,
+        "via": "tokens"
+      }
+    },
+    {
+      "as_proposed": {
+        "caught": false,
+        "other_hits": [],
+        "parsed": true,
+        "via": null
+      },
+      "expect": {
+        "line": 20,
+        "rule": "three_part_name",
+        "subject": "analytics_prod.raw.orders"
+      },
+      "file": "postgres/make-open-data__infos_iris.sql",
+      "native_dialect": {
+        "caught": false,
+        "other_hits": [],
+        "parsed": true,
+        "via": null
+      },
+      "seed": "jinja_three_part",
+      "with_literal_passthrough": {
+        "caught": true,
+        "other_hits": [],
+        "parsed": true,
+        "via": "ast"
+      }
+    }
+  ],
+  "unseeded": {
+    "fell_back_to_tokens": 3,
+    "hits": [],
+    "models": 30
+  },
+  "unseeded_synthetic": {
+    "fell_back_to_tokens": 1,
+    "hits": [],
+    "models": 2
+  }
+}

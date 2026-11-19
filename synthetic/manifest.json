@@ -1,0 +1,4 @@
+[
+ {"dialect": "databricks", "repo": "synthetic", "file": "databricks/synthetic_streaming_events.sql", "licence": "written for this spike"},
+ {"dialect": "databricks", "repo": "synthetic", "file": "databricks/synthetic_user_features.sql", "licence": "written for this spike"}
+]
