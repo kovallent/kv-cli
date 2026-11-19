@@ -569,3 +569,340 @@ fn parse_coverage_on_the_committed_corpus() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Each finding as `(detector, subject, line, fingerprint)`.
+fn sql_findings(payload: &serde_json::Value) -> Vec<(String, String, u64, String)> {
+    payload["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            assert_eq!(f["code"], "KV003", "{f:#}");
+            assert_eq!(f["kind"], "hardcoded_infrastructure", "{f:#}");
+            (
+                f["detector"].as_str().unwrap().to_string(),
+                f["subject"].as_str().unwrap().to_string(),
+                f["line"].as_u64().unwrap(),
+                f["fingerprint"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The owner decisions' fingerprint table, row by row: each statement alone
+/// in `models/orders.sql`, with the exact fingerprint the spec gives.
+#[test]
+fn every_row_of_the_fingerprint_table_is_golden() {
+    let rows: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "select o.order_id\nfrom ANALYTICS_PROD.RAW.ORDERS as o\n",
+            "",
+            "three_part_name",
+            "analytics_prod.raw.orders",
+            "803e1305b4fe391a",
+        ),
+        (
+            "select c.customer_id\nfrom ANALYTICS_PROD.RAW.CUSTOMERS as c\n",
+            "",
+            "three_part_name",
+            "analytics_prod.raw.customers",
+            "424c475cee1fe19b",
+        ),
+        (
+            "use warehouse ANALYTICS_PROD_WH;\nselect 1 as one\n",
+            "",
+            "use_warehouse",
+            "analytics_prod_wh",
+            "d75a9af72edda500",
+        ),
+        (
+            "use database ANALYTICS_PROD;\nselect 1 as one\n",
+            "",
+            "use_database",
+            "analytics_prod",
+            "5e8f993e74e79fb0",
+        ),
+        (
+            "copy into landing_orders\nfrom 's3://acme-prod-landing/orders/'\n",
+            "",
+            "object_store_uri",
+            "s3://acme-prod-landing/orders/",
+            "b4a82d9189588c25",
+        ),
+        (
+            "create table landing_orders (order_id int)\nlocation 's3://acme-prod-lake/orders/'\n",
+            "",
+            "object_store_uri",
+            "s3://acme-prod-lake/orders/",
+            "05590ba43600a2e8",
+        ),
+        (
+            "select o.order_id\nfrom RAW.ORDERS as o\n",
+            "version: 1\nsql:\n  two_part_names: true\n",
+            "two_part_name",
+            "raw.orders",
+            "8fe8c3b68a003809",
+        ),
+    ];
+    for (i, (model, contract, detector, subject, fingerprint)) in rows.iter().enumerate() {
+        let mut files = vec![
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/orders.sql", *model),
+        ];
+        if !contract.is_empty() {
+            files.push((".kovallent.yaml", *contract));
+        }
+        let dir = project(&format!("fp{i}"), &files);
+        let (code, payload) = audit_dir_json(&dir, &[]);
+        assert_eq!(code, Some(0), "a warning by default: {payload:#}");
+        let line = if model.starts_with("use ") { 1 } else { 2 };
+        assert_eq!(
+            sql_findings(&payload),
+            [(
+                detector.to_string(),
+                subject.to_string(),
+                line,
+                fingerprint.to_string()
+            )],
+            "row {i}"
+        );
+        let f = &payload["findings"][0];
+        assert_eq!(f["symbol"], "orders");
+        assert_eq!(f["path"], "models/orders.sql");
+        assert_eq!(f["severity"], "warning");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // Without the opt-in, the two-part name is not reported.
+    let dir = project(
+        "fp-off",
+        &[
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/orders.sql", rows[6].0),
+        ],
+    );
+    let (_, payload) = audit_dir_json(&dir, &[]);
+    assert_eq!(sql_findings(&payload), []);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Exit criterion 1: the roadmap's example is a real detection. Its text
+/// line and JSON finding, exactly. The SARIF result is pinned with the SQL
+/// sample's goldens.
+#[test]
+fn the_roadmap_example_is_a_real_detection() {
+    let dir = project(
+        "roadmap",
+        &[
+            ("dbt_project.yml", "name: shop\n"),
+            (
+                "models/orders.sql",
+                "select o.order_id, o.amount\nfrom ANALYTICS_PROD.RAW.ORDERS as o\n",
+            ),
+        ],
+    );
+    let (code, text) = run(&dir, &["audit", "."]);
+    assert_eq!(code, Some(0));
+    assert!(
+        text.contains(
+            "\nmodels/orders.sql\n     2  warning  KV003  `ANALYTICS_PROD.RAW.ORDERS` is a hardcoded three-part name\n\
+             \x20       use {{ ref() }} or {{ source() }}, so the name follows the target\n"
+        ),
+        "{text}"
+    );
+    let (_, payload) = audit_dir_json(&dir, &[]);
+    let finding = &payload["findings"][0];
+    assert_eq!(
+        *finding,
+        serde_json::json!({
+            "fingerprint": "803e1305b4fe391a",
+            "path": "models/orders.sql",
+            "line": 2,
+            "code": "KV003",
+            "severity": "warning",
+            "symbol": "orders",
+            "subject": "analytics_prod.raw.orders",
+            "message": "`ANALYTICS_PROD.RAW.ORDERS` is a hardcoded three-part name",
+            "detail": "use {{ ref() }} or {{ source() }}, so the name follows the target",
+            "kind": "hardcoded_infrastructure",
+            "detector": "three_part_name",
+            "key": "ANALYTICS_PROD.RAW.ORDERS"
+        })
+    );
+    let (strict, _) = audit_dir_json(&dir, &["--strict"]);
+    assert_eq!(strict, Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Exit criterion 6: the spec's recall pass as a test. One known positive
+/// seeded into a copy of a committed corpus model per rule, and each must be
+/// caught with its rule, subject and line, and nothing else reported.
+#[test]
+fn the_recall_pass_catches_one_seed_per_rule() {
+    let corpus = repo().join("tests/sql_corpus");
+    let read = |p: &str| std::fs::read_to_string(corpus.join(p)).unwrap();
+    let replace_first = |src: &str, from: &str, to: &str| -> (String, u64) {
+        let at = src
+            .find(from)
+            .unwrap_or_else(|| panic!("{from} not in model"));
+        let line = src[..at].matches('\n').count() as u64 + 1;
+        (
+            format!("{}{to}{}", &src[..at], &src[at + from.len()..]),
+            line,
+        )
+    };
+    let prepend = |src: &str, stmt: &str| (format!("{stmt}\n{src}"), 1u64);
+    // (host model, (seeded text, seed line), contract, detector, subject)
+    type Seed<'a> = (&'a str, (String, u64), &'a str, &'a str, &'a str);
+    let seeds: Vec<Seed> = vec![
+        (
+            "synthetic/postgres/dim_places.sql",
+            replace_first(&read("synthetic/postgres/dim_places.sql"), "{{ ref('stg_places') }}", "ANALYTICS_PROD.RAW.ORDERS"),
+            "",
+            "three_part_name",
+            "analytics_prod.raw.orders",
+        ),
+        (
+            "permissive/AndreaBozzo-dlt-dbt-databricks/transformation/dbt_databricks/models/staging/stg_claims.sql",
+            replace_first(
+                &read("permissive/AndreaBozzo-dlt-dbt-databricks/transformation/dbt_databricks/models/staging/stg_claims.sql"),
+                "{{ source('healthverity', 'claims_sample_synthetic') }}",
+                "{{ 'ANALYTICS_PROD.RAW.ORDERS' }}",
+            ),
+            "",
+            "three_part_name",
+            "analytics_prod.raw.orders",
+        ),
+        (
+            "synthetic/snowflake/stg_order_lines.sql",
+            prepend(&read("synthetic/snowflake/stg_order_lines.sql"), "use warehouse ANALYTICS_PROD_WH;"),
+            "",
+            "use_warehouse",
+            "analytics_prod_wh",
+        ),
+        (
+            "synthetic/snowflake/fct_daily_revenue.sql",
+            prepend(&read("synthetic/snowflake/fct_daily_revenue.sql"), "use database ANALYTICS_PROD;"),
+            "",
+            "use_database",
+            "analytics_prod",
+        ),
+        (
+            "permissive/joanasoares0-dbt-databricks-pipeline/analytics/models/3_marts/fct_job_postings.sql",
+            prepend(
+                &read("permissive/joanasoares0-dbt-databricks-pipeline/analytics/models/3_marts/fct_job_postings.sql"),
+                "copy into landing_orders from 's3://acme-prod-landing/orders/';",
+            ),
+            "",
+            "object_store_uri",
+            "s3://acme-prod-landing/orders/",
+        ),
+        (
+            "permissive/Velir-dbt-ga4/models/staging/stg_ga4__user_properties.sql",
+            prepend(
+                &read("permissive/Velir-dbt-ga4/models/staging/stg_ga4__user_properties.sql"),
+                "create table if not exists landing_orders (id int) location 's3://acme-prod-lake/orders/';",
+            ),
+            "",
+            "object_store_uri",
+            "s3://acme-prod-lake/orders/",
+        ),
+        (
+            "synthetic/bigquery/int_session_pages.sql",
+            replace_first(&read("synthetic/bigquery/int_session_pages.sql"), "{{ source('analytics', 'sessions') }}", "RAW.SESSIONS"),
+            "version: 1\nsql:\n  two_part_names: true\n",
+            "two_part_name",
+            "raw.sessions",
+        ),
+    ];
+    for (i, (host, (model, line), contract, detector, subject)) in seeds.iter().enumerate() {
+        let name = format!("models/{}", host.rsplit('/').next().unwrap());
+        let mut files = vec![
+            ("dbt_project.yml", "name: recall\n"),
+            (name.as_str(), model.as_str()),
+        ];
+        if !contract.is_empty() {
+            files.push((".kovallent.yaml", *contract));
+        }
+        let dir = project(&format!("recall{i}"), &files);
+        let (_, payload) = audit_dir_json(&dir, &[]);
+        let got: Vec<(String, String, u64)> = sql_findings(&payload)
+            .into_iter()
+            .map(|(d, s, l, _)| (d, s, l))
+            .collect();
+        assert_eq!(
+            got,
+            [(detector.to_string(), subject.to_string(), *line)],
+            "seed {i} in {host}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The spec's precision evidence, kept: the unseeded corpus has no literal
+/// relation, `USE` or object-store path, so the rules report nothing, with
+/// the two-part rule on as well as off.
+#[test]
+fn the_unseeded_corpus_has_no_findings() {
+    let root = repo().join("tests/sql_corpus");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("manifest.json")).unwrap())
+            .unwrap();
+    let mut files: Vec<(String, String)> =
+        vec![("dbt_project.yml".into(), "name: corpus\n".into())];
+    for m in manifest["models"].as_array().unwrap() {
+        let src = m["path"].as_str().unwrap();
+        files.push((
+            format!("models/{}", src.replace('/', "__")),
+            std::fs::read_to_string(root.join(src)).unwrap(),
+        ));
+    }
+    for contract in ["version: 1\n", "version: 1\nsql:\n  two_part_names: true\n"] {
+        let mut all = files.clone();
+        all.push((".kovallent.yaml".into(), contract.into()));
+        let refs: Vec<(&str, &str)> = all.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let dir = project("unseeded", &refs);
+        let (_, payload) = audit_dir_json(&dir, &[]);
+        assert_eq!(payload["run"]["files_scanned"], 17);
+        assert_eq!(sql_findings(&payload), [], "{contract}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// `fix` rewrites no SQL; it lists each KV003 finding with what to write
+/// instead, per rule.
+#[test]
+fn fix_lists_sql_findings_as_manual_items() {
+    let model = "use warehouse ANALYTICS_PROD_WH;\n\
+                 copy into landing from 's3://acme-prod-landing/orders/';\n\
+                 select * from ANALYTICS_PROD.RAW.ORDERS\n";
+    let dir = project(
+        "fix-manual",
+        &[
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/orders.sql", model),
+        ],
+    );
+    let (code, stdout) = run(&dir, &["fix", "."]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let manual: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("manual: "))
+        .collect();
+    let path = Path::new("models").join("orders.sql").display().to_string();
+    assert_eq!(manual.len(), 3, "{stdout}");
+    for (line, text) in [
+        (1, "`USE WAREHOUSE ANALYTICS_PROD_WH` pins the warehouse - move it to the dbt target in profiles.yml by hand"),
+        (2, "`s3://acme-prod-landing/orders/` is a hardcoded object-store path - pass it in with var() or env_var() by hand"),
+        (3, "`ANALYTICS_PROD.RAW.ORDERS` is a hardcoded three-part name - replace it with {{ ref() }} or {{ source() }} by hand"),
+    ] {
+        assert!(
+            manual.iter().any(|m| m.contains(&format!("{path}:{line} ")) && m.ends_with(text)),
+            "line {line}: {stdout}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("models/orders.sql")).unwrap(),
+        model
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

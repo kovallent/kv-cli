@@ -160,7 +160,8 @@ enum Command {
         Each changed file is backed up to <file>.kvbak first. Hardcoded\n\
         parameter defaults and names that break a naming rule (KV004) are\n\
         listed as `manual:` items, never rewritten. Pinned infrastructure\n\
-        (KV003) is never rewritten either.")]
+        (KV003) is never rewritten either; in dbt SQL models it is listed\n\
+        as `manual:` items too.")]
     Fix {
         /// Files or directories to repair.
         #[arg(default_value = ".")]
@@ -1131,9 +1132,14 @@ fn is_sql_model(file: &Path, sql_models: &HashSet<PathBuf>) -> bool {
 /// decision 5).
 fn audit_sql(engine: &Engine, rel: String, src: &str) -> FileOutcome {
     let model = sql::parse::read(src, engine.contract.sql.dialect);
+    let findings = sql::rules::findings(engine, &rel, src, &model);
     match model.parse {
-        sql::parse::Parse::Full { .. } => FileOutcome::empty(rel, FileAnalysis::Sql),
+        sql::parse::Parse::Full { .. } => FileOutcome {
+            findings,
+            ..FileOutcome::empty(rel, FileAnalysis::Sql)
+        },
         sql::parse::Parse::Partial { cause, .. } => FileOutcome {
+            findings,
             skipped: Some(SkippedFile::sql_not_parsed(rel.clone(), cause)),
             ..FileOutcome::empty(rel, FileAnalysis::Partial)
         },
@@ -1621,10 +1627,6 @@ fn cmd_fix(
     let mut credential_backups: Vec<PathBuf> = Vec::new();
 
     for file in &files {
-        // SQL is never rewritten.
-        if is_sql_model(file, &sql_models) {
-            continue;
-        }
         let src = match read_source(file) {
             Ok(s) => s,
             Err(e) => {
@@ -1632,6 +1634,24 @@ fn cmd_fix(
                 continue;
             }
         };
+        // SQL is never rewritten: each KV003 finding is listed for a human,
+        // with what to write instead.
+        if is_sql_model(file, &sql_models) {
+            let shown = file.display().to_string();
+            let model = sql::parse::read(&src, engine.contract.sql.dialect);
+            for f in sql::rules::findings(&engine, &shown, &src, &model) {
+                let audit::FindingKind::HardcodedInfrastructure { detector, .. } = &f.kind else {
+                    continue;
+                };
+                skipped.push(format!(
+                    "{shown}:{} {} - {} by hand",
+                    f.line,
+                    f.message,
+                    sql::rules::fix_advice(detector)
+                ));
+            }
+            continue;
+        }
         // Config files and notebooks are never rewritten - the right
         // replacement (`env_var()`, a vault reference, a CI secret, a cleared
         // output) depends on what reads the file - but what `audit` reports

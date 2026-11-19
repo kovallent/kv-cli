@@ -382,6 +382,15 @@ impl Engine {
         Ok(())
     }
 
+    /// The contract's compiled infrastructure value pattern called `name`,
+    /// when KV003 is on and the contract keeps one by that name.
+    pub fn infra_value_pattern(&self, name: &str) -> Option<&Regex> {
+        self.infra_values
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, re)| re)
+    }
+
     /// True when `rel`, a `/`-separated path relative to the project, is
     /// matched by `scan.exclude`.
     pub fn is_excluded(&self, rel: &str) -> bool {

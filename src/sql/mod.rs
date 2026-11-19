@@ -4,3 +4,4 @@
 pub mod discover;
 pub mod neutralise;
 pub mod parse;
+pub mod rules;

@@ -24,7 +24,7 @@ schemars = "1.2.2"
 # patch releases arrive, a minor upgrade is deliberate. Without the default
 # `recursive-protection`, so no extra crates: the parser's own recursion
 # limit turns deeply nested SQL into a parse error, reported as sql_not_parsed.
-sqlparser = { version = "0.64", default-features = false, features = ["std"] }
+sqlparser = { version = "0.64", default-features = false, features = ["std", "visitor"] }
 
 [profile.release]
 opt-level = 3

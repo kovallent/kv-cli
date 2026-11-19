@@ -27,8 +27,6 @@ use sqlparser::tokenizer::{Location, TokenWithSpan, Tokenizer};
 pub struct Model {
     /// The neutralised text, the same length and lines as the source. When
     /// the Jinja couldn't be neutralised, the neutraliser's best effort.
-    // Read by the stage-1 rules, which land in the next part.
-    #[allow(dead_code)]
     pub text: String,
     pub parse: Parse,
 }
@@ -36,10 +34,8 @@ pub struct Model {
 pub enum Parse {
     /// Every statement parsed.
     Full {
-        #[allow(dead_code)] // read by the stage-1 rules, next part
         statements: Vec<Statement>,
         /// The dialect that parsed it.
-        #[allow(dead_code)] // read by the stage-1 rules, next part
         dialect: SqlDialect,
     },
     /// Not parsed: the rules read the tokens, and the file is skipped as
@@ -47,7 +43,6 @@ pub enum Parse {
     Partial {
         cause: String,
         /// Empty only if the tokenizer failed too, which `cause` then says.
-        #[allow(dead_code)] // read by the stage-1 rules, next part
         tokens: Vec<TokenWithSpan>,
     },
 }
@@ -69,7 +64,7 @@ fn dialects(pinned: SqlDialect) -> Vec<(SqlDialect, Box<dyn Dialect>)> {
     wanted.into_iter().map(|d| (d, dialect(d))).collect()
 }
 
-fn dialect(d: SqlDialect) -> Box<dyn Dialect> {
+pub fn dialect(d: SqlDialect) -> Box<dyn Dialect> {
     match d {
         SqlDialect::Generic => Box::new(GenericDialect {}),
         SqlDialect::Snowflake => Box::new(SnowflakeDialect {}),
@@ -213,7 +208,6 @@ fn readable(error: &str) -> String {
 
 /// The byte offset of `loc` (1-based line and column, columns counted in
 /// characters, as sqlparser-rs counts them) in `text`.
-#[allow(dead_code)] // used by the stage-1 rules, next part
 pub fn offset(text: &str, loc: Location) -> usize {
     let line_start = if loc.line <= 1 {
         0
@@ -229,7 +223,6 @@ pub fn offset(text: &str, loc: Location) -> usize {
 }
 
 /// The 1-based line and character column of byte `offset` in `src`.
-#[allow(dead_code)] // used by the stage-1 rules, next part
 pub fn source_position(src: &str, offset: usize) -> (usize, usize) {
     let before = &src[..offset];
     let line = before.matches('\n').count() + 1;
@@ -241,7 +234,6 @@ pub fn source_position(src: &str, offset: usize) -> (usize, usize) {
 /// keeps byte offsets and line breaks, so the line is the same; the column
 /// is counted again in the source, where a Jinja tag earlier on the line
 /// may have held characters wider than its placeholder.
-#[allow(dead_code)] // used by the stage-1 rules, next part
 pub fn map_to_source(src: &str, model_text: &str, loc: Location) -> (usize, usize) {
     let at = offset(model_text, loc);
     let (line, column) = source_position(src, at);
