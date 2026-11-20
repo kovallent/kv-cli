@@ -318,7 +318,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 
 * **Python:** source written for any Python 3 release through 3.14. `kv-cli` never runs Python; it parses source with tree-sitter, so no interpreter is needed and the version installed does not matter. Covered syntax includes `:=` and `/` parameters (3.8), `match` (3.10), `except*` (3.11), `type` aliases, generic `def f[T]` / `class C[T]` and nested-quote f-strings (3.12), and `t"…"` template strings and unparenthesised `except A, B:` (3.14).
   * **Known gap:** type-parameter defaults (`def f[T = int]`, 3.13) do not parse. Such a file is audited on a partial parse and listed as `syntax_error` (a warning; an error under `--strict`); findings elsewhere in the file are still reported, and `fix` will not rewrite it.
-* **Files:** Python gets all three rules. Notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) get `KV002`. Files must be UTF-8; anything else is reported as unreadable rather than guessed at.
+* **Files:** Python gets all three rules. Notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) get `KV002`. Files must be UTF-8; anything else is reported as unreadable rather than guessed at. A file of a type kv-cli doesn't read, or a `.sql` file that isn't a dbt model, named on the command line is listed as `not_analysed`, a warning that never gates, rather than parsed as Python.
 
 ---
 

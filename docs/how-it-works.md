@@ -28,6 +28,8 @@ dbt SQL models (`src/sql/`) are found through each `dbt_project.yml` rather than
 
 Files must be UTF-8. Python allows other encodings through a PEP 263 `# coding:` line, but kv-cli does not decode them: a file it cannot read as written is reported as **unreadable**, which always fails the gate, with a hint to re-encode it. Guessing an encoding could hide exactly what the scan is looking for.
 
+Any other file kv-cli is given, named on the command line or matched by a custom `scan.include`, has no reader: a `.txt`, a `.pyi`, or a `.sql` file that isn't a dbt model. kv-cli lists it in `run.skipped` as **not_analysed**, with a detail saying why, rather than parse it as something it isn't. Only `.py` files are parsed as Python. It is a warning that never gates, even under `--strict`, because nothing is wrong with the file: kv-cli just doesn't cover it.
+
 A SQL model has no signature or function names, so `KV001` and `KV004` don't apply to it, and it adds nothing to the scope block's function counts. Stage 1 doesn't check SQL for credentials.
 
 Config files are where environment-specific values belong, so `KV003` applies to none of them except Databricks asset bundles: `databricks.yml` and the files it includes declare their per-target values under `targets:` and `variables:`, so a value pinned anywhere else is reported. See [KV003](rules/KV003.md#databricks-asset-bundles). `.env.example`-style templates (`.example`, `.sample`, `.template`, `.dist`) are checked by value patterns only: placeholders such as `API_KEY=your-key-here` are their purpose, but a real token pasted into one is still caught.

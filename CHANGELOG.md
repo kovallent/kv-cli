@@ -11,7 +11,19 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A file kv-cli has no reader for is listed, not parsed as Python.** A
+  `.sql` file outside every `dbt_project.yml`'s model and snapshot paths, or
+  any other file type kv-cli doesn't read, named on the command line (or
+  matched by a custom `scan.include`), was parsed as Python: a `.sql` file
+  reported a false `syntax_error`, and a `.txt` could report KV002 and be
+  rewritten by `fix`. It is now in `run.files` as `skipped`, with the new skip
+  reason `not_analysed` and a detail saying why. It is a warning, never clean
+  and never an error, and it doesn't gate even under `--strict`. `fix` leaves
+  it alone. Only `.py` files are parsed as Python. The addition is additive:
+  `schema_version` stays `1`, and the default contract's fingerprint is
+  unchanged.
 
 ---
 
