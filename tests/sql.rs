@@ -412,7 +412,8 @@ fn the_dialect_retry_parses_what_generic_rejects() {
 }
 
 /// pre-commit names staged files one by one: a model named alone is still
-/// read as SQL, and a `.sql` file outside any dbt project is read as before.
+/// read as SQL, and a `.sql` file outside the model paths is listed as
+/// `not_analysed`, never read as Python.
 #[test]
 fn a_model_named_alone_is_read_as_sql() {
     let dir = project(
@@ -439,11 +440,115 @@ fn a_model_named_alone_is_read_as_sql() {
     common::check_payload(&payload);
     assert_eq!(code, Some(0));
     assert_eq!(file(&payload, "models/m.sql")["analysis"], "sql");
-    // Not a dbt model: read as Python, as 0.13.0 did.
+    // Not a dbt model: listed, not read as Python (0.14.0 reported a false
+    // syntax_error here).
+    let s = skip(&payload, "scripts/adhoc.sql").unwrap();
+    assert_eq!(s["reason"], "not_analysed", "{s:#}");
     assert_eq!(
-        skip(&payload, "scripts/adhoc.sql").unwrap()["reason"],
-        "syntax_error"
+        s["detail"],
+        "not under a dbt project's model or snapshot paths"
     );
+    assert_eq!(file(&payload, "scripts/adhoc.sql")["analysis"], "none");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.sql` file named outside every dbt project is listed in `run.files` as
+/// `skipped` with reason `not_analysed`, a warning that never gates, even
+/// under `--strict`. Nothing in it is read, so a pinned name is not reported.
+#[test]
+fn a_loose_sql_file_named_explicitly_is_not_analysed() {
+    let dir = project(
+        "loose",
+        &[(
+            "queries/loose.sql",
+            "select * from analytics_prod.raw.orders;\n",
+        )],
+    );
+    for strict in [false, true] {
+        let mut args = vec!["audit", "queries/loose.sql", "--format", "json"];
+        if strict {
+            args.push("--strict");
+        }
+        let (code, stdout) = run(&dir, &args);
+        let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        common::check_payload(&payload);
+        assert_eq!(code, Some(0), "strict: {strict}: {payload:#}");
+        assert_eq!(payload["findings"], serde_json::json!([]));
+        let f = file(&payload, "loose.sql");
+        assert_eq!(f["status"], "skipped");
+        assert_eq!(f["analysis"], "none");
+        let s = skip(&payload, "loose.sql").unwrap();
+        assert_eq!(s["reason"], "not_analysed");
+        assert_eq!(s["severity"], "warning");
+        assert_eq!(
+            s["detail"],
+            "not under a dbt project's model or snapshot paths: no dbt_project.yml above it"
+        );
+        assert_eq!(payload["run"]["contract_sha256"], "a6edcff00199c1cf");
+    }
+    let (code, stdout) = run(&dir, &["audit", "queries/loose.sql", "--strict"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    // Paths are relative to the folder named, with no contract to anchor them.
+    assert!(
+        stdout.contains("skipped: loose.sql  not_analysed (warning)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("PASS 0 errors, 0 warnings, 1 skipped"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A model named explicitly is still read as SQL, next to a `.sql` file of
+/// the same project that is not a model. Under `--strict`, only the model's
+/// finding gates.
+#[test]
+fn a_sql_model_named_explicitly_is_still_analysed() {
+    let dir = project(
+        "named-model",
+        &[
+            ("dbt_project.yml", "name: shop\n"),
+            (
+                "models/m.sql",
+                "use warehouse ANALYTICS_PROD_WH;\nselect 1\n",
+            ),
+            ("macros/helper.sql", "select 1\n"),
+            (".kovallent.yaml", "version: 1\n"),
+        ],
+    );
+    let args = [
+        "audit",
+        "models/m.sql",
+        "macros/helper.sql",
+        "--format",
+        "json",
+    ];
+    let (code, stdout) = run(&dir, &args);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    common::check_payload(&payload);
+    assert_eq!(code, Some(0), "KV003 is a warning: {payload:#}");
+    assert_eq!(file(&payload, "models/m.sql")["analysis"], "sql");
+    assert_eq!(file(&payload, "models/m.sql")["status"], "warn");
+    let codes: Vec<&str> = payload["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["KV003"], "{payload:#}");
+    assert!(skip(&payload, "models/m.sql").is_none());
+    let s = skip(&payload, "macros/helper.sql").unwrap();
+    assert_eq!(s["reason"], "not_analysed");
+    assert_eq!(
+        s["detail"],
+        "not under a dbt project's model or snapshot paths"
+    );
+
+    let (code, _) = run(&dir, &[&args[..], &["--strict"]].concat());
+    assert_eq!(code, Some(1), "the model's warning gates under --strict");
+    let (code, _) = run(&dir, &["audit", "macros/helper.sql", "--strict"]);
+    assert_eq!(code, Some(0), "the macro alone never gates");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -457,6 +562,18 @@ fn sql_enabled_false_reads_no_sql() {
             (".kovallent.yaml", "version: 1\nsql:\n  enabled: false\n"),
         ],
     );
+    // Named outright, a model is listed and says why it was not read.
+    let (code, stdout) = run(&dir, &["audit", "models/m.sql", "--format", "json"]);
+    let named: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    common::check_payload(&named);
+    assert_eq!(code, Some(0));
+    let s = skip(&named, "models/m.sql").unwrap();
+    assert_eq!(s["reason"], "not_analysed");
+    assert_eq!(
+        s["detail"],
+        "a .sql file, and sql.enabled is false, so no SQL is read"
+    );
+
     let (_, payload) = audit_dir_json(&dir, &[]);
     assert_eq!(payload["run"]["files_scanned"], 1, "{payload:#}");
     let _ = std::fs::remove_dir_all(&dir);

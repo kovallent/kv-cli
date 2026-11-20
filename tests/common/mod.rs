@@ -25,8 +25,9 @@ const SCOPE_KEYS: [&str; 6] = [
 ///   `status` follows from them: `fail`, `warn`, else `skipped` when it is in
 ///   `skipped`, else `clean`;
 /// - `analysis` is `partial` exactly for a syntax-error or `sql_not_parsed`
-///   skip and `none` exactly for an unreadable file, and a SQL model has a
-///   zero scope;
+///   skip and `none` exactly for an unreadable or `not_analysed` file, and a
+///   SQL model has a zero scope;
+/// - a `not_analysed` file is a warning and never `clean`;
 /// - per file, the four top-level scope categories are disjoint and sum to
 ///   `functions_total`, `report_only` is within `in_scope`, a file not fully
 ///   analysed as Python has a zero scope only when it was read for
@@ -63,6 +64,15 @@ pub fn check_files(payload: &serde_json::Value) {
         .iter()
         .map(|s| (s["path"].as_str().unwrap(), s["reason"].as_str().unwrap()))
         .collect();
+    for s in run["skipped"].as_array().unwrap() {
+        if s["reason"] == "not_analysed" {
+            assert_eq!(s["severity"], "warning", "{s:#}");
+            assert!(
+                s["detail"].is_string(),
+                "a not_analysed file says why: {s:#}"
+            );
+        }
+    }
     for path in skipped.keys() {
         assert!(paths.contains(path), "skipped {path}, not in run.files");
     }
@@ -89,7 +99,7 @@ pub fn check_files(payload: &serde_json::Value) {
             Some(&"syntax_error") | Some(&"sql_not_parsed") => {
                 assert_eq!(analysis, "partial", "{f:#}")
             }
-            Some(&"unreadable") => assert_eq!(analysis, "none", "{f:#}"),
+            Some(&"unreadable") | Some(&"not_analysed") => assert_eq!(analysis, "none", "{f:#}"),
             Some(other) => panic!("unknown skip reason {other}"),
             None => assert!(
                 analysis == "full"
