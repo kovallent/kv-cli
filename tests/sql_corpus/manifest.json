@@ -1,0 +1,40 @@
+{
+  "projects": [
+    {
+      "dir": "permissive/Velir-dbt-ga4",
+      "repo": "Velir/dbt-ga4",
+      "commit": "664be28505018ba6e5409a91e0aa1fce11d321dc",
+      "licence": "MIT"
+    },
+    {
+      "dir": "permissive/joanasoares0-dbt-databricks-pipeline",
+      "repo": "joanasoares0/dbt-databricks-pipeline",
+      "commit": "45d0239e6a86574dd790e6c0d80b04e806171b7a",
+      "licence": "MIT"
+    },
+    {
+      "dir": "permissive/AndreaBozzo-dlt-dbt-databricks",
+      "repo": "AndreaBozzo/dlt-dbt-databricks",
+      "commit": "52a7ee89be4ff693fe5469c35af96ffa47f0ee4b",
+      "licence": "Apache-2.0"
+    }
+  ],
+  "models": [
+    {"path": "permissive/Velir-dbt-ga4/models/staging/stg_ga4__events.sql", "dialect": "bigquery"},
+    {"path": "permissive/Velir-dbt-ga4/models/staging/stg_ga4__user_properties.sql", "dialect": "bigquery"},
+    {"path": "permissive/Velir-dbt-ga4/models/staging/base/base_ga4__events.sql", "dialect": "bigquery"},
+    {"path": "permissive/Velir-dbt-ga4/models/marts/core/dim_ga4__sessions_daily.sql", "dialect": "bigquery"},
+    {"path": "permissive/joanasoares0-dbt-databricks-pipeline/analytics/models/1_staging/stg_job_postings.sql", "dialect": "databricks"},
+    {"path": "permissive/joanasoares0-dbt-databricks-pipeline/analytics/models/3_marts/fct_job_postings.sql", "dialect": "databricks"},
+    {"path": "permissive/AndreaBozzo-dlt-dbt-databricks/transformation/dbt_databricks/models/staging/stg_claims.sql", "dialect": "databricks"},
+    {"path": "permissive/AndreaBozzo-dlt-dbt-databricks/transformation/dbt_databricks/models/marts/mart_post_engagement.sql", "dialect": "databricks"},
+    {"path": "synthetic/snowflake/stg_order_lines.sql", "dialect": "snowflake"},
+    {"path": "synthetic/snowflake/fct_daily_revenue.sql", "dialect": "snowflake"},
+    {"path": "synthetic/snowflake/snp_customers.sql", "dialect": "snowflake"},
+    {"path": "synthetic/bigquery/int_session_pages.sql", "dialect": "bigquery"},
+    {"path": "synthetic/databricks/stg_streaming_events.sql", "dialect": "databricks"},
+    {"path": "synthetic/databricks/int_user_features.sql", "dialect": "databricks"},
+    {"path": "synthetic/postgres/int_daily_activity.sql", "dialect": "postgres"},
+    {"path": "synthetic/postgres/dim_places.sql", "dialect": "postgres"}
+  ]
+}

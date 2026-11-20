@@ -1,0 +1,7 @@
+# A pure-SQL dbt project for kv-cli's SQL support (docs/design/sql-models.md,
+# exit criterion 2). Some models pin infrastructure on purpose; the rest
+# show what stays clean.
+name: kovallent_sample
+version: "1.0.0"
+profile: kovallent_sample
+model-paths: ["models"]

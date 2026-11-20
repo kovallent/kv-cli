@@ -52,6 +52,15 @@ pub struct Contract {
     // fingerprint it had before the section existed (ADR 0001).
     #[serde(default, skip_serializing_if = "NamingConfig::is_default")]
     pub naming: NamingConfig,
+    /// dbt SQL models: which are read, and how. KV003 applies to them under
+    /// `infrastructure`'s settings; see docs/design/sql-models.md.
+    //
+    // Left out of the serialized contract while it holds its default, and
+    // each field is skipped at its own default too, so the built-in contract
+    // and every contract that does not set a field keep their fingerprint
+    // (ADR 0001).
+    #[serde(default, skip_serializing_if = "SqlConfig::is_default")]
+    pub sql: SqlConfig,
     #[serde(default)]
     pub frameworks: FrameworkConfig,
     #[serde(default)]
@@ -202,6 +211,111 @@ pub enum NamingScope {
     InScope,
     /// Every function definition.
     AllFunctions,
+}
+
+/// dbt SQL models, found through each `dbt_project.yml`. A model is read
+/// when it sits under one of the project's `paths`; KV003 then applies to it
+/// under `infrastructure`'s settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SqlConfig {
+    /// `false`: `.sql` files are never read, as before 0.14.0.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Which `dbt_project.yml` path keys hold the models to read:
+    /// `model-paths` (`source-paths` before dbt 1.0) and `snapshot-paths`.
+    /// Analyses and singular tests are a later stage, not yet accepted.
+    #[serde(
+        default = "default_sql_paths",
+        skip_serializing_if = "SqlConfig::paths_are_default"
+    )]
+    pub paths: Vec<String>,
+    /// Parse with this dialect only. At `generic`, the default, kv-cli tries
+    /// the generic dialect and then each supported dialect in turn.
+    #[serde(default, skip_serializing_if = "SqlDialect::is_generic")]
+    pub dialect: SqlDialect,
+    /// Dotted names that are the same in every environment, matched against
+    /// the whole normalised name, ignoring case. `*` matches any run of
+    /// characters, dots included.
+    #[serde(
+        default = "default_sql_allow_names",
+        skip_serializing_if = "SqlConfig::allow_names_are_default"
+    )]
+    pub allow_names: Vec<String>,
+    /// Also report two-part `schema.table` names written as literals.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub two_part_names: bool,
+}
+
+/// The `dbt_project.yml` path keys `sql.paths` accepts in stage 1.
+pub const SQL_PATH_KEYS: &[&str] = &["model-paths", "snapshot-paths"];
+
+/// Path keys that are a later stage: named so the error can say so.
+const SQL_LATER_PATH_KEYS: &[&str] = &["analysis-paths", "test-paths"];
+
+fn default_sql_paths() -> Vec<String> {
+    SQL_PATH_KEYS.iter().map(|s| s.to_string()).collect()
+}
+
+fn default_sql_allow_names() -> Vec<String> {
+    [
+        "*.information_schema.*",
+        "information_schema.*",
+        "pg_catalog.*",
+        "snowflake.account_usage.*",
+        "snowflake.organization_usage.*",
+        "bigquery-public-data.*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl Default for SqlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paths: default_sql_paths(),
+            dialect: SqlDialect::Generic,
+            allow_names: default_sql_allow_names(),
+            two_part_names: false,
+        }
+    }
+}
+
+impl SqlConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    fn paths_are_default(paths: &[String]) -> bool {
+        paths == default_sql_paths().as_slice()
+    }
+    fn allow_names_are_default(names: &[String]) -> bool {
+        names == default_sql_allow_names().as_slice()
+    }
+}
+
+/// The SQL dialect a model is parsed with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SqlDialect {
+    /// The generic dialect first, then each dialect below in turn.
+    #[default]
+    Generic,
+    Snowflake,
+    Bigquery,
+    Databricks,
+    Postgres,
+}
+
+impl SqlDialect {
+    pub fn is_generic(&self) -> bool {
+        *self == Self::Generic
+    }
 }
 
 // Per-field defaults delegate to each section's `Default`, so omitting a key
@@ -685,6 +799,7 @@ impl Default for Contract {
             secrets: SecretsConfig::default(),
             infrastructure: InfraConfig::default(),
             naming: NamingConfig::default(),
+            sql: SqlConfig::default(),
             frameworks: FrameworkConfig::default(),
             fix: FixConfig::default(),
         }
@@ -951,6 +1066,54 @@ impl Contract {
                         ),
                     );
                 }
+            }
+        }
+
+        // --- sql: path keys stage 1 reads, and allow-list patterns that
+        // leave the rule something to check.
+        for (i, key) in self.sql.paths.iter().enumerate() {
+            let path = format!("sql.paths[{i}]");
+            let line = locate(raw, "paths", key, 0);
+            if SQL_LATER_PATH_KEYS.contains(&key.as_str()) {
+                problem(
+                    path,
+                    line,
+                    format!(
+                        "{key:?} is not read yet: analyses and singular tests are a later \
+                         stage; stage 1 reads {}",
+                        SQL_PATH_KEYS.join(" and ")
+                    ),
+                );
+            } else if !SQL_PATH_KEYS.contains(&key.as_str()) {
+                problem(
+                    path,
+                    line,
+                    format!(
+                        "unknown dbt path key {key:?}; sql.paths accepts {}",
+                        SQL_PATH_KEYS.join(", ")
+                    ),
+                );
+            } else if self.sql.paths[..i].contains(key) {
+                problem(path, line, format!("{key:?} is listed twice"));
+            }
+        }
+        for (i, p) in self.sql.allow_names.iter().enumerate() {
+            let path = format!("sql.allow_names[{i}]");
+            if p.trim().is_empty() {
+                problem(
+                    path,
+                    locate(raw, "allow_names", p, 0),
+                    "an empty pattern matches no name; remove it".into(),
+                );
+            } else if p.chars().all(|c| c == '*') {
+                problem(
+                    path,
+                    locate(raw, "allow_names", p, 0),
+                    format!(
+                        "{p:?} matches every name, which disables the SQL rules; to turn them \
+                         off say so explicitly (`sql.enabled: false`)"
+                    ),
+                );
             }
         }
 
@@ -1373,6 +1536,30 @@ infrastructure:
 #       applies_to: in_scope
 #       pattern: '^[a-z][a-z0-9_]*$'
 #       message: "pipeline entrypoints use snake_case"
+
+# dbt SQL models: the .sql files under each dbt_project.yml's model and
+# snapshot paths, found whatever scan.include says. KV003 applies to them
+# under the infrastructure settings above. false: .sql files are never read,
+# as before 0.14.0.
+sql:
+  enabled: true
+  # The dbt_project.yml path keys whose .sql files are read.
+  paths:
+    - model-paths
+    - snapshot-paths
+  # generic tries the generic dialect, then snowflake, bigquery, databricks
+  # and postgres in turn. Name one of those to parse with it alone.
+  dialect: generic
+  # Dotted names that are the same in every environment, ignoring case.
+  allow_names:
+    - "*.information_schema.*"
+    - "information_schema.*"
+    - "pg_catalog.*"
+    - "snowflake.account_usage.*"
+    - "snowflake.organization_usage.*"
+    - "bigquery-public-data.*"
+  # Also report two-part schema.table names written as literals.
+  two_part_names: false
 
 # Behaviour of `kv-cli fix`.
 fix:
@@ -1867,5 +2054,105 @@ mod tests {
             regex::Regex::new(&p.regex)
                 .unwrap_or_else(|e| panic!("pattern {} failed to compile: {e}", p.name));
         }
+    }
+
+    /// The `sql:` section stays out of the serialized contract at its
+    /// defaults, field by field: adding it moved no fingerprint, and setting
+    /// one field serializes that field alone.
+    #[test]
+    fn sql_section_at_its_defaults_leaves_the_fingerprint_alone() {
+        assert!(Contract::default().sql.is_default());
+        let canonical = serde_yaml::to_string(&Contract::default()).unwrap();
+        assert!(!canonical.contains("sql"), "{canonical}");
+        assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
+
+        let base = fp(BASE);
+        let defaults = [
+            "sql:\n  enabled: true\n",
+            "sql:\n  paths: [model-paths, snapshot-paths]\n",
+            "sql:\n  dialect: generic\n",
+            "sql:\n  allow_names: ['*.information_schema.*', 'information_schema.*', \
+             'pg_catalog.*', 'snowflake.account_usage.*', 'snowflake.organization_usage.*', \
+             'bigquery-public-data.*']\n",
+            "sql:\n  two_part_names: false\n",
+            "sql: {}\n",
+        ];
+        for written in defaults {
+            assert_eq!(base, fp(&format!("{BASE}{written}")), "{written}");
+        }
+
+        let changed = [
+            ("sql:\n  enabled: false\n", "enabled: false"),
+            ("sql:\n  paths: [model-paths]\n", "paths:"),
+            ("sql:\n  dialect: snowflake\n", "dialect: snowflake"),
+            ("sql:\n  allow_names: ['analytics.*']\n", "allow_names:"),
+            ("sql:\n  two_part_names: true\n", "two_part_names: true"),
+        ];
+        for (written, field) in changed {
+            let c = Contract::from_yaml(&format!("{BASE}{written}")).unwrap();
+            assert_ne!(base, c.fingerprint(), "{written}");
+            let yaml = serde_yaml::to_string(&c).unwrap();
+            let section: Vec<&str> = yaml
+                .lines()
+                .skip_while(|l| *l != "sql:")
+                .skip(1)
+                .take_while(|l| l.starts_with("  "))
+                .filter(|l| !l.starts_with("  -") && !l.starts_with("  - "))
+                .collect();
+            assert_eq!(section.len(), 1, "only {field} is serialized: {yaml}");
+            assert!(section[0]
+                .trim_start()
+                .starts_with(field.split(':').next().unwrap()));
+        }
+
+        // The init template writes the section out, at its defaults.
+        assert!(DEFAULT_CONTRACT_YAML.contains("\nsql:\n  enabled: true\n"));
+        let template = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
+        assert!(template.sql.is_default());
+        assert_eq!(template.fingerprint(), "a6edcff00199c1cf");
+    }
+
+    /// Stage 1 reads model and snapshot paths. Analyses and singular tests
+    /// are a later stage, and the error says so rather than ignoring them.
+    #[test]
+    fn sql_paths_accept_model_and_snapshot_paths_only() {
+        let ok = format!("{BASE}sql:\n  paths: [snapshot-paths]\n");
+        assert_eq!(problems(&ok), vec![]);
+
+        let later = format!("{BASE}sql:\n  paths:\n    - model-paths\n    - analysis-paths\n");
+        let p = problems(&later);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].path, "sql.paths[1]");
+        assert!(p[0].message.contains("later stage"), "{}", p[0].message);
+        assert_eq!(p[0].line, Some(10));
+
+        let unknown = format!("{BASE}sql:\n  paths: [macro-paths, model-paths, model-paths]\n");
+        let p = problems(&unknown);
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(
+            p[0].message.contains("unknown dbt path key"),
+            "{}",
+            p[0].message
+        );
+        assert!(p[1].message.contains("listed twice"), "{}", p[1].message);
+    }
+
+    #[test]
+    fn sql_allow_names_must_leave_the_rules_something_to_check() {
+        let p = problems(&format!("{BASE}sql:\n  allow_names: ['*', '']\n"));
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(
+            p[0].message.contains("disables the SQL rules"),
+            "{}",
+            p[0].message
+        );
+        assert!(p[1].message.contains("empty pattern"), "{}", p[1].message);
+    }
+
+    #[test]
+    fn sql_rejects_unknown_keys_and_dialects() {
+        assert!(Contract::from_yaml(&format!("{BASE}sql:\n  enable: false\n")).is_err());
+        let e = Contract::from_yaml(&format!("{BASE}sql:\n  dialect: oracle\n")).unwrap_err();
+        assert!(e.contains("snowflake"), "{e}");
     }
 }

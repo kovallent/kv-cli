@@ -15,6 +15,84 @@ Nothing yet.
 
 ---
 
+## [0.14.0] — 2026-11-19
+
+KV003 for dbt SQL models. **A repository with a dbt project may see new KV003
+warnings in its `.sql` models**; set `sql.enabled: false` to opt out. Contract
+fingerprints, every existing finding's fingerprint, the JSON payload's
+`schema_version` (1) and exit codes are unchanged. The design is
+[`docs/design/sql-models.md`](docs/design/sql-models.md).
+
+This release lifts 0.1.0's known limit, "dbt SQL models are not parsed":
+dbt coverage is now Python models, SQL models (KV003) and YAML credentials.
+
+### Added
+
+- **dbt SQL models are read.** A model is a `.sql` file under the
+  `model-paths` (`source-paths` before dbt 1.0) or `snapshot-paths` of the
+  nearest `dbt_project.yml` above it, up to the repository root, found
+  whatever `scan.include` says. The project's `target-path`,
+  `dbt_packages/` and `dbt_modules/` are never read, and `scan.exclude`
+  still applies.
+  - Jinja isn't rendered. Each tag is replaced by text of the same length,
+    so lines stay exact: `ref()` and `source()` become placeholders,
+    `config()` and statement tags are blanked, only the first branch of an
+    `if` is kept, and a tag that is one quoted string writes that string.
+  - Models are parsed with sqlparser-rs 0.64: the generic dialect, then
+    Snowflake, BigQuery, Databricks and Postgres, or only `sql.dialect` when
+    set.
+- **KV003 rules for SQL**, at `infrastructure.severity`, a warning by
+  default, so nothing gates unless `--strict`:
+  - `three_part_name`: a literal `database.schema.table` relation, anywhere
+    in a query or as the target of `INSERT`, `MERGE`, `UPDATE` or `DELETE`;
+  - `use_warehouse` and `use_database`;
+  - `object_store_uri`: an object-store path written in a `COPY INTO … FROM`
+    or `TO` clause, as the target of an unload (`COPY INTO '<uri>' FROM …`),
+    or in a `LOCATION` clause;
+  - `two_part_name`, a literal `schema.table`, only with
+    `sql.two_part_names: true`.
+
+  Placeholders, names and strings with Jinja in them, CTEs and aliases,
+  table functions, `sql.allow_names` (`information_schema`, `pg_catalog`,
+  Snowflake's account and organisation usage, `bigquery-public-data`),
+  `infrastructure.allow_values` and the `kovallent:allow-infra` marker are
+  never reported. The finding's `symbol` is the model name and its
+  `subject` the pinned thing, so two hardcoded tables in one model are two
+  findings; the same one twice is one finding, its detail listing the other
+  lines.
+- **`sql_not_parsed`**, a new skip reason (additive): a model no dialect
+  parses, or whose Jinja can't be neutralised, is listed in `skipped` with
+  the cause in its detail, and handled like `syntax_error`: a warning that
+  gates under `--strict`. Its tokens are still checked, and those findings
+  say so.
+- **`analysis: sql`** in `run.files` (additive) for a model that parsed.
+  SQL adds nothing to the scope block's function counts, and `--show-clean`
+  reads `clean  SQL model, parsed`.
+- **The `sql:` contract section**: `enabled`, `paths`, `dialect`,
+  `allow_names`, `two_part_names`. Each field is left out of the serialized
+  contract at its default, so no fingerprint moves until you set one.
+  `sql.paths` accepts `model-paths` and `snapshot-paths`; analyses and
+  singular tests are a later stage.
+- `kv-cli fix` rewrites no SQL; it lists each SQL KV003 finding as a
+  `manual:` item saying what to write instead.
+- `samples/dbt_sql/`: a dbt project in SQL with six pinned things across
+  four models and three clean models. `samples/` now reports 31 errors and
+  25 warnings.
+- A CI parse-coverage check over a committed corpus of permissively licensed
+  and synthetic models (`tests/sql_corpus/`), reported per dialect: 13 of
+  16 parse.
+- **Binary size:** the stripped release binary (`lto`, `opt-level = 3`) grows
+  by **+2.93 MB on x86_64 Linux**, from 3.81 MB to 6.74 MB (+77%). That
+  exceeds the design's +2.3 MB estimate, which measured sqlparser-rs alone:
+  the rest is sqlparser-rs's `visitor` feature and the rules themselves.
+
+Stage 1 doesn't check names built or stored in Jinja, hooks, `config()`
+arguments, analyses, singular data tests, `USE SCHEMA` or `USE ROLE`, JDBC
+URLs, object-store paths outside `COPY` and `LOCATION`, credentials in SQL,
+or `.sql` files outside a dbt project.
+
+---
+
 ## [0.13.0] — 2026-11-18
 
 KV003 for Databricks asset bundles. **A repository with a bundle may see new

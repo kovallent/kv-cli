@@ -1,6 +1,6 @@
 [package]
 name = "kv-cli"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "Kovallent parameter-contract linter for Python codebases"
 license = "MIT"
@@ -20,6 +20,11 @@ tree-sitter = "0.26.12"
 tree-sitter-python = "0.25.0"
 sha2 = "0.11.0"
 schemars = "1.2.2"
+# Pinned to one minor version (owner decision 2 in docs/design/sql-models.md):
+# patch releases arrive, a minor upgrade is deliberate. Without the default
+# `recursive-protection`, so no extra crates: the parser's own recursion
+# limit turns deeply nested SQL into a parse error, reported as sql_not_parsed.
+sqlparser = { version = "0.64", default-features = false, features = ["std", "visitor"] }
 
 [profile.release]
 opt-level = 3

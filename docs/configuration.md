@@ -37,7 +37,34 @@ Mistakes in a contract are caught at three points, each before they can quietly 
 
   It takes contract files by name too (`kv-cli contract check svc/.kovallent.yaml`), which is how the `kv-cli-contract` pre-commit hook runs it.
 
-- **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line, or, as a naming pattern, require nothing of a name), a naming rule has no name or shares one, a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled.
+- **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line, or, as a naming pattern, require nothing of a name), a naming rule has no name or shares one, a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled, or `sql.paths` names a key stage 1 doesn't read, or an `sql.allow_names` pattern is empty or matches every name.
+
+## SQL
+
+The `sql:` section says which dbt SQL models are read and how. `KV003` applies to them under the `infrastructure` settings: `enabled`, `severity`, `value_patterns`, `allow_values` and `ignore_marker` work as they do for Python, so `infrastructure.enabled: false` turns SQL `KV003` off too. See [`KV003`](rules/KV003.md#dbt-sql-models) for what is reported.
+
+```yaml
+sql:
+  enabled: true                        # false: .sql files are never read, as before 0.14.0
+  paths: [model-paths, snapshot-paths] # the dbt_project.yml keys whose .sql files are read
+  dialect: generic                     # or snowflake, bigquery, databricks, postgres
+  allow_names:                         # dotted names the same in every environment, ignoring case
+    - "*.information_schema.*"
+    - "information_schema.*"
+    - "pg_catalog.*"
+    - "snowflake.account_usage.*"
+    - "snowflake.organization_usage.*"
+    - "bigquery-public-data.*"
+  two_part_names: false                # true also reports literal schema.table names
+```
+
+- **`enabled`**: models are found through each `dbt_project.yml`, whatever `scan.include` says. `scan.exclude` still applies, and the project's `target-path`, `dbt_packages/` and `dbt_modules/` are never read.
+- **`paths`**: `model-paths` (dbt's `source-paths` before 1.0) and `snapshot-paths`, with dbt's defaults, `models` and `snapshots`. They are the only keys stage 1 accepts; `analysis-paths` and `test-paths` are a later stage, and the contract says so if you list them.
+- **`dialect`**: at `generic`, kv-cli tries the generic dialect and then Snowflake, BigQuery, Databricks and Postgres, using the first that parses. Name one to parse with it alone. A model that none parses is listed as `sql_not_parsed` and checked through its tokens.
+- **`allow_names`**: wildcards over the whole normalised name, where `*` spans dots too. Writing the list replaces the defaults, so keep the ones you still want.
+- **`two_part_names`**: off by default, because a literal schema pins a model only where schemas vary by target, as dbt's `dbt_alice` in dev and `analytics` in prod do.
+
+The section, and each field in it, is left out of the contract's fingerprint at its default, so adding it moved no fingerprint. A field you set is part of the contract: re-pin `--expect-contract` when you set one.
 
 ## How patterns match
 
@@ -64,6 +91,8 @@ infrastructure:
 ```
 
 ## Upgrading
+
+**Upgrading to 0.14.0.** Fingerprints do not change, but a repository with a dbt project may see **new KV003 warnings in its SQL models**. kv-cli now reads the `.sql` files under each `dbt_project.yml`'s model and snapshot paths, and reports a hardcoded three-part relation such as `ANALYTICS_PROD.RAW.ORDERS`, a `USE WAREHOUSE` or `USE DATABASE` statement, and an object-store path in a `COPY INTO` or `LOCATION` clause. They are warnings, so nothing gates unless you run `--strict`. A model that kv-cli can't parse is listed as skipped with reason `sql_not_parsed`, which is also a warning that gates only under `--strict`; its detail says why. Replace a relation with `{{ ref() }}` or `{{ source() }}`, move a `USE` statement's warehouse or database to the dbt target in `profiles.yml`, and pass a path in with `var()` or `env_var()`; `kv-cli fix` lists each one. To opt out, set `sql.enabled: false`; unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
 
 **Upgrading to 0.13.0.** Fingerprints do not change, but a repository with a Databricks asset bundle may see **new KV003 warnings in `databricks.yml`** and in the files its `include:` names. A value outside `targets:` and `variables:` whose key or value names infrastructure, such as a hardcoded `existing_cluster_id` or an `s3://` path in a task parameter, is now reported. They are warnings, so nothing gates unless you run `--strict`. Move the value under `targets:` or into a variable. To opt out, set `infrastructure.bundle_files: false`; unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
 

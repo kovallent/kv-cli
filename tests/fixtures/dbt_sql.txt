@@ -1,0 +1,35 @@
+kv-cli audit  built-in defaults (run `kv-cli init`)  8 files
+  · contract a6edcff00199c1cf
+
+models/ingest/landing_events.sql
+     3  warning  KV003  `s3://acme-prod-lake/events/` is a hardcoded object-store path
+        pass it in with var() or env_var(), so it follows the target
+
+models/ingest/load_orders.sql
+     3  warning  KV003  `s3://acme-prod-landing/orders/` is a hardcoded object-store path
+        pass it in with var() or env_var(), so it follows the target
+
+models/ops/session.sql
+     1  warning  KV003  `USE WAREHOUSE ANALYTICS_PROD_WH` pins the warehouse
+        set the warehouse on the dbt target in profiles.yml
+     2  warning  KV003  `USE DATABASE ANALYTICS_PROD` pins the database
+        set the database on the dbt target in profiles.yml
+
+models/orders.sql
+     7  warning  KV003  `ANALYTICS_PROD.RAW.ORDERS` is a hardcoded three-part name
+        use {{ ref() }} or {{ source() }}, so the name follows the target
+     8  warning  KV003  `ANALYTICS_PROD.RAW.CUSTOMERS` is a hardcoded three-part name
+        use {{ ref() }} or {{ source() }}, so the name follows the target
+
+dbt_project.yml
+        clean  credentials only
+models/admin/table_columns.sql
+        clean  SQL model, parsed
+models/marts/customer_regions.sql
+        clean  SQL model, parsed
+models/staging/stg_orders.sql
+        clean  SQL model, parsed
+
+  · files: 0 failing, 4 warning-only, 4 clean, 0 skipped
+PASS 0 errors, 6 warnings
+run `kv-cli explain KV003` for what a rule checks and how to fix it
