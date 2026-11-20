@@ -884,7 +884,7 @@ fn the_readme_sample_counts_are_true() {
         )
     };
 
-    // `./kv-cli audit --strict samples/        # FAIL 31 errors, 19 warnings`
+    // `./kv-cli audit --strict samples/        # FAIL 31 errors, 25 warnings`
     let readme = std::fs::read_to_string(repo.join("README.md")).unwrap();
     let line = readme
         .lines()
@@ -1601,12 +1601,12 @@ fn samples_text(args: &[&str]) -> (Option<i32>, String) {
 /// same with and without `--strict`.
 #[test]
 fn the_summary_line_on_samples_is_golden() {
-    const SUMMARY: &str = "  · files: 11 failing, 3 warning-only, 4 clean, 0 skipped";
+    const SUMMARY: &str = "  · files: 11 failing, 7 warning-only, 8 clean, 0 skipped";
     for (args, verdict) in [
-        (&[][..], "FAIL 31 errors, 19 warnings"),
+        (&[][..], "FAIL 31 errors, 25 warnings"),
         (
             &["--strict"][..],
-            "FAIL 31 errors, 19 warnings (50 gating under --strict)",
+            "FAIL 31 errors, 25 warnings (56 gating under --strict)",
         ),
     ] {
         let (code, stdout) = samples_text(args);
@@ -1623,7 +1623,7 @@ fn the_summary_line_on_samples_is_golden() {
     }
 }
 
-/// Golden: `--show-clean` on `samples/` lists the four clean files after the
+/// Golden: `--show-clean` on `samples/` lists the eight clean files after the
 /// failing blocks, each with its scope, and never calls one compliant.
 #[test]
 fn show_clean_on_samples_is_golden() {
@@ -1636,11 +1636,19 @@ fn show_clean_on_samples_is_golden() {
         \x20       clean  3 enforced\n\
         configs/.env.example\n\
         \x20       clean  credentials only\n\
+        dbt_sql/dbt_project.yml\n\
+        \x20       clean  credentials only\n\
+        dbt_sql/models/admin/table_columns.sql\n\
+        \x20       clean  SQL model, parsed\n\
+        dbt_sql/models/marts/customer_regions.sql\n\
+        \x20       clean  SQL model, parsed\n\
+        dbt_sql/models/staging/stg_orders.sql\n\
+        \x20       clean  SQL model, parsed\n\
         frameworks/dbt_model.py\n\
         \x20       clean  nothing enforced: 1 framework-exempt\n\
         \n\
-        \x20 · files: 11 failing, 3 warning-only, 4 clean, 0 skipped\n\
-        FAIL 31 errors, 19 warnings\n\
+        \x20 · files: 11 failing, 7 warning-only, 8 clean, 0 skipped\n\
+        FAIL 31 errors, 25 warnings\n\
         run `kv-cli fix` to apply the standard fixes\n\
         run `kv-cli explain KV001` for what a rule checks and how to fix it\n";
     assert!(stdout.ends_with(golden), "{stdout}");

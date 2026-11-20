@@ -1,6 +1,6 @@
 # Design: SQL models
 
-**Status:** ready for owner approval. Every owner decision of 2026-11-19 is recorded below, and each remaining question carries a recommendation that approving this document accepts. Implementation starts only after that approval.
+**Status:** Implemented in 0.14.0.
 **Licence revision:** the owner's licence decisions are applied. Four of the seven Databricks models were replaced with models from MIT and Apache-2.0 projects, and the spike was rerun. Every table in this document comes from that rerun ([Appendix A](#appendix-a-the-30-models)).
 **Scope of this document:** decisions only. No parser, no new dependency and no change under `src/` come with it.
 
@@ -292,6 +292,7 @@ The reasons:
   - **Exception:** a two-part name whose first part is a CTE or table alias in scope is a correlated reference, not a schema. Examples are BigQuery's `from orders o, o.items` and Snowflake's `lateral flatten(input => o.items)`. Only the AST can tell these apart.
 - **`use_warehouse` and `use_database`:** `USE WAREHOUSE …` and `USE DATABASE …`. **In stage 1.**
 - **`object_store_uri`:** an object-store URI written as a string literal in a `COPY INTO … FROM`/`TO` or a `LOCATION` clause. It's matched by the same `object_store_uri` value pattern that Python and bundle files use (`s3://`, `s3a://`, `gs://`, `gcs://`, `abfs(s)://`, `wasb(s)://`). **In stage 1.**
+  - **An unload's target counts too.** In `COPY INTO 's3://acme-prod-exports/orders/' FROM {{ ref('orders') }}` the URI is where the data is written, not a `FROM`/`TO` clause, and it is reported like one: the statement starts with `COPY`, and the string follows `INTO`.
   - **A string containing a Jinja placeholder is templated and skipped.** `'s3://{{ var("bucket") }}/x'` neutralises to `'s3://kv______________/x'`, which would otherwise match. The same goes for `'/Volumes/{{ target.catalog }}/…'`, as in the synthetic streaming model.
 
 **Legitimately literal**
@@ -404,7 +405,7 @@ What this means for the payload:
 ```yaml
 sql:
   enabled: true                       # default (owner decision); false: .sql files are never read, as before
-  paths: [model-paths, snapshot-paths] # default; add analysis-paths or test-paths to opt in
+  paths: [model-paths, snapshot-paths] # default, and the only keys stage 1 accepts; analysis-paths and test-paths are a later stage
   dialect: generic                    # default; snowflake | bigquery | databricks | postgres
   allow_names:                        # default list; matched against the dotted name, ignoring case
     - "*.information_schema.*"

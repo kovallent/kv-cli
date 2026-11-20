@@ -1,0 +1,215 @@
+{
+  "contract_sha256": "a6edcff00199c1cf",
+  "errors": 0,
+  "files": [
+    {
+      "analysis": "credentials_only",
+      "errors": 0,
+      "path": "dbt_project.yml",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "clean",
+      "warnings": 0
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/admin/table_columns.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "clean",
+      "warnings": 0
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/ingest/landing_events.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "warn",
+      "warnings": 1
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/ingest/load_orders.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "warn",
+      "warnings": 1
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/marts/customer_regions.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "clean",
+      "warnings": 0
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/ops/session.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "warn",
+      "warnings": 2
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/orders.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "warn",
+      "warnings": 2
+    },
+    {
+      "analysis": "sql",
+      "errors": 0,
+      "path": "models/staging/stg_orders.sql",
+      "scope": {
+        "functions_exempt_framework": 0,
+        "functions_exempt_user": 0,
+        "functions_in_scope": 0,
+        "functions_out_of_scope": 0,
+        "functions_report_only": 0,
+        "functions_total": 0
+      },
+      "status": "clean",
+      "warnings": 0
+    }
+  ],
+  "files_scanned": 8,
+  "findings": [
+    {
+      "code": "KV003",
+      "detail": "pass it in with var() or env_var(), so it follows the target",
+      "detector": "object_store_uri",
+      "fingerprint": "9faa1f73cb3ce4d5",
+      "key": null,
+      "kind": "hardcoded_infrastructure",
+      "line": 3,
+      "message": "`s3://acme-prod-lake/events/` is a hardcoded object-store path",
+      "path": "models/ingest/landing_events.sql",
+      "severity": "warning",
+      "subject": "s3://acme-prod-lake/events/",
+      "symbol": "landing_events"
+    },
+    {
+      "code": "KV003",
+      "detail": "pass it in with var() or env_var(), so it follows the target",
+      "detector": "object_store_uri",
+      "fingerprint": "3eb757a3da3a8f2c",
+      "key": null,
+      "kind": "hardcoded_infrastructure",
+      "line": 3,
+      "message": "`s3://acme-prod-landing/orders/` is a hardcoded object-store path",
+      "path": "models/ingest/load_orders.sql",
+      "severity": "warning",
+      "subject": "s3://acme-prod-landing/orders/",
+      "symbol": "load_orders"
+    },
+    {
+      "code": "KV003",
+      "detail": "set the warehouse on the dbt target in profiles.yml",
+      "detector": "use_warehouse",
+      "fingerprint": "7ee5ee00e7664323",
+      "key": "ANALYTICS_PROD_WH",
+      "kind": "hardcoded_infrastructure",
+      "line": 1,
+      "message": "`USE WAREHOUSE ANALYTICS_PROD_WH` pins the warehouse",
+      "path": "models/ops/session.sql",
+      "severity": "warning",
+      "subject": "analytics_prod_wh",
+      "symbol": "session"
+    },
+    {
+      "code": "KV003",
+      "detail": "set the database on the dbt target in profiles.yml",
+      "detector": "use_database",
+      "fingerprint": "a1353db5e381ab95",
+      "key": "ANALYTICS_PROD",
+      "kind": "hardcoded_infrastructure",
+      "line": 2,
+      "message": "`USE DATABASE ANALYTICS_PROD` pins the database",
+      "path": "models/ops/session.sql",
+      "severity": "warning",
+      "subject": "analytics_prod",
+      "symbol": "session"
+    },
+    {
+      "code": "KV003",
+      "detail": "use {{ ref() }} or {{ source() }}, so the name follows the target",
+      "detector": "three_part_name",
+      "fingerprint": "803e1305b4fe391a",
+      "key": "ANALYTICS_PROD.RAW.ORDERS",
+      "kind": "hardcoded_infrastructure",
+      "line": 7,
+      "message": "`ANALYTICS_PROD.RAW.ORDERS` is a hardcoded three-part name",
+      "path": "models/orders.sql",
+      "severity": "warning",
+      "subject": "analytics_prod.raw.orders",
+      "symbol": "orders"
+    },
+    {
+      "code": "KV003",
+      "detail": "use {{ ref() }} or {{ source() }}, so the name follows the target",
+      "detector": "three_part_name",
+      "fingerprint": "424c475cee1fe19b",
+      "key": "ANALYTICS_PROD.RAW.CUSTOMERS",
+      "kind": "hardcoded_infrastructure",
+      "line": 8,
+      "message": "`ANALYTICS_PROD.RAW.CUSTOMERS` is a hardcoded three-part name",
+      "path": "models/orders.sql",
+      "severity": "warning",
+      "subject": "analytics_prod.raw.customers",
+      "symbol": "orders"
+    }
+  ],
+  "skipped": [],
+  "warnings": 6
+}

@@ -19,8 +19,13 @@
           "type": "string"
         },
         {
+          "const": "sql",
+          "description": "A dbt SQL model, parsed in full. The scope is always zero: SQL adds\nnothing to the function counts.",
+          "type": "string"
+        },
+        {
           "const": "partial",
-          "description": "A syntax error: audited on a partial parse. Also listed in `skipped`.",
+          "description": "A syntax error, or a SQL model no dialect parses: audited on a\npartial parse or its tokens. Also listed in `skipped`.",
           "type": "string"
         },
         {
@@ -452,11 +457,20 @@
     },
     "SkipReason": {
       "description": "Why a file contributed nothing to `findings`.\n\nTwo different concerns, kept distinct rather than folded into one\nhuman-readable string: a syntax error is a claim about the *code* - the\nfile exists and was read, but only a partial parse was possible, which may\nitself hide findings. An unreadable file is a claim about the *tool run* -\nkv-cli could not open it at all, which is not a matter of degree.",
-      "enum": [
-        "syntax_error",
-        "unreadable"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "syntax_error",
+            "unreadable"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "sql_not_parsed",
+          "description": "A dbt SQL model that no dialect parses, or whose Jinja can't be\nneutralised. Read through its tokens instead; handled like\n`syntax_error`. Usually kv-cli's limit, not the author's syntax.",
+          "type": "string"
+        }
+      ]
     },
     "SkippedFile": {
       "description": "A file that was resolved for scanning but produced no findings because it\nwas not fully analysed. Every resolved file appears either represented in\n`findings` (implicitly, via `files_scanned`) or explicitly here - a file\ncan never simply vanish from the payload.",

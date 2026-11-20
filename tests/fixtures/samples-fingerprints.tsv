@@ -1,0 +1,55 @@
+# Every finding kv-cli 0.13.0 reports on samples/, as built from main before
+# SQL support. tests/sql.rs checks that these fingerprints never move
+# (docs/design/sql-models.md, exit criterion 4). Never regenerate this file
+# to make a test pass: a changed row is a moved fingerprint.
+# path	code	symbol	subject	fingerprint
+bundle/resources/jobs.yml	KV003	resources.jobs.nightly.tasks[0].existing_cluster_id	key_pattern	d57b2eb3882cd1ee
+bundle/resources/jobs.yml	KV003	resources.jobs.nightly.tasks[0].spark_python_task.parameters[1]	object_store_uri	ac5e2fc9956ac9a2
+configs/.env.production	KV002		url_basic_auth	534d8784507aa78a
+configs/.env.production	KV002	DB_PASSWORD	key_pattern	b11181f417230df9
+configs/airflow.cfg	KV002		url_basic_auth	4ac31c583c41eeb2
+configs/airflow.cfg	KV002	fernet_key	key_pattern	7987def6ee82855b
+configs/secrets.toml	KV002	password	key_pattern	ff5672ab1c3d049a
+configs/settings.json	KV002	dbPassword	key_pattern	12372c01696715f6
+credentials.py	KV002		github_token	c9da8dba13a6320a
+credentials.py	KV002	API_TOKEN	key_pattern	f323273702b9007f
+credentials.py	KV002	DB_PASSWORD	key_pattern	ae47bd81d6f477f1
+credentials.py	KV002	db_password	key_pattern	d50340faf6334ce0
+credentials.py	KV002	password	key_pattern	d441cf1fdca5fda3
+credentials.py	KV002	privateKey	key_pattern	7661b7f9cf4a936f
+deploy.py	KV001	deploy_service	dry_run	9a9d5df417b2af64
+deploy.py	KV001	deploy_service	target_environment	3a997e1365e457ab
+deploy.py	KV001	orchestrate	dry_run	f6526db2b4c41fb6
+deploy.py	KV001	orchestrate	target_environment	8a9e3c04f803af29
+deploy.py	KV001	orchestrate_batch	dry_run	0fa107c730e0819b
+deploy.py	KV001	orchestrate_batch	target_environment	b06e4760d58252bd
+deploy.py	KV001	run_migration	dry_run	5e64a948b272844b
+deploy.py	KV001	run_migration	target_environment	bbb6579ab0734441
+deploy.py	KV001	run_upload	dry_run	754d66ebf5bae0fc
+deploy.py	KV001	run_upload	target_environment	53d55bdb57d78793
+deploy.py	KV001	run_with_default	dry_run	66264153fafa53a2
+deploy.py	KV001	run_with_default	target_environment	4144eea2495aaf88
+deploy.py	KV002	AWS_ACCESS_KEY	key_pattern	052fb99afc922f58
+deploy.py	KV002	DB_PASSWORD	key_pattern	4f6e4a6c5511b0b5
+deploy.py	KV002	DB_SECRET	key_pattern	0a771e4b85d2e477
+deploy.py	KV002	api_key	key_pattern	0d588c36b2d2f498
+deploy.py	KV002	api_token	key_pattern	519c4499835f8b9b
+deploy.py	KV002	password	key_pattern	1d433bbd57cfa4af
+deploy.py	KV002	upload_token	key_pattern	7ce4d64092e4056c
+frameworks/airflow_dag.py	KV001	extract_orders	dry_run	2338f293c8dad828
+frameworks/airflow_dag.py	KV001	extract_orders	target_environment	bb477c8a9f72bf9d
+frameworks/airflow_dag.py	KV001	load_to_warehouse	dry_run	2b9af4f3a985e6b4
+frameworks/airflow_dag.py	KV003		object_store_uri	4569666e17f7a6aa
+frameworks/airflow_dag.py	KV003	SNOWFLAKE_CONN_ID	key_pattern	c43b33e8cd99c274
+frameworks/databricks_dlt.py	KV002	databricks_token	key_pattern	89c4dd808cf9d638
+frameworks/databricks_dlt.py	KV003	cluster_id	key_pattern	8e8d4fcbf38560b3
+frameworks/databricks_dlt.py	KV003	workspace_url	key_pattern	351ba284833096e9
+frameworks/flink_job.py	KV003	bootstrap.servers	key_pattern	f8ece9a9a9f8bc49
+frameworks/polars_etl.py	KV003		object_store_uri	0dfddf30d61faa25
+frameworks/profiles.yml	KV002	password	key_pattern	523b5b59b8a088c1
+frameworks/snowpark_proc.py	KV002	password	key_pattern	1006a0c31c19b7b7
+frameworks/snowpark_proc.py	KV003	account	key_pattern	a19c975a78b3292f
+frameworks/snowpark_proc.py	KV003	role	key_pattern	44cdb867d4c9b304
+frameworks/snowpark_proc.py	KV003	warehouse	key_pattern	8e60ee79c5ccf214
+notebooks/exploration.ipynb	KV002		github_token	36547d17fd3e4d7a
+notebooks/exploration.ipynb	KV002	DB_PASSWORD	key_pattern	9e26e859bc660273

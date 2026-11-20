@@ -24,8 +24,9 @@ const SCOPE_KEYS: [&str; 6] = [
 /// - each file's `errors` and `warnings` count its own findings, and its
 ///   `status` follows from them: `fail`, `warn`, else `skipped` when it is in
 ///   `skipped`, else `clean`;
-/// - `analysis` is `partial` exactly for a syntax-error skip and `none`
-///   exactly for an unreadable file;
+/// - `analysis` is `partial` exactly for a syntax-error or `sql_not_parsed`
+///   skip and `none` exactly for an unreadable file, and a SQL model has a
+///   zero scope;
 /// - per file, the four top-level scope categories are disjoint and sum to
 ///   `functions_total`, `report_only` is within `in_scope`, a file not fully
 ///   analysed as Python has a zero scope only when it was read for
@@ -85,13 +86,16 @@ pub fn check_files(payload: &serde_json::Value) {
 
         let analysis = f["analysis"].as_str().unwrap();
         match skipped.get(path) {
-            Some(&"syntax_error") => assert_eq!(analysis, "partial", "{f:#}"),
+            Some(&"syntax_error") | Some(&"sql_not_parsed") => {
+                assert_eq!(analysis, "partial", "{f:#}")
+            }
             Some(&"unreadable") => assert_eq!(analysis, "none", "{f:#}"),
             Some(other) => panic!("unknown skip reason {other}"),
             None => assert!(
                 analysis == "full"
                     || analysis == "credentials_only"
-                    || analysis == "credentials_and_infrastructure",
+                    || analysis == "credentials_and_infrastructure"
+                    || analysis == "sql",
                 "{f:#}"
             ),
         }
@@ -114,6 +118,12 @@ pub fn check_files(payload: &serde_json::Value) {
             "{f:#}"
         );
         if analysis != "full" && analysis != "partial" {
+            assert_eq!(n("functions_total"), 0, "{f:#}");
+        }
+        // SQL adds nothing to the function counts, parsed or not.
+        if path.ends_with(".sql")
+            && (analysis == "sql" || skipped.get(path) == Some(&"sql_not_parsed"))
+        {
             assert_eq!(n("functions_total"), 0, "{f:#}");
         }
         for k in SCOPE_KEYS {

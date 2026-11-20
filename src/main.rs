@@ -11,6 +11,7 @@ mod notebook;
 mod payload;
 mod python;
 mod sarif;
+mod sql;
 mod yamlscan;
 
 use audit::{Engine, Finding, Scope};
@@ -159,7 +160,8 @@ enum Command {
         Each changed file is backed up to <file>.kvbak first. Hardcoded\n\
         parameter defaults and names that break a naming rule (KV004) are\n\
         listed as `manual:` items, never rewritten. Pinned infrastructure\n\
-        (KV003) is never rewritten either.")]
+        (KV003) is never rewritten either; in dbt SQL models it is listed\n\
+        as `manual:` items too.")]
     Fix {
         /// Files or directories to repair.
         #[arg(default_value = ".")]
@@ -728,6 +730,7 @@ fn resolve_targets(
         .canonicalize()
         .unwrap_or_else(|_| project.to_path_buf());
     let mut found = Vec::new();
+    let mut models: Vec<PathBuf> = Vec::new();
     let mut not_followed = 0;
     let mut named_excluded = 0;
     for p in paths {
@@ -737,9 +740,22 @@ fn resolve_targets(
                 continue;
             }
             found.push(p.clone());
+            models.extend(sql::discover::models(
+                engine,
+                std::slice::from_ref(p),
+                &project,
+            ));
         } else if p.is_dir() {
             let c = engine.collect_files(p, &project)?;
-            found.extend(c.files);
+            // dbt models are found through dbt_project.yml, whatever
+            // scan.include says, and listed in order with the folder's files.
+            let m = sql::discover::models(engine, std::slice::from_ref(p), &project);
+            let mut here = c.files;
+            here.extend(m.iter().cloned());
+            here.sort();
+            here.dedup();
+            found.extend(here);
+            models.extend(m);
             not_followed += c.symlinks_not_followed;
         } else {
             return Err(format!("no such file or directory: {}", p.display()));
@@ -766,6 +782,10 @@ fn resolve_targets(
         files,
         symlinks_not_followed: not_followed,
         named_excluded,
+        sql_models: models
+            .iter()
+            .filter_map(|m| m.canonicalize().ok())
+            .collect(),
     })
 }
 
@@ -895,6 +915,7 @@ fn cmd_audit(
         files,
         symlinks_not_followed,
         named_excluded,
+        sql_models,
     } = resolve_targets(&engine, paths, &base)?;
     // A run that checked nothing is unverifiable, and an unverifiable run
     // never passes: "PASS 0 files are compliant" is what a wrong path or a
@@ -921,7 +942,7 @@ fn cmd_audit(
     // left implicit in `files_scanned`. Built from the same outcome that feeds
     // the run's findings, skips and scope, so the two views cannot disagree.
     let mut file_results: Vec<FileResult> = Vec::with_capacity(files.len());
-    for outcome in audit_files(&engine, &base, &files) {
+    for outcome in audit_files(&engine, &base, &files, &sql_models) {
         file_results.push(FileResult::new(
             outcome.path,
             &outcome.findings,
@@ -1027,6 +1048,7 @@ fn audit_file(
     base: &Path,
     file: &Path,
     bundles: &HashSet<PathBuf>,
+    sql_models: &HashSet<PathBuf>,
 ) -> FileOutcome {
     let rel = audit::normalize_path(base, file);
     let src = match read_source_raw(file) {
@@ -1038,6 +1060,9 @@ fn audit_file(
             }
         }
     };
+    if is_sql_model(file, sql_models) {
+        return audit_sql(engine, rel, &src);
+    }
     match file_kind(file) {
         FileKind::Python => {}
         FileKind::Config(kind) => {
@@ -1095,6 +1120,32 @@ fn audit_file(
     }
 }
 
+/// True when `file` is one of the run's dbt SQL models.
+fn is_sql_model(file: &Path, sql_models: &HashSet<PathBuf>) -> bool {
+    !sql_models.is_empty() && file.canonicalize().is_ok_and(|c| sql_models.contains(&c))
+}
+
+/// A dbt SQL model: neutralised and parsed. One no dialect parses is read
+/// through its tokens and skipped as `sql_not_parsed`, like a Python syntax
+/// error: a warning, gating under `--strict`, never clean. SQL adds nothing
+/// to the scope block's function counts (docs/design/sql-models.md,
+/// decision 5).
+fn audit_sql(engine: &Engine, rel: String, src: &str) -> FileOutcome {
+    let model = sql::parse::read(src, engine.contract.sql.dialect);
+    let findings = sql::rules::findings(engine, &rel, src, &model);
+    match model.parse {
+        sql::parse::Parse::Full { .. } => FileOutcome {
+            findings,
+            ..FileOutcome::empty(rel, FileAnalysis::Sql)
+        },
+        sql::parse::Parse::Partial { cause, .. } => FileOutcome {
+            findings,
+            skipped: Some(SkippedFile::sql_not_parsed(rel.clone(), cause)),
+            ..FileOutcome::empty(rel, FileAnalysis::Partial)
+        },
+    }
+}
+
 /// Audit `files` across the machine's cores.
 ///
 /// Parsing dominates a run - profiling puts nearly all of it inside
@@ -1102,7 +1153,12 @@ fn audit_file(
 /// Workers pull the next index from a shared counter, which keeps one huge
 /// file from stalling a pre-assigned batch. Outcomes are returned in input
 /// order, so the output is identical to a sequential run's.
-fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutcome> {
+fn audit_files(
+    engine: &Engine,
+    base: &Path,
+    files: &[PathBuf],
+    sql_models: &HashSet<PathBuf>,
+) -> Vec<FileOutcome> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Which YAML files belong to a Databricks asset bundle depends on the
@@ -1121,7 +1177,7 @@ fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutco
     if workers <= 1 {
         return files
             .iter()
-            .map(|f| audit_file(engine, base, f, bundles))
+            .map(|f| audit_file(engine, base, f, bundles, sql_models))
             .collect();
     }
 
@@ -1137,7 +1193,7 @@ fn audit_files(engine: &Engine, base: &Path, files: &[PathBuf]) -> Vec<FileOutco
                         let Some(file) = files.get(i) else {
                             return done;
                         };
-                        done.push((i, audit_file(engine, base, file, bundles)));
+                        done.push((i, audit_file(engine, base, file, bundles, sql_models)));
                     }
                 })
             })
@@ -1293,6 +1349,7 @@ fn print_text(findings: &[Finding], r: &RunReport) {
     for s in r.skipped {
         let reason = match s.reason {
             payload::SkipReason::SyntaxError => "syntax_error",
+            payload::SkipReason::SqlNotParsed => "sql_not_parsed",
             payload::SkipReason::Unreadable => "unreadable",
         };
         let label = if s.severity.is_error() {
@@ -1477,6 +1534,7 @@ fn clean_scope(f: &FileResult) -> String {
         FileAnalysis::CredentialsAndInfrastructure => {
             return "credentials and infrastructure checked".to_string()
         }
+        FileAnalysis::Sql => return "SQL model, parsed".to_string(),
         FileAnalysis::Partial => return "partial parse".to_string(),
         FileAnalysis::NotRead => return "not read".to_string(),
     }
@@ -1542,12 +1600,13 @@ fn cmd_fix(
 ) -> Result<FixOutcome, String> {
     let root = root_of(paths);
     let (engine, contract_path) = load_engine(config, &root)?;
-    let files = resolve_targets(
+    let audit::Collected {
+        files, sql_models, ..
+    } = resolve_targets(
         &engine,
         paths,
         &project_root(contract_path.as_deref(), paths),
-    )?
-    .files;
+    )?;
 
     println!(
         "{} {}{}",
@@ -1575,6 +1634,24 @@ fn cmd_fix(
                 continue;
             }
         };
+        // SQL is never rewritten: each KV003 finding is listed for a human,
+        // with what to write instead.
+        if is_sql_model(file, &sql_models) {
+            let shown = file.display().to_string();
+            let model = sql::parse::read(&src, engine.contract.sql.dialect);
+            for f in sql::rules::findings(&engine, &shown, &src, &model) {
+                let audit::FindingKind::HardcodedInfrastructure { detector, .. } = &f.kind else {
+                    continue;
+                };
+                skipped.push(format!(
+                    "{shown}:{} {} - {} by hand",
+                    f.line,
+                    f.message,
+                    sql::rules::fix_advice(detector)
+                ));
+            }
+            continue;
+        }
         // Config files and notebooks are never rewritten - the right
         // replacement (`env_var()`, a vault reference, a CI secret, a cleared
         // output) depends on what reads the file - but what `audit` reports
