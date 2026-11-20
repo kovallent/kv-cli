@@ -23,6 +23,9 @@ fingerprints, every existing finding's fingerprint, the JSON payload's
 `schema_version` (1) and exit codes are unchanged. The design is
 [`docs/design/sql-models.md`](docs/design/sql-models.md).
 
+This release lifts 0.1.0's known limit, "dbt SQL models are not parsed":
+dbt coverage is now Python models, SQL models (KV003) and YAML credentials.
+
 ### Added
 
 - **dbt SQL models are read.** A model is a `.sql` file under the
@@ -43,8 +46,9 @@ fingerprints, every existing finding's fingerprint, the JSON payload's
   - `three_part_name`: a literal `database.schema.table` relation, anywhere
     in a query or as the target of `INSERT`, `MERGE`, `UPDATE` or `DELETE`;
   - `use_warehouse` and `use_database`;
-  - `object_store_uri`: an object-store path written in a `COPY INTO` or a
-    `LOCATION` clause;
+  - `object_store_uri`: an object-store path written in a `COPY INTO … FROM`
+    or `TO` clause, as the target of an unload (`COPY INTO '<uri>' FROM …`),
+    or in a `LOCATION` clause;
   - `two_part_name`, a literal `schema.table`, only with
     `sql.two_part_names: true`.
 
@@ -78,8 +82,9 @@ fingerprints, every existing finding's fingerprint, the JSON payload's
   and synthetic models (`tests/sql_corpus/`), reported per dialect: 13 of
   16 parse.
 - **Binary size:** the stripped release binary (`lto`, `opt-level = 3`) grows
-  from 3.81 MB to 6.74 MB on x86_64 Linux (+2.93 MB, +77%), for sqlparser-rs
-  and its visitor.
+  by **+2.93 MB on x86_64 Linux**, from 3.81 MB to 6.74 MB (+77%). That
+  exceeds the design's +2.3 MB estimate, which measured sqlparser-rs alone:
+  the rest is sqlparser-rs's `visitor` feature and the rules themselves.
 
 Stage 1 doesn't check names built or stored in Jinja, hooks, `config()`
 arguments, analyses, singular data tests, `USE SCHEMA` or `USE ROLE`, JDBC
@@ -1267,6 +1272,8 @@ recall.
 
 - `serde_yaml` is pinned at its final `0.9` release and is unmaintained
   upstream. `serde_norway` / `serde_yml` are drop-in replacements.
+- dbt SQL models are not parsed; dbt coverage is Python models plus YAML
+  credentials.
 - The contract fingerprint is truncated to 64 bits — sized for change
   detection, not for resisting a prepared collision. See ADR 0001.
 - Stage-one enforcement has a known hole: anyone with write access can edit the
