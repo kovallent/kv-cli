@@ -181,7 +181,7 @@ Release assets exist for Linux x64 and arm64 (glibc), macOS x64 and arm64, and W
 ```yaml
 # .gitlab-ci.yml
 include:
-  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.14.0
+  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.14.1
     inputs:
       # A group CI/CD variable: merge-request authors cannot edit it.
       expect-contract: $KOVALLENT_CONTRACT_SHA
@@ -215,7 +215,7 @@ To change the job, define a job of the same name: GitLab merges it with the comp
 version: 2.1
 
 orbs:
-  kv-cli: kovallent/kv-cli@0.14.0
+  kv-cli: kovallent/kv-cli@0.14.1
 
 workflows:
   kovallent:

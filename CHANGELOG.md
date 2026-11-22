@@ -11,6 +11,12 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.14.1] — 2026-11-22
+
 ### Fixed
 
 - **A file kv-cli has no reader for is listed, not parsed as Python.** A
