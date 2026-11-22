@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.14.0
+      - uses: kovallent/kv-cli@v0.14.1
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.14.0
+          KV_VERSION: v0.14.1
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -250,7 +250,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.14.0
+    rev: v0.14.1
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -351,7 +351,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.14.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.14.1
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.
