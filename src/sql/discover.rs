@@ -80,7 +80,7 @@ pub fn models(engine: &Engine, paths: &[PathBuf], project: &Path) -> Vec<PathBuf
     out
 }
 
-fn is_sql(path: &Path) -> bool {
+pub fn is_sql(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
 }
@@ -132,6 +132,57 @@ fn walk(
     }
 }
 
+/// Why a `.sql` file is not a dbt model kv-cli reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotModel {
+    /// `sql.enabled: false`.
+    SqlDisabled,
+    /// No `dbt_project.yml` above it, up to the repository root.
+    NoProject,
+    /// Inside `dbt_packages/` or `dbt_modules/`.
+    Package,
+    /// Under the project's `target-path`.
+    Target,
+    /// In a dbt project, but outside its model and snapshot paths.
+    OutsidePaths,
+}
+
+impl NotModel {
+    /// For a skipped file's `detail`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::SqlDisabled => "a .sql file, and sql.enabled is false, so no SQL is read",
+            Self::NoProject => {
+                "not under a dbt project's model or snapshot paths: no dbt_project.yml above it"
+            }
+            Self::Package => {
+                "in an installed dbt package (dbt_packages/ or dbt_modules/), which is never read"
+            }
+            Self::Target => "under the dbt project's target-path, which holds compiled copies",
+            Self::OutsidePaths => "not under a dbt project's model or snapshot paths",
+        }
+    }
+}
+
+/// Why `file`, a `.sql` file named on the command line, is not a model, or
+/// `None` when it is one. `project` is the run's root, as `models` takes it.
+pub fn why_not_model(engine: &Engine, file: &Path, project: &Path) -> Option<NotModel> {
+    let cfg = &engine.contract.sql;
+    if !cfg.enabled {
+        return Some(NotModel::SqlDisabled);
+    }
+    let project = if project.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        project
+    };
+    let project = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    let real = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    model_check(&real, &project, cfg, &mut HashMap::new()).err()
+}
+
 /// True when `real`, a canonical `.sql` path, is a model of the nearest dbt
 /// project above it.
 fn is_model(
@@ -140,8 +191,17 @@ fn is_model(
     cfg: &SqlConfig,
     projects: &mut HashMap<PathBuf, Option<Project>>,
 ) -> bool {
+    model_check(real, scan_root, cfg, projects).is_ok()
+}
+
+fn model_check(
+    real: &Path,
+    scan_root: &Path,
+    cfg: &SqlConfig,
+    projects: &mut HashMap<PathBuf, Option<Project>>,
+) -> Result<(), NotModel> {
     let Some(root) = project_root(real) else {
-        return false;
+        return Err(NotModel::NoProject);
     };
     // Inside an installed package, wherever the package's own project file
     // sits: relative to the scan when the file is inside it, else to the
@@ -154,22 +214,26 @@ fn is_model(
         Component::Normal(n) => PACKAGE_DIRS.iter().any(|p| n == *p),
         _ => false,
     }) {
-        return false;
+        return Err(NotModel::Package);
     }
     let project = projects
         .entry(root.clone())
         .or_insert_with(|| read_project(&root, cfg));
     let Some(project) = project else {
-        return false;
+        return Err(NotModel::OutsidePaths);
     };
     if project
         .target_dir
         .as_ref()
         .is_some_and(|t| real.starts_with(t))
     {
-        return false;
+        return Err(NotModel::Target);
     }
-    project.model_dirs.iter().any(|d| real.starts_with(d))
+    if project.model_dirs.iter().any(|d| real.starts_with(d)) {
+        Ok(())
+    } else {
+        Err(NotModel::OutsidePaths)
+    }
 }
 
 /// The folder of the nearest `dbt_project.yml` above `file`. The search
@@ -503,6 +567,42 @@ mod tests {
             ],
         );
         assert_eq!(found(&engine(""), &dir, &["."]), ["models/m.sql"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.sql` file named outright says why it is not a model, and a model
+    /// says nothing.
+    #[test]
+    fn why_a_named_sql_file_is_not_a_model() {
+        let dir = tree(
+            "why",
+            &[
+                ("loose/q.sql", SQL),
+                ("shop/dbt_project.yml", "name: shop\n"),
+                ("shop/models/m.sql", SQL),
+                ("shop/macros/x.sql", SQL),
+                ("shop/target/compiled/models/m.sql", SQL),
+                ("shop/dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+                ("shop/dbt_packages/pkg/models/p.sql", SQL),
+            ],
+        );
+        let why = |engine: &Engine, rel: &str| why_not_model(engine, &dir.join(rel), &dir);
+        let e = engine("");
+        assert_eq!(why(&e, "shop/models/m.sql"), None);
+        assert_eq!(why(&e, "loose/q.sql"), Some(NotModel::NoProject));
+        assert_eq!(why(&e, "shop/macros/x.sql"), Some(NotModel::OutsidePaths));
+        assert_eq!(
+            why(&e, "shop/target/compiled/models/m.sql"),
+            Some(NotModel::Target)
+        );
+        assert_eq!(
+            why(&e, "shop/dbt_packages/pkg/models/p.sql"),
+            Some(NotModel::Package)
+        );
+        assert_eq!(
+            why(&engine("sql:\n  enabled: false\n"), "shop/models/m.sql"),
+            Some(NotModel::SqlDisabled)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

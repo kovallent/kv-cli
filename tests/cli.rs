@@ -788,11 +788,176 @@ fn scan_exclude_applies_to_named_files() {
     let (code, stdout) = run(&["audit", "tests/fixtures/sample.json"]);
     assert_eq!(code, Some(0), "only an excluded file was named: {stdout}");
 
-    // `scan.include` is still not required of a named file.
-    write(&dir, "notes.txt", "API_TOKEN = \"s3cr3t-production-pw\"\n");
-    let (code, _) = run(&["audit", "notes.txt"]);
-    assert_eq!(code, Some(1));
+    // `scan.include` is still not required of a named file kv-cli reads.
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nscan:\n  include: [\"src/**/*.py\"]\n  exclude: [\"tests/fixtures/**\"]\n",
+    );
+    write(&dir, "deploy.py", "API_TOKEN = \"s3cr3t-production-pw\"\n");
+    let (code, stdout) = run(&["audit", "deploy.py"]);
+    assert_eq!(code, Some(1), "{stdout}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only a `.py` file is ever parsed as Python. A named file kv-cli has no
+/// reader for is listed in `run.files` as `skipped`, with reason
+/// `not_analysed` and a detail naming why: a warning, never clean, never an
+/// error, and it does not gate even under `--strict`. 0.14.0 read these as
+/// Python, so this `.txt` reported KV002 and a `.sql` a false syntax error.
+#[test]
+fn a_named_file_kv_cli_has_no_reader_for_is_not_analysed() {
+    let dir = tempdir("not-analysed");
+    // Each would yield KV002 if it were parsed as Python.
+    let secret = "API_TOKEN = \"s3cr3t-production-pw\"\n";
+    write(&dir, "notes.txt", secret);
+    write(&dir, "stubs.pyi", secret);
+    write(&dir, "Procfile", secret);
+
+    let expected = [
+        (
+            "Procfile",
+            "kv-cli has no reader for files without an extension",
+        ),
+        ("notes.txt", "kv-cli has no reader for .txt files"),
+        ("stubs.pyi", "kv-cli has no reader for .pyi files"),
+    ];
+    let schema_out = Command::new(bin()).arg("schema").output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&schema_out.stdout).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    for strict in [false, true] {
+        let mut args = vec![
+            "audit",
+            "notes.txt",
+            "stubs.pyi",
+            "Procfile",
+            "--format",
+            "json",
+        ];
+        if strict {
+            args.push("--strict");
+        }
+        let out = Command::new(bin())
+            .args(&args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        common::check_payload(&payload);
+        let errors: Vec<String> = validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert_eq!(out.status.code(), Some(0), "strict: {strict}: {payload:#}");
+        assert_eq!(
+            payload["findings"],
+            serde_json::json!([]),
+            "nothing was parsed"
+        );
+        assert_eq!(payload["run"]["files_scanned"], 3);
+        assert_eq!(payload["run"]["contract_sha256"], "a6edcff00199c1cf");
+        for (f, (path, _)) in payload["run"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(expected)
+        {
+            assert_eq!(f["path"], path);
+            assert_eq!(f["status"], "skipped", "never clean: {f:#}");
+            assert_eq!(f["analysis"], "none");
+        }
+        let skipped = payload["run"]["skipped"].as_array().unwrap();
+        let mut got: Vec<(&str, &str, &str, &str)> = skipped
+            .iter()
+            .map(|s| {
+                (
+                    s["path"].as_str().unwrap(),
+                    s["reason"].as_str().unwrap(),
+                    s["severity"].as_str().unwrap(),
+                    s["detail"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        got.sort();
+        let want: Vec<(&str, &str, &str, &str)> = expected
+            .iter()
+            .map(|(p, d)| (*p, "not_analysed", "warning", *d))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    // The text report names it, and the run passes under --strict.
+    let out = Command::new(bin())
+        .args(["audit", "notes.txt", "--strict", "--no-color"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("skipped: notes.txt  not_analysed (warning)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("kv-cli has no reader for .txt files"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("PASS 0 errors, 0 warnings, 1 skipped"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("gating under --strict"), "{stdout}");
+
+    // Next to a real warning, --strict gates on the warning alone.
+    write(
+        &dir,
+        "deploy_job.py",
+        "def deploy_job(target_environment: str = \"dev\"):\n    pass\n",
+    );
+    let out = Command::new(bin())
+        .args([
+            "audit",
+            "notes.txt",
+            "deploy_job.py",
+            "--strict",
+            "--no-color",
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("(1 gating under --strict)"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `fix` never rewrites a file kv-cli has no reader for. 0.14.0 parsed a
+/// named `.txt` as Python and moved its "credential" to `os.environ`.
+#[test]
+fn fix_never_rewrites_a_file_kv_cli_has_no_reader_for() {
+    let dir = tempdir("fix-not-analysed");
+    let text = "API_TOKEN = \"s3cr3t-production-pw\"\n";
+    write(&dir, "notes.txt", text);
+    let out = Command::new(bin())
+        .args(["fix", "notes.txt", "--no-color"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("not analysed: notes.txt (kv-cli has no reader for .txt files)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("OK nothing to fix"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        text
+    );
+    assert!(!dir.join("notes.txt.kvbak").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

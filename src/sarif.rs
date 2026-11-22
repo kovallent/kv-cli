@@ -144,6 +144,7 @@ fn notification(s: &SkippedFile) -> Notification<'_> {
                 SkipReason::SyntaxError => "syntax_error",
                 SkipReason::SqlNotParsed => "sql_not_parsed",
                 SkipReason::Unreadable => "unreadable",
+                SkipReason::NotAnalysed => "not_analysed",
             }),
         },
         locations: [location(&s.path, None)],

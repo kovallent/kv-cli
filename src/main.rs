@@ -362,22 +362,47 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
 
 /// How a file is read. Python gets the full audit; notebooks and config
 /// files are scanned for credentials only, and a Databricks asset bundle's
-/// YAML for pinned infrastructure too. Anything unrecognised - a file named
-/// explicitly on the command line - is read as Python.
+/// YAML for pinned infrastructure too. dbt SQL models are recognised through
+/// `sql::discover`, before this. Anything else - a file named on the command
+/// line, or matched by a custom `scan.include` - has no reader: only a `.py`
+/// file is ever parsed as Python.
 enum FileKind {
     Python,
     Notebook,
     Config(ConfigKind),
+    NoReader,
 }
 
 fn file_kind(path: &Path) -> FileKind {
-    if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
-    {
-        return FileKind::Notebook;
+    let ext = |want: &str| {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(want))
+    };
+    if ext("ipynb") {
+        FileKind::Notebook
+    } else if let Some(kind) = ConfigKind::of(path) {
+        FileKind::Config(kind)
+    } else if ext("py") {
+        FileKind::Python
+    } else {
+        FileKind::NoReader
     }
-    ConfigKind::of(path).map_or(FileKind::Python, FileKind::Config)
+}
+
+/// Why kv-cli has no reader for `file`, for its `not_analysed` detail.
+fn not_analysed_detail(engine: &Engine, file: &Path, project: &Path) -> String {
+    if sql::discover::is_sql(file) {
+        if let Some(why) = sql::discover::why_not_model(engine, file, project) {
+            return why.describe().to_string();
+        }
+    }
+    match file.extension() {
+        Some(e) => format!(
+            "kv-cli has no reader for .{} files",
+            e.to_string_lossy().to_lowercase()
+        ),
+        None => "kv-cli has no reader for files without an extension".to_string(),
+    }
 }
 
 /// The payload schema, generated from the Rust types so it cannot drift.
@@ -969,11 +994,9 @@ fn cmd_audit(
     // Skipped files join on the same terms as findings: their severity is
     // intrinsic (a syntax error is a warning, an unreadable file is always an
     // error), and --strict promotes warnings to gating either way. No file can
-    // pass the gate by virtue of having failed to be analysed.
-    let skip_gating = skipped
-        .iter()
-        .filter(|s| strict || s.severity.is_error())
-        .count();
+    // pass the gate by virtue of having failed to be analysed. A file kv-cli
+    // has no reader for never gates: it isn't broken, just not covered.
+    let skip_gating = skipped.iter().filter(|s| s.gates(strict)).count();
     let gating = if strict { findings.len() } else { errors } + skip_gating;
 
     let fingerprint = engine.contract.fingerprint();
@@ -1051,6 +1074,17 @@ fn audit_file(
     sql_models: &HashSet<PathBuf>,
 ) -> FileOutcome {
     let rel = audit::normalize_path(base, file);
+    let is_model = is_sql_model(file, sql_models);
+    let kind = file_kind(file);
+    // Decided before reading: a file kv-cli has no reader for is never
+    // parsed as anything, so it is listed rather than misread as Python.
+    if !is_model && matches!(kind, FileKind::NoReader) {
+        let why = not_analysed_detail(engine, file, base);
+        return FileOutcome {
+            skipped: Some(SkippedFile::not_analysed(rel.clone(), why)),
+            ..FileOutcome::empty(rel, FileAnalysis::NotRead)
+        };
+    }
     let src = match read_source_raw(file) {
         Ok(src) => src,
         Err(e) => {
@@ -1060,10 +1094,11 @@ fn audit_file(
             }
         }
     };
-    if is_sql_model(file, sql_models) {
+    if is_model {
         return audit_sql(engine, rel, &src);
     }
-    match file_kind(file) {
+    match kind {
+        FileKind::NoReader => unreachable!("listed as not_analysed above"),
         FileKind::Python => {}
         FileKind::Config(kind) => {
             let bundle = bundles.contains(file);
@@ -1351,6 +1386,7 @@ fn print_text(findings: &[Finding], r: &RunReport) {
             payload::SkipReason::SyntaxError => "syntax_error",
             payload::SkipReason::SqlNotParsed => "sql_not_parsed",
             payload::SkipReason::Unreadable => "unreadable",
+            payload::SkipReason::NotAnalysed => "not_analysed",
         };
         let label = if s.severity.is_error() {
             "error".red().bold()
@@ -1478,7 +1514,7 @@ fn print_text(findings: &[Finding], r: &RunReport) {
         // can gate purely on a skipped file even with zero findings, so the
         // note is keyed on `gating`, not on `warnings` alone.
         let gate_note =
-            if r.gating > (r.errors + r.skipped.iter().filter(|s| s.severity.is_error()).count()) {
+            if r.gating > (r.errors + r.skipped.iter().filter(|s| s.gates(false)).count()) {
                 format!(" ({} gating under --strict)", r.gating)
                     .dimmed()
                     .to_string()
@@ -1600,13 +1636,10 @@ fn cmd_fix(
 ) -> Result<FixOutcome, String> {
     let root = root_of(paths);
     let (engine, contract_path) = load_engine(config, &root)?;
+    let base = project_root(contract_path.as_deref(), paths);
     let audit::Collected {
         files, sql_models, ..
-    } = resolve_targets(
-        &engine,
-        paths,
-        &project_root(contract_path.as_deref(), paths),
-    )?;
+    } = resolve_targets(&engine, paths, &base)?;
 
     println!(
         "{} {}{}",
@@ -1625,8 +1658,18 @@ fn cmd_fix(
     // Credentials moved out of source, and the backups that still hold them.
     let mut externalized = 0usize;
     let mut credential_backups: Vec<PathBuf> = Vec::new();
+    // Files kv-cli has no reader for: never parsed, so never rewritten.
+    let mut not_analysed: Vec<String> = Vec::new();
 
     for file in &files {
+        if !is_sql_model(file, &sql_models) && matches!(file_kind(file), FileKind::NoReader) {
+            not_analysed.push(format!(
+                "{} ({})",
+                file.display(),
+                not_analysed_detail(&engine, file, &base)
+            ));
+            continue;
+        }
         let src = match read_source(file) {
             Ok(s) => s,
             Err(e) => {
@@ -1658,6 +1701,7 @@ fn cmd_fix(
         // there must not be answered with "nothing to fix".
         let shown = file.display().to_string();
         let manual = match file_kind(file) {
+            FileKind::NoReader => unreachable!("set aside before reading"),
             FileKind::Python => None,
             FileKind::Config(kind) => Some((
                 // Credentials only: `fix` never rewrites or lists KV003,
@@ -1742,7 +1786,10 @@ fn cmd_fix(
     for s in &skipped {
         println!("  {} {s}", "manual:".yellow().bold());
     }
-    if !skipped.is_empty() {
+    for s in &not_analysed {
+        println!("  {} not analysed: {s}", "\u{b7}".dimmed());
+    }
+    if !skipped.is_empty() || !not_analysed.is_empty() {
         println!();
     }
 

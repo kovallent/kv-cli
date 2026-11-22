@@ -30,7 +30,7 @@
         },
         {
           "const": "none",
-          "description": "The file could not be read at all. Also listed in `skipped`.",
+          "description": "Nothing in the file was checked: it could not be read\n(`unreadable`), or kv-cli has no reader for it (`not_analysed`). Also\nlisted in `skipped`.",
           "type": "string"
         }
       ]
@@ -456,7 +456,7 @@
       "type": "object"
     },
     "SkipReason": {
-      "description": "Why a file contributed nothing to `findings`.\n\nTwo different concerns, kept distinct rather than folded into one\nhuman-readable string: a syntax error is a claim about the *code* - the\nfile exists and was read, but only a partial parse was possible, which may\nitself hide findings. An unreadable file is a claim about the *tool run* -\nkv-cli could not open it at all, which is not a matter of degree.",
+      "description": "Why a file contributed nothing to `findings`.\n\nDifferent concerns, kept distinct rather than folded into one\nhuman-readable string: a syntax error is a claim about the *code* - the\nfile exists and was read, but only a partial parse was possible, which may\nitself hide findings. An unreadable file is a claim about the *tool run* -\nkv-cli could not open it at all, which is not a matter of degree. A file\nnot analysed is a claim about *coverage* - kv-cli was given a file it has\nno reader for, so nothing in it was checked, and nothing is wrong with it.",
       "oneOf": [
         {
           "enum": [
@@ -468,6 +468,11 @@
         {
           "const": "sql_not_parsed",
           "description": "A dbt SQL model that no dialect parses, or whose Jinja can't be\nneutralised. Read through its tokens instead; handled like\n`syntax_error`. Usually kv-cli's limit, not the author's syntax.",
+          "type": "string"
+        },
+        {
+          "const": "not_analysed",
+          "description": "A file kv-cli was given but has no reader for, named on the command\nline or matched by a custom `scan.include`: a `.sql` file that is not\na dbt model, or a file type kv-cli does not read. Nothing in it was\nchecked, and `detail` says why. A warning that never gates, even\nunder `--strict`: the file is not broken, it is outside what kv-cli\ncovers.",
           "type": "string"
         }
       ]
@@ -489,7 +494,7 @@
           "$ref": "#/$defs/SkipReason"
         },
         "severity": {
-          "description": "Whether this counts toward the gate, on the same terms as a finding:\nintrinsic, not altered by `--strict`. A syntax error is a warning by\ndefault - it does not fail CI on day one, matching how KV003 was\nintroduced - and is promoted to gating under `--strict`. An unreadable\nfile is always an error: there is no lenient reading of \"the tool\ncould not check this file\".",
+          "description": "Whether this counts toward the gate, on the same terms as a finding:\nintrinsic, not altered by `--strict`. A syntax error is a warning by\ndefault - it does not fail CI on day one, matching how KV003 was\nintroduced - and is promoted to gating under `--strict`. An unreadable\nfile is always an error: there is no lenient reading of \"the tool\ncould not check this file\". `not_analysed` is the one exception to\n`--strict`: a warning that never gates, because the file is not\nbroken, just not one kv-cli reads.",
           "type": "string"
         }
       },

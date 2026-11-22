@@ -12,11 +12,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Why a file contributed nothing to `findings`.
 ///
-/// Two different concerns, kept distinct rather than folded into one
+/// Different concerns, kept distinct rather than folded into one
 /// human-readable string: a syntax error is a claim about the *code* - the
 /// file exists and was read, but only a partial parse was possible, which may
 /// itself hide findings. An unreadable file is a claim about the *tool run* -
-/// kv-cli could not open it at all, which is not a matter of degree.
+/// kv-cli could not open it at all, which is not a matter of degree. A file
+/// not analysed is a claim about *coverage* - kv-cli was given a file it has
+/// no reader for, so nothing in it was checked, and nothing is wrong with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
@@ -26,6 +28,13 @@ pub enum SkipReason {
     /// `syntax_error`. Usually kv-cli's limit, not the author's syntax.
     SqlNotParsed,
     Unreadable,
+    /// A file kv-cli was given but has no reader for, named on the command
+    /// line or matched by a custom `scan.include`: a `.sql` file that is not
+    /// a dbt model, or a file type kv-cli does not read. Nothing in it was
+    /// checked, and `detail` says why. A warning that never gates, even
+    /// under `--strict`: the file is not broken, it is outside what kv-cli
+    /// covers.
+    NotAnalysed,
 }
 
 /// A file that was resolved for scanning but produced no findings because it
@@ -41,7 +50,9 @@ pub struct SkippedFile {
     /// default - it does not fail CI on day one, matching how KV003 was
     /// introduced - and is promoted to gating under `--strict`. An unreadable
     /// file is always an error: there is no lenient reading of "the tool
-    /// could not check this file".
+    /// could not check this file". `not_analysed` is the one exception to
+    /// `--strict`: a warning that never gates, because the file is not
+    /// broken, just not one kv-cli reads.
     #[serde(serialize_with = "ser_severity")]
     #[schemars(with = "String")]
     pub severity: Severity,
@@ -78,6 +89,27 @@ impl SkippedFile {
             reason: SkipReason::Unreadable,
             severity: Severity::Error,
             detail: Some(detail),
+        }
+    }
+
+    /// A named file kv-cli has no reader for. `why` names what it is, such
+    /// as "not under a dbt project's model or snapshot paths".
+    pub fn not_analysed(path: String, why: String) -> Self {
+        Self {
+            path,
+            reason: SkipReason::NotAnalysed,
+            severity: Severity::Warning,
+            detail: Some(why),
+        }
+    }
+
+    /// Whether this file counts toward the exit code. An error always does
+    /// and a warning does under `--strict`, except `not_analysed`, which
+    /// never does.
+    pub fn gates(&self, strict: bool) -> bool {
+        match self.reason {
+            SkipReason::NotAnalysed => false,
+            _ => strict || self.severity.is_error(),
         }
     }
 }
@@ -119,7 +151,9 @@ pub enum FileAnalysis {
     /// A syntax error, or a SQL model no dialect parses: audited on a
     /// partial parse or its tokens. Also listed in `skipped`.
     Partial,
-    /// The file could not be read at all. Also listed in `skipped`.
+    /// Nothing in the file was checked: it could not be read
+    /// (`unreadable`), or kv-cli has no reader for it (`not_analysed`). Also
+    /// listed in `skipped`.
     #[serde(rename = "none")]
     NotRead,
 }
@@ -364,6 +398,25 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |name: &str| map.get(name).cloned()
+    }
+
+    /// `not_analysed` is a warning that never gates; every other skip gates
+    /// as its severity says, and a warning under `--strict`.
+    #[test]
+    fn a_file_not_analysed_never_gates() {
+        let na = SkippedFile::not_analysed("notes.txt".into(), "why".into());
+        assert_eq!(na.severity, Severity::Warning);
+        assert!(!na.gates(false));
+        assert!(!na.gates(true));
+        let syntax = SkippedFile::syntax_error("a.py".into());
+        assert!(!syntax.gates(false));
+        assert!(syntax.gates(true));
+        let sql = SkippedFile::sql_not_parsed("m.sql".into(), "cause".into());
+        assert!(!sql.gates(false));
+        assert!(sql.gates(true));
+        let unreadable = SkippedFile::unreadable("b.py".into(), "denied".into());
+        assert!(unreadable.gates(false));
+        assert!(unreadable.gates(true));
     }
 
     #[test]
