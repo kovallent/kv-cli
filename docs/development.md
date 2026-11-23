@@ -6,7 +6,16 @@ make check    # fmt --check + clippy -D warnings + tests
 make corpus   # precision/recall report for the labelled corpus
 make bench    # release-build timings for the large generated files
 make demo     # build, then audit samples/ (exits 1 by design)
+make demo-gif # re-record the README's demo GIF (needs asciinema and agg)
 ```
+
+The demo in the README, `docs/media/kv-cli-demo.gif`, is a real recording.
+`docs/media/demo/record.sh` copies `docs/media/demo/project/` into a scratch
+git repository and records `docs/media/demo/session.sh` there with
+[asciinema](https://asciinema.org): each command is typed out, then run, so
+every line of output is kv-cli's own. It then renders the GIF with
+[agg](https://github.com/asciinema/agg). Re-record it when kv-cli's output
+changes; the recording keeps the raw session as `docs/media/kv-cli-demo.cast`.
 
 CI (`.github/workflows/ci.yml`) runs the same gate on every pull request and push to `main`: `cargo fmt --check` and `clippy -D warnings` on Linux, and the full test suite — corpus included — on Linux, macOS and Windows, the platforms the release ships for.
 
