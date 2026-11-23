@@ -5,3 +5,6 @@ created <dir>/.kovallent.yaml
   · framework profiles: dbt, polars, flink, databricks, snowpark, airflow (auto-detected per file)
 
 Next: kv-cli audit
+
+In your editor: the kv-cli extension for VS Code and Cursor shows findings as you save.
+  https://marketplace.visualstudio.com/items?itemName=kovallent.kv-cli-vscode

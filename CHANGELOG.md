@@ -24,6 +24,17 @@ versions may carry breaking changes.
   `schema/contract.v1.json` with the fingerprint its page states, and that
   the examples pin the current release.
 
+### Changed
+
+- **`kv-cli init` and `kv-cli --help` mention the kv-cli editor extension**
+  (`kovallent.kv-cli-vscode`, on the VS Code Marketplace and Open VSX), which
+  shows kv-cli's findings in VS Code and Cursor when a file is saved, using
+  your own kv-cli. `init` ends with one line and the Marketplace link, on
+  stdout; `--help` lists both listings. Nothing else mentions it: not
+  `audit`, `fix` or any other command, not machine output, not `kv-cli mcp`.
+  That run of `init` no longer prints the GitHub star line, so it still makes
+  one prompt.
+
 ### Fixed
 
 - **`@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail` are owned by the

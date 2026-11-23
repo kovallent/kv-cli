@@ -58,20 +58,50 @@ const RULES: [(&str, &str); 4] = [
 const STAR_CTA: &str =
     "If kv-cli caught something useful, a star helps: https://github.com/kovallent/kv-cli";
 
+// Where the kv-cli editor extension is listed: the VS Code Marketplace, for
+// VS Code, and Open VSX, for Cursor. Macros, so `--help` can build its text
+// with `concat!` from the same strings `init` prints.
+macro_rules! extension_marketplace_url {
+    () => {
+        "https://marketplace.visualstudio.com/items?itemName=kovallent.kv-cli-vscode"
+    };
+}
+macro_rules! extension_open_vsx_url {
+    () => {
+        "https://open-vsx.org/extension/kovallent/kv-cli-vscode"
+    };
+}
+
+/// What `init` says about the editor extension: only what it does. It runs
+/// the user's own kv-cli when a file is saved; it installs nothing.
+const EXTENSION_LINE: &str =
+    "In your editor: the kv-cli extension for VS Code and Cursor shows findings as you save.";
+
 #[derive(Parser)]
 #[command(
     name = "kv-cli",
     version,
     about = "Enforce Kovallent parameter contracts across Python codebases",
     long_about = None,
-    after_help = "Exit codes:\n  \
-        0  compliant\n  \
-        1  findings\n  \
-        2  tool error\n  \
-        3  contract drift (see --expect-contract)\n\n\
-        Use with AI agents: `kv-cli mcp` serves these checks to Claude Code, Cursor,\n\
-        VS Code and other MCP clients. Setup:\n  \
-        https://github.com/kovallent/kv-cli/blob/main/docs/mcp.md"
+    after_help = concat!(
+        "Exit codes:\n",
+        "  0  compliant\n",
+        "  1  findings\n",
+        "  2  tool error\n",
+        "  3  contract drift (see --expect-contract)\n",
+        "\n",
+        "In your editor: the kv-cli extension for VS Code and Cursor runs these checks on save.\n",
+        "  VS Code: ",
+        extension_marketplace_url!(),
+        "\n",
+        "  Cursor:  ",
+        extension_open_vsx_url!(),
+        "\n",
+        "\n",
+        "Use with AI agents: `kv-cli mcp` serves these checks to Claude Code, Cursor,\n",
+        "VS Code and other MCP clients. Setup:\n",
+        "  https://github.com/kovallent/kv-cli/blob/main/docs/mcp.md"
+    )
 )]
 struct Cli {
     /// Disable coloured output.
@@ -241,6 +271,8 @@ fn main() -> ExitCode {
     }
 
     let machine_output = emits_machine_output(&cli.command);
+    // `init` ends with its own prompt, the editor extension.
+    let prompted = matches!(cli.command, Command::Init { .. });
     // Set when the run surfaced exposed credentials.
     let mut credentials_warned = false;
 
@@ -293,7 +325,7 @@ fn main() -> ExitCode {
 
     match code {
         Ok(c) => {
-            if shows_star_cta(c, machine_output, credentials_warned) {
+            if shows_star_cta(c, machine_output, credentials_warned, prompted) {
                 eprintln!("{}", STAR_CTA.dimmed());
             }
             ExitCode::from(c)
@@ -327,9 +359,15 @@ fn emits_machine_output(command: &Command) -> bool {
 /// It goes to stderr, so even a CI log that captures it cannot have stdout
 /// corrupted by it. Findings, tool errors and drift are not the moment to ask
 /// for anything - and neither is a run that just told someone to rotate
-/// exposed credentials, even though it exited `0`.
-fn shows_star_cta(code: u8, machine_output: bool, credentials_warned: bool) -> bool {
-    code == EXIT_OK && !machine_output && !credentials_warned
+/// exposed credentials, even though it exited `0`. Nor is a run that already
+/// made a prompt of its own (`init`, about the editor extension): one per run.
+fn shows_star_cta(
+    code: u8,
+    machine_output: bool,
+    credentials_warned: bool,
+    prompted: bool,
+) -> bool {
+    code == EXIT_OK && !machine_output && !credentials_warned && !prompted
 }
 
 fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
@@ -381,6 +419,12 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
             .join(", ")
     );
     println!("\nNext: {}", "kv-cli audit".cyan());
+    // The editor extension, mentioned here and in `--help` only: `init` is run
+    // by a person, once per repository, where audit, fix and the rest run in
+    // CI logs and pre-commit on every commit. It replaces the star line for
+    // this run (see `shows_star_cta`): one prompt is enough.
+    println!("\n{EXTENSION_LINE}");
+    println!("  {}", extension_marketplace_url!().dimmed());
     Ok(EXIT_OK)
 }
 
@@ -2133,15 +2177,30 @@ mod tests {
 
     #[test]
     fn star_cta_only_follows_a_successful_run() {
-        assert!(shows_star_cta(EXIT_OK, false, false));
+        assert!(shows_star_cta(EXIT_OK, false, false, false));
         // Not on findings, tool errors or drift.
         for code in [EXIT_FINDINGS, EXIT_ERROR, EXIT_DRIFT] {
-            assert!(!shows_star_cta(code, false, false), "exit {code}");
+            assert!(!shows_star_cta(code, false, false, false), "exit {code}");
         }
         // Never alongside output meant to be parsed.
-        assert!(!shows_star_cta(EXIT_OK, true, false));
+        assert!(!shows_star_cta(EXIT_OK, true, false, false));
         // Never right after telling someone to rotate exposed credentials.
-        assert!(!shows_star_cta(EXIT_OK, false, true));
+        assert!(!shows_star_cta(EXIT_OK, false, true, false));
+        // Never after a run that made its own prompt: `init`.
+        assert!(!shows_star_cta(EXIT_OK, false, false, true));
+    }
+
+    /// The editor extension stays out of the star line: one prompt per run,
+    /// and only `init` and `--help` mention the extension.
+    #[test]
+    fn the_star_line_is_not_the_extension_prompt() {
+        assert!(!STAR_CTA.contains("kv-cli-vscode"));
+        assert!(!STAR_CTA.contains("extension"));
+        // What the extension does, and no more: no automatic fixing, no
+        // per-keystroke claim, no exclamation marks.
+        for claim in ["fix", "keystroke", "as you type", "!"] {
+            assert!(!EXTENSION_LINE.contains(claim), "{claim}");
+        }
     }
 
     /// The line once claimed a speed that was never measured; keep any

@@ -35,6 +35,9 @@ created ./.kovallent.yaml
 
 Next: kv-cli audit
 
+In your editor: the kv-cli extension for VS Code and Cursor shows findings as you save.
+  https://marketplace.visualstudio.com/items?itemName=kovallent.kv-cli-vscode
+
 $ kv-cli audit --strict samples/deploy.py
 kv-cli audit  .kovallent.yaml  1 file
   · contract 4bc0fc3192e4e992
@@ -219,7 +222,7 @@ Exit codes are a stable interface, and each one is a problem for a different own
 | **2** | Tool error, including "no files to audit" | Whoever operates the gate |
 | **3** | Contract drift (`--expect-contract`) | Whoever owns the contract |
 
-After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json` or `--format sarif`, or after a failing run, and it makes no network call.
+After a successful run in a terminal or CI log, `kv-cli` prints one dimmed line to stderr asking for a GitHub star. It never appears in stdout, alongside `--format json` or `--format sarif`, after a failing run, or after `kv-cli init`, which ends with a pointer to the editor extension instead, and it makes no network call.
 
 ### Stop a pull request from weakening the contract
 
