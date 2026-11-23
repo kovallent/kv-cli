@@ -103,26 +103,35 @@ file may tell it to.
 **An agent may:**
 
 - **audit** files inside the workspace and read the results: the JSON payload that
-  `kv-cli audit --format json` emits, redacted the same way (decision 4);
+  `kv-cli audit --format json` emits, redacted the same way (decision 4), with kv-cli's exit code
+  and verdict. `strict` is an optional argument, off unless given, as `--strict` is for the CLI;
+  the payload's `run.strict` says which applied;
 - **read** the rules (`explain`), the effective contract and its fingerprint (`contract show`),
   the contract's validation problems (`contract check`), the framework profiles, and the payload
-  and contract schemas;
-- **preview a fix**: the changes `kv-cli fix` would make, as a redacted diff with its `manual:`
-  items, and a preview id;
+  and contract schemas. Reading the schemas is allowed, but no schema tool ships yet (see
+  [Tools](#tools));
+- **preview a fix**: a redacted unified diff built from the same fix plan `kv-cli fix` would
+  apply, with its `manual:` items, and a preview id. It is never `fix --dry-run`'s summary lines;
 - **apply a fix**, but only one it has previewed, by that id, to files unchanged since the preview.
 
 How preview and apply fit together:
 
 - **What a preview records.** For each file it would change, a SHA-256 of the file's bytes, plus
-  the contract fingerprint and kv-cli's version. It lives in the server's memory, so it is gone
-  when the process exits, and it can be used at most once.
-- **What apply checks.** Apply plans the fix again and writes only if every recorded file still
-  has its recorded hash, the contract fingerprint is unchanged, and the new plan equals the
-  previewed one. Otherwise it refuses, says why and writes nothing; the agent can preview again.
-- **What apply writes.** Exactly the previewed files, each inside the workspace (decision 5), with
-  `.kvbak` backups as the CLI writes them. It never writes `.kovallent.yaml`, never inserts a
-  suppression marker (`# kovallent:allow-secret`, `# kovallent:allow-infra`) and never touches
-  `scan.exclude`. `kv-cli fix` does none of these either.
+  the contract fingerprint and kv-cli's version.
+- **How long a preview lasts.** A preview is single use, held in the server's memory only, and
+  expires 10 minutes after it is made. A restarted server knows no previews.
+- **What apply checks.** Apply takes only a preview id. It writes only if all of these hold:
+  1. the preview id is known, unused and unexpired;
+  2. every file in the preview still has the SHA-256 recorded at preview time;
+  3. the contract fingerprint is unchanged;
+  4. the fix, planned again, equals the previewed plan.
+
+  Otherwise it refuses, says why and writes nothing, and the agent can preview again.
+- **What apply writes.** Exactly the files and changes in the preview, each inside the workspace
+  (decision 5). Backups (`.kvbak`) behave exactly as they do for `kv-cli fix`. It never writes
+  `.kovallent.yaml`, never inserts a suppression marker (`# kovallent:allow-secret`,
+  `# kovallent:allow-infra`) and never touches `scan.exclude`. `kv-cli fix` does none of these
+  either.
 
 **An agent may never:**
 
@@ -133,11 +142,14 @@ How preview and apply fit together:
 - **Set, change or read back the pinned expected fingerprint.** The pin lives outside the
   repository, in CI (ADR 0001, stage one: an organization variable). No tool takes an expected
   fingerprint, so the server never reports "no drift". It reports the local contract's
-  fingerprint, as `kv-cli contract show` does. Comparing it with the pin is CI's job. In every
-  audit result, `run.contract_expected` is therefore `null` and `run.contract_drift` is `false`,
-  which ADR 0001 defines as "no expectation was supplied", not as "no drift" (open question 6).
+  fingerprint, as `kv-cli contract show` does. Comparing it with the pin is CI's job. So the
+  `audit` tool has no `CONTRACT DRIFT` verdict, and in every audit result `run.contract_expected`
+  is `null` and `run.contract_drift` is `false`. ADR 0001 defines that pair as "no expectation was
+  supplied", not as "no drift". The `audit` tool's description says so, so an agent never reads a
+  result as the gate's.
 - **Declare a check passed.** The verdict is kv-cli's own result, reported as it is: the payload's
-  counts and findings, and the exit code the same `kv-cli audit` would return. The server doesn't
+  counts and findings, the exit code the same `kv-cli audit` would return, and the matching
+  verdict: `PASS` (exit `0`), `FAIL` (exit `1`) or `TOOL ERROR` (exit `2`). The server doesn't
   summarize, soften or re-score it, and no tool waives, baselines, suppresses or acknowledges a
   finding. Whatever an agent says about a local result, the gate is kv-cli's exit code in CI. A
   pull request is never marked passed by anything this server returns.
@@ -169,10 +181,12 @@ Every tool result redacts flagged values exactly as the text output does:
 `value "s3…" (<redacted>, 20 chars)`. It uses the same redaction function as the text, JSON and
 SARIF output, so there is one way a value is shown and one place to get it right.
 
-That includes fix previews. A diff's removed line is where a credential would leak:
-`-DB_PASSWORD = "s3cr3t-production-pw"`. In a preview, every flagged span is redacted on every line,
-whether removed, added or context. So a credential on a line next to a change, one that `fix`
-leaves as a `manual:` item, is redacted too.
+That includes fix previews. A preview is a unified diff, and a diff's removed line is where a
+credential would leak: `-DB_PASSWORD = "s3cr3t-production-pw"`. A removed line that held a flagged
+value shows it redacted, as
+`-DB_PASSWORD = "s3…" (<redacted>, 20 chars)`. Every flagged span is redacted on every line of the
+diff, whether removed, added or context, so a credential on a line next to a change, one that
+`fix` leaves as a `manual:` item, is redacted too.
 
 The rule is general: any text from a scanned file passes through the redactor, keyed on that file's
 findings, before it leaves the server. That covers:
@@ -400,42 +414,53 @@ state nobody saw.
 
 ## Tools
 
-> **Placeholder.** This section is for the tool list from Prompt B: each tool's name and one line
-> on what it does. That list wasn't available when this draft was written (open question 1).
+These seven tools are the whole interface. Each runs the same code as its CLI command, never a
+second implementation, so a tool and its command can't disagree. Each fits decisions 3, 4 and 5,
+and nothing outside this list is exposed. Adding a tool or an argument is an amendment to this ADR.
 
-Until the list is filled in, decision 3 governs what a tool may do. Every tool on the list must fit
-decisions 3, 4 and 5, and nothing outside the list is exposed.
+| Tool | What it does | Annotations |
+| --- | --- | --- |
+| `audit` | Audits the given paths (default: the root) and returns the JSON payload (schema v1) unchanged, plus `exit_code` and `verdict`: `PASS`, `FAIL` or `TOOL ERROR`. Optional `strict`. Its description says it is a local check, not the gate: `contract_expected` is always `null` and `contract_drift` always `false`. | read-only |
+| `explain` | A rule's reference for a code, `KV001` to `KV004`, as `kv-cli explain` prints it. | read-only |
+| `contract_show` | The effective contract, defaults marked, and its fingerprint, as `kv-cli contract show` prints them. | read-only |
+| `contract_check` | Validates the contract and lists each problem with its line, as `kv-cli contract check` does. | read-only |
+| `frameworks` | The built-in framework profiles and what each contributes, as `kv-cli frameworks` lists them. | read-only |
+| `fix_preview` | For the given files, a redacted unified diff built from the fix plan `kv-cli fix` would apply, its `manual:` items and a `preview_id`. | read-only |
+| `fix_apply` | Applies one preview, given only its `preview_id`, under the checks in decision 3. | destructive |
+
+Reading the payload and contract schemas is allowed (decision 3), but no schema tool ships yet.
 
 ## Open questions for the owner
 
-1. **The tool list.** The Tools section is a placeholder for Prompt B's list. Once it is filled
-   in, check each tool against decisions 3 to 5 before this ADR is accepted.
-2. **A configured root.** Roots are deprecated in 2026-07-28. Should `kv-cli mcp` take
-   `--root <dir>`, set in the host's server configuration? The proposed precedence is `--root`
-   when given, then the client's roots, which may only narrow a `--root`, then the working
-   directory.
-3. **A contract above the root.** The proposal reads it, read-only, so an agent is checked against
-   the contract CI uses. The alternative stops discovery at the root and falls back to the built-in
-   defaults. That keeps every read inside the root, but an agent's results could then differ from
-   CI's.
-4. **Strict by default.** The Action runs `--strict` unless told otherwise (`strict` defaults to
-   `'true'` in `action.yml`); the CLI doesn't. Should `audit` default to strict, so an agent sees
-   the verdict CI's default gives, or follow the CLI and take a `strict` argument? Either way, the
-   payload's `run.strict` says which applied.
-5. **Older legacy revisions.** Decision 6 serves `2025-11-25` to legacy clients and answers any
-   other legacy request with it. Should the server also serve older revisions?
-   - `2025-06-18` differs little for a tools-only server.
-   - `2025-03-26` added JSON-RPC batching, which `2025-06-18` removed again.
+Questions 1, 4, 6, 7 and 8 were answered before acceptance. The answers are part of the decisions
+above, and the numbering is kept so references stay valid.
 
-   Which agents the owner wants to support decides it. `rmcp` serves all of them (decision 7).
-6. **The drift fields.** Audit results carry `run.contract_expected: null` and
-   `run.contract_drift: false`, as ADR 0001 defines for a run with no expectation. The proposal
-   keeps the payload as it is: one payload, one schema. The alternative leaves the two fields out
-   of MCP results, so `false` can't be misread as "verified".
-7. **Backups on apply.** The proposal writes `.kvbak` backups as the CLI does, so `fix` behaves the
-   same everywhere. The alternative skips them, since the preview already showed the change and git
-   holds the original.
-8. **Preview lifetime.** The proposal is single use, for the life of the process. Should a preview
-   also expire after a set time?
-9. **Release and docs.** Which release ships `kv-cli mcp`, whether it is labelled experimental at
-   first, and which hosts get a configuration snippet in the docs.
+**Answered:**
+
+- **1. The tool list.** The seven tools in [Tools](#tools).
+- **4. Strict by default.** No: `strict` is an optional `audit` argument, off unless given, as for the
+  CLI. The payload's `run.strict` says which applied.
+- **6. The drift fields.** The payload stays as it is. In a tool result `run.contract_expected` is
+  always `null` and `run.contract_drift` always `false`, there is no `CONTRACT DRIFT` verdict, and
+  the `audit` tool's description says the result is not the gate.
+- **7. Backups on apply.** `.kvbak` backups behave exactly as they do for `kv-cli fix`.
+- **8. Preview lifetime.** Single use, in memory only, and expired 10 minutes after it is made.
+
+**Still open:**
+
+- **2. A configured root.** Roots are deprecated in 2026-07-28. Should `kv-cli mcp` take
+  `--root <dir>`, set in the host's server configuration? The proposed precedence is `--root`
+  when given, then the client's roots, which may only narrow a `--root`, then the working
+  directory.
+- **3. A contract above the root.** The proposal reads it, read-only, so an agent is checked against
+  the contract CI uses. The alternative stops discovery at the root and falls back to the built-in
+  defaults. That keeps every read inside the root, but an agent's results could then differ from
+  CI's.
+- **5. Older legacy revisions.** Decision 6 serves `2025-11-25` to legacy clients and answers any
+  other legacy request with it. Should the server also serve older revisions?
+  - `2025-06-18` differs little for a tools-only server.
+  - `2025-03-26` added JSON-RPC batching, which `2025-06-18` removed again.
+
+  Which agents the owner wants to support decides it. `rmcp` serves all of them (decision 7).
+- **9. Release and docs.** Which release ships `kv-cli mcp`, whether it is labelled experimental at
+  first, and which hosts get a configuration snippet in the docs.
