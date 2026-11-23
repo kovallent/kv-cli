@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.16.0
+      - uses: kovallent/kv-cli@v0.16.1
         with:
           # The contract's fingerprint (`kv-cli contract show` prints it),
           # stored as an organization variable so a pull request can't edit

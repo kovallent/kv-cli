@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.16.0
+      - uses: kovallent/kv-cli@v0.16.1
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -44,12 +44,12 @@ Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your cont
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@v0.16.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.16.1` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # v0.16.0
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.16.1
         with:
-          version: v0.16.0
+          version: v0.16.1
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 
@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.16.0
+      - uses: kovallent/kv-cli@v0.16.1
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 
@@ -146,7 +146,7 @@ jobs:
       # the step above already decided the job's result.
       - name: kv-cli SARIF
         if: always()
-        run: pipx run --spec kv-cli==0.16.0 kv-cli audit --format sarif > kv-cli.sarif || true
+        run: pipx run --spec kv-cli==0.16.1 kv-cli audit --format sarif > kv-cli.sarif || true
 
       - name: Upload to code scanning
         if: always()
@@ -181,7 +181,7 @@ Release assets exist for Linux x64 and arm64 (glibc), macOS x64 and arm64, and W
 ```yaml
 # .gitlab-ci.yml
 include:
-  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.16.0
+  - component: gitlab.com/kovallent/kv-cli/kv-cli@0.16.1
     inputs:
       # A group CI/CD variable: merge-request authors cannot edit it.
       expect-contract: $KOVALLENT_CONTRACT_SHA
@@ -215,7 +215,7 @@ To change the job, define a job of the same name: GitLab merges it with the comp
 version: 2.1
 
 orbs:
-  kv-cli: kovallent/kv-cli@0.16.0
+  kv-cli: kovallent/kv-cli@0.16.1
 
 workflows:
   kovallent:

@@ -11,6 +11,17 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.16.1] — 2026-11-23
+
+Contract presets for Airflow, dbt and Databricks, the editor extension named
+in `kv-cli init` and `--help`, and two fixes. Contract fingerprints, every
+finding's fingerprint, the JSON payload (`schema_version` 1) and the exit
+codes are as in 0.16.0.
+
 ### Added
 
 - **Standards: copy-pasteable contract presets** in
