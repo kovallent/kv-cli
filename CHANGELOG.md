@@ -15,6 +15,46 @@ Nothing yet.
 
 ---
 
+## [0.16.0] — 2026-11-23
+
+`kv-cli mcp`: kv-cli's checks for AI coding agents, over the Model Context
+Protocol ([ADR 0006](docs/adr/0006-mcp-server.md)). Nothing else changes: the
+CLI's output, every fingerprint, the JSON payload (`schema_version` 1) and the
+exit codes are as in 0.15.0. Setup for Claude Code, Cursor and VS Code is in
+[docs/mcp.md](docs/mcp.md).
+
+### Added
+
+- **`kv-cli mcp`, a local MCP server.** It runs as a subcommand of the same
+  binary, over stdin and stdout, with no network, no listening socket and no
+  account. It speaks MCP 2026-07-28 and answers clients that open with the
+  2025-11-25 `initialize` handshake. It is hand-written, with no new
+  dependencies.
+- **Seven tools, each running the same code as its CLI command:**
+  - `audit` returns the JSON payload unchanged, plus `exit_code` and
+    `verdict` (`PASS`, `FAIL` or `TOOL ERROR`). Findings are a normal result;
+    only a tool error, a refused path or an invalid argument sets `isError`.
+    It takes no expected fingerprint: a result is a local check, not the
+    gate, and says so.
+  - `explain`, `contract_show`, `contract_check` and `frameworks` return what
+    their commands print, without colour.
+  - `fix_preview` returns a unified diff built from `fix`'s own plan, with
+    every flagged value redacted, the `manual:` items, and a `preview_id`.
+  - `fix_apply` applies that preview once, within 10 minutes. It refuses
+    unless every file is unchanged since the preview, the contract
+    fingerprint is the same, and the fix planned again matches. Backups
+    behave as for `kv-cli fix`, and it never touches `.kovallent.yaml`.
+- **Boundaries an agent can't cross:**
+  - no tool edits the contract, runs `init`, or sets or reads the pinned
+    fingerprint;
+  - every result redacts credentials as the terminal output does;
+  - every path must resolve inside the workspace (the client's roots, or the
+    working directory) after `..` and symbolic links, or it is refused.
+- **`kv-cli --help` links to the new docs**, and the README has a "Use with
+  AI agents" section.
+
+---
+
 ## [0.15.0] — 2026-11-23
 
 Opt-in secret detector set 2. **Existing repositories keep their behaviour and

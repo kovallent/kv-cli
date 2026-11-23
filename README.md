@@ -169,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.15.0
+      - uses: kovallent/kv-cli@v0.16.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -195,7 +195,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.15.0
+          KV_VERSION: v0.16.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -246,12 +246,24 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 
 ---
 
+## Use with AI agents
+
+`kv-cli mcp` serves kv-cli's checks to AI coding agents over the [Model Context Protocol](https://modelcontextprotocol.io), as tools: `audit`, `explain`, `contract_show`, `contract_check`, `frameworks`, `fix_preview` and `fix_apply`. It is the same binary, so the agent runs the same rules as CI. It runs locally over stdin and stdout, with no network. In Claude Code:
+
+```bash
+claude mcp add --transport stdio kv-cli -- kv-cli mcp
+```
+
+An agent can audit, read the rules and the contract, and preview a fix, then apply that preview. It can't edit the contract, read the fingerprint pinned in CI or declare a check passed, and every result redacts credentials, fix diffs included. [docs/mcp.md](docs/mcp.md) has the setup for Claude Code, Cursor and VS Code, what each tool returns and why an agent's reach stops where it does.
+
+---
+
 ## Pre-commit
 
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.15.0
+    rev: v0.16.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -293,6 +305,7 @@ A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It 
 | `kv-cli contract schema` | Print the JSON Schema for `.kovallent.yaml`, for editor validation. |
 | `kv-cli frameworks` | Show the built-in framework profiles and what each contributes. |
 | `kv-cli schema` | Print the JSON Schema of the `--format json` payload. |
+| `kv-cli mcp` | Serve these checks to AI coding agents over MCP, on stdin and stdout. See [docs/mcp.md](docs/mcp.md). |
 
 Every command takes `--help`, with examples.
 
@@ -345,6 +358,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 - [CI](docs/ci.md): the GitHub Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF, and the GitLab CI/CD component and CircleCI orb.
 - [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
 - [JSON payload](docs/json-payload.md): the `--format json` schema.
+- [AI agents (MCP)](docs/mcp.md): `kv-cli mcp`, its tools, client setup, and what an agent can't do.
 - [How it works](docs/how-it-works.md): the AST scanner, config scanners and what `fix` changes.
 - [Development](docs/development.md): building, testing and the labelled corpus.
 - [Architecture decisions](docs/adr/) and the [changelog](CHANGELOG.md).
@@ -352,7 +366,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.15.0
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.16.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.
