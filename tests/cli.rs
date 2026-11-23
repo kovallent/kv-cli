@@ -305,6 +305,162 @@ fn star_cta_follows_a_passing_run_on_stderr() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const EXTENSION_SENTENCE: &str =
+    "In your editor: the kv-cli extension for VS Code and Cursor shows findings as you save.";
+const EXTENSION_MARKETPLACE: &str =
+    "https://marketplace.visualstudio.com/items?itemName=kovallent.kv-cli-vscode";
+const EXTENSION_OPEN_VSX: &str = "https://open-vsx.org/extension/kovallent/kv-cli-vscode";
+
+/// `init` is run by a person, once: it mentions the editor extension once, on
+/// stdout, after `Next:` - and that is its one prompt, so no star line.
+#[test]
+fn init_mentions_the_editor_extension_once() {
+    let dir = tempdir("init-extension");
+    let (code, stdout, stderr) = audit_streams(&dir, &["init", "--no-color"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout.matches(EXTENSION_SENTENCE).count(), 1, "{stdout}");
+    assert_eq!(stdout.matches(EXTENSION_MARKETPLACE).count(), 1, "{stdout}");
+    assert_eq!(stdout.matches("kv-cli-vscode").count(), 1, "{stdout}");
+    let next = stdout.find("Next: kv-cli audit").expect("the Next line");
+    assert!(stdout.find(EXTENSION_SENTENCE).unwrap() > next, "{stdout}");
+    assert!(
+        stdout.ends_with(&format!(
+            "{EXTENSION_SENTENCE}\n  {EXTENSION_MARKETPLACE}\n"
+        )),
+        "{stdout}"
+    );
+    assert!(!stderr.contains("kv-cli-vscode"), "{stderr}");
+    assert!(!stderr.contains("a star helps") && !stdout.contains("a star helps"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The top-level help lists both listings, VS Code's and Cursor's.
+#[test]
+fn help_lists_the_editor_extension() {
+    for flag in ["--help", "-h"] {
+        let out = Command::new(bin()).arg(flag).output().unwrap();
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            help.contains(
+                "In your editor: the kv-cli extension for VS Code and Cursor runs these checks on save."
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains(&format!("VS Code: {EXTENSION_MARKETPLACE}")),
+            "{help}"
+        );
+        assert!(
+            help.contains(&format!("Cursor:  {EXTENSION_OPEN_VSX}")),
+            "{help}"
+        );
+        // After the exit codes, before the AI agents block.
+        let at = help.find("In your editor").unwrap();
+        assert!(help.find("3  contract drift").unwrap() < at, "{help}");
+        assert!(at < help.find("Use with AI agents").unwrap(), "{help}");
+    }
+}
+
+/// Everything that runs in CI logs and pre-commit - every other command, in
+/// every format, passing or failing - stays free of the extension, on both
+/// streams. So does `kv-cli mcp`.
+#[test]
+fn the_editor_extension_is_mentioned_nowhere_else() {
+    let dir = tempdir("no-extension");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::copy(repo.join("samples/deploy.py"), dir.join("deploy.py")).unwrap();
+    write(
+        &dir,
+        "clean.py",
+        "def deploy_x(name, target_environment: str = \"dev\", dry_run: bool = False):\n    return name\n",
+    );
+    let invalid = dir.join("invalid");
+    std::fs::create_dir_all(&invalid).unwrap();
+    write(
+        &invalid,
+        ".kovallent.yaml",
+        "version: 1\nsecrets:\n  detectors: 3\n",
+    );
+
+    let runs: &[&[&str]] = &[
+        &["audit", "deploy.py"],
+        &["audit", "clean.py"],
+        &["audit", "deploy.py", "--format", "json"],
+        &["audit", "clean.py", "--format", "json"],
+        &["audit", "deploy.py", "--format", "sarif"],
+        &["audit", "clean.py", "--format", "sarif"],
+        &["audit", "--strict", "."],
+        &["schema"],
+        &["explain"],
+        &["explain", "KV002"],
+        &["explain", "KV999"],
+        &["frameworks"],
+        &["contract", "show"],
+        &["contract", "check"],
+        &["contract", "schema"],
+        &["contract", "check", "invalid/.kovallent.yaml"],
+        &["fix", "--dry-run", "deploy.py"],
+        &["fix", "deploy.py"],
+        &["fix", "clean.py"],
+        // An init that fails - the contract exists - prints no prompt either.
+        &["init", "--path", "invalid"],
+    ];
+    let mut codes = Vec::new();
+    for args in runs {
+        let (code, stdout, stderr) = audit_streams(&dir, args);
+        codes.push(code);
+        assert!(
+            !stdout.contains("kv-cli-vscode"),
+            "{args:?} stdout: {stdout}"
+        );
+        assert!(
+            !stderr.contains("kv-cli-vscode"),
+            "{args:?} stderr: {stderr}"
+        );
+        assert!(!stdout.contains("In your editor"), "{args:?}: {stdout}");
+    }
+    // The runs above passed, failed and errored, so every outcome is covered.
+    for want in [0, 1, 2] {
+        assert!(
+            codes.contains(&Some(want)),
+            "no run exited {want}: {codes:?}"
+        );
+    }
+
+    // An MCP session: initialize, list, and call tools.
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        for msg in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"audit","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"explain","arguments":{"code":"KV001"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"frameworks","arguments":{}}}"#,
+        ] {
+            writeln!(stdin, "{msg}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(stdout.lines().count(), 5, "five responses: {stdout}");
+    assert!(!stdout.contains("kv-cli-vscode"), "mcp stdout: {stdout}");
+    assert!(!stderr.contains("kv-cli-vscode"), "mcp stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A failing run is not the moment to ask for a star.
 #[test]
 fn star_cta_does_not_follow_findings() {
