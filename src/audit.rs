@@ -30,6 +30,10 @@ pub enum FindingKind {
         detector: String,
         /// The assignment target, when the finding came from a name rule.
         key: Option<String>,
+        /// The literal itself, for scrubbing outputs; never serialized.
+        #[serde(skip)]
+        #[schemars(skip)]
+        flagged: Flagged,
     },
     /// An environment-specific identifier written into the source.
     HardcodedInfrastructure {
@@ -42,6 +46,57 @@ pub enum FindingKind {
         /// The naming rule's `name`.
         rule: String,
     },
+}
+
+/// What a KV002 finding flagged, kept so that anything built from a scanned
+/// file can be scrubbed of it before it leaves kv-cli - the MCP server's fix
+/// previews above all (ADR 0006, decision 4).
+///
+/// Never serialized, and its `Debug` output is redacted, so a finding printed
+/// in a panic or a test failure doesn't leak it either.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Flagged {
+    /// The value as the detector read it: a concatenation's parts joined.
+    pub text: String,
+    /// The whole literal's byte range in the audited source, quotes
+    /// included, when the finding has one.
+    pub span: Option<Range<usize>>,
+    /// Each part of an implicit concatenation as written; empty for a single
+    /// literal.
+    pub parts: Vec<String>,
+}
+
+impl std::fmt::Debug for Flagged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Flagged(<redacted>)")
+    }
+}
+
+impl Flagged {
+    fn of(text: &str, span: Option<Range<usize>>) -> Self {
+        Self {
+            text: text.trim().to_string(),
+            span,
+            parts: Vec::new(),
+        }
+    }
+
+    /// A Python string literal: its joined text, its span, and its parts
+    /// when there is more than one.
+    fn literal(lit: &python::StringLiteral, source: &str) -> Self {
+        Self {
+            text: lit.text(source).trim().to_string(),
+            span: Some(lit.span.clone()),
+            parts: if lit.parts.len() > 1 {
+                lit.parts
+                    .iter()
+                    .map(|p| source[p.clone()].to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -615,6 +670,7 @@ impl Engine {
                 kind: FindingKind::HardcodedSecret {
                     detector: "key_pattern".into(),
                     key: Some(scalar.key.clone()),
+                    flagged: Flagged::of(&value, None),
                 },
             });
         }
@@ -832,6 +888,7 @@ impl Engine {
                     kind: FindingKind::HardcodedSecret {
                         detector: name.clone(),
                         key: None,
+                        flagged: Flagged::of(mat.as_str(), Some(mat.range())),
                     },
                 });
             }
@@ -1306,6 +1363,7 @@ impl FileContext<'_> {
                 kind: FindingKind::HardcodedSecret {
                     detector: "key_pattern".into(),
                     key: Some(b.key.clone()),
+                    flagged: Flagged::literal(&b.value, source),
                 },
             });
         }
@@ -1342,6 +1400,7 @@ impl FileContext<'_> {
                     kind: FindingKind::HardcodedSecret {
                         detector: name.clone(),
                         key: None,
+                        flagged: Flagged::of(mat.as_str(), Some(mat.range())),
                     },
                 });
             }
@@ -1413,6 +1472,10 @@ impl FileContext<'_> {
                 kind: FindingKind::HardcodedSecret {
                     detector: name.clone(),
                     key: None,
+                    flagged: Flagged {
+                        text: mat.as_str().trim().to_string(),
+                        ..Flagged::literal(lit, source)
+                    },
                 },
             });
         }

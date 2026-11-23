@@ -435,25 +435,22 @@ fn cmd_contract_schema() -> Result<u8, String> {
 }
 
 /// The contract a `contract` subcommand works on: the one named, or the
-/// nearest found from here up. `None` means the built-in defaults apply.
-fn contract_file(explicit: Option<&Path>) -> Result<Option<PathBuf>, String> {
+/// nearest found from `start` up. `None` means the built-in defaults apply.
+fn contract_file(explicit: Option<&Path>, start: &Path) -> Result<Option<PathBuf>, String> {
     match explicit {
         Some(p) if p.is_file() => Ok(Some(p.to_path_buf())),
         Some(p) => Err(format!("contract not found: {}", p.display())),
-        None => Ok(Contract::discover(Path::new("."))),
+        None => Ok(Contract::discover(start)),
     }
 }
 
 /// Parse and validate `path`, as `audit` would - but report every problem as
-/// `file:line: field: message` on stdout instead of stopping at the first.
-/// `Err` carries the exit code once the problems are printed.
-fn checked_contract(path: &Path) -> Result<(String, Contract), u8> {
+/// `file:line: field: message` instead of stopping at the first. `Err` holds
+/// the report, one line each, ending with how many problems there were.
+fn checked_contract(path: &Path) -> Result<(String, Contract), String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(e) => {
-            println!("{}: cannot read: {e}", path.display());
-            return Err(EXIT_ERROR);
-        }
+        Err(e) => return Err(format!("{}: cannot read: {e}\n", path.display())),
     };
     let contract = match Contract::from_yaml(&raw) {
         Ok(c) => c,
@@ -463,26 +460,31 @@ fn checked_contract(path: &Path) -> Result<(String, Contract), u8> {
                 Some((m, rest)) => (m.to_string(), rest.split_whitespace().next()),
                 None => (e.clone(), None),
             };
-            match line {
-                Some(l) => println!("{}:{l}: {message}", path.display()),
-                None => println!("{}: {message}", path.display()),
-            }
-            println!("{} problem in {}", "1".red().bold(), path.display());
-            return Err(EXIT_ERROR);
+            let located = match line {
+                Some(l) => format!("{}:{l}: {message}", path.display()),
+                None => format!("{}: {message}", path.display()),
+            };
+            return Err(format!(
+                "{located}\n{} problem in {}\n",
+                "1".red().bold(),
+                path.display()
+            ));
         }
     };
     let problems = contract.validate(Some(&raw));
     if !problems.is_empty() {
+        let mut report = String::new();
         for p in &problems {
-            println!("{}", p.render(path));
+            report.push_str(&p.render(path));
+            report.push('\n');
         }
-        println!(
-            "{} problem{} in {}",
+        report.push_str(&format!(
+            "{} problem{} in {}\n",
             problems.len().to_string().red().bold(),
             if problems.len() == 1 { "" } else { "s" },
             path.display()
-        );
-        return Err(EXIT_ERROR);
+        ));
+        return Err(report);
     }
     Ok((raw, contract))
 }
@@ -491,16 +493,30 @@ fn checked_contract(path: &Path) -> Result<(String, Contract), u8> {
 /// and fail if any is invalid. Every file is checked and reported, so one
 /// run lists every problem in every changed contract.
 fn cmd_contract_check(files: &[PathBuf], config: Option<&Path>) -> Result<u8, String> {
+    let (report, code) = contract_check_output(files, config, Path::new("."))?;
+    print!("{report}");
+    Ok(code)
+}
+
+/// What `kv-cli contract check` prints, and its exit code: 0 when every
+/// contract is valid, 2 when any is not.
+fn contract_check_output(
+    files: &[PathBuf],
+    config: Option<&Path>,
+    start: &Path,
+) -> Result<(String, u8), String> {
     let targets: Vec<PathBuf> = if files.is_empty() {
-        match contract_file(config)? {
+        match contract_file(config, start)? {
             Some(path) => vec![path],
             None => {
-                println!(
-                    "no {CONTRACT_FILE} found from here up; the built-in defaults apply \
-                     (fingerprint {}) - run `kv-cli init` to write one",
-                    Contract::default().fingerprint()
-                );
-                return Ok(EXIT_OK);
+                return Ok((
+                    format!(
+                        "no {CONTRACT_FILE} found from here up; the built-in defaults apply \
+                         (fingerprint {}) - run `kv-cli init` to write one\n",
+                        Contract::default().fingerprint()
+                    ),
+                    EXIT_OK,
+                ));
             }
         }
     } else {
@@ -512,36 +528,52 @@ fn cmd_contract_check(files: &[PathBuf], config: Option<&Path>) -> Result<u8, St
         files.to_vec()
     };
     let mut code = EXIT_OK;
+    let mut report = String::new();
     for path in &targets {
         match checked_contract(path) {
-            Ok((_, contract)) => println!(
-                "{} {} is valid \u{b7} fingerprint {}",
+            Ok((_, contract)) => report.push_str(&format!(
+                "{} {} is valid \u{b7} fingerprint {}\n",
                 "\u{2713}".green().bold(),
                 path.display(),
                 contract.fingerprint().bold()
-            ),
-            Err(c) => code = c,
+            )),
+            Err(problems) => {
+                report.push_str(&problems);
+                code = EXIT_ERROR;
+            }
         }
     }
-    Ok(code)
+    Ok((report, code))
 }
 
 fn cmd_contract_show(config: Option<&Path>) -> Result<u8, String> {
-    let (source, raw, contract) = match contract_file(config)? {
+    let (shown, code) = contract_show_output(config, Path::new("."))?;
+    print!("{shown}");
+    Ok(code)
+}
+
+/// What `kv-cli contract show` prints, and its exit code: the effective
+/// contract with its fingerprint, or the problems that stop it loading.
+fn contract_show_output(config: Option<&Path>, start: &Path) -> Result<(String, u8), String> {
+    let (source, raw, contract) = match contract_file(config, start)? {
         Some(path) => match checked_contract(&path) {
             Ok((raw, contract)) => (path.display().to_string(), Some(raw), contract),
-            Err(code) => return Ok(code),
+            Err(problems) => return Ok((problems, EXIT_ERROR)),
         },
         None => ("built-in defaults".to_string(), None, Contract::default()),
     };
     let written: Option<serde_yaml::Value> =
         raw.as_deref().and_then(|r| serde_yaml::from_str(r).ok());
     let yaml = serde_yaml::to_string(&contract).map_err(|e| e.to_string())?;
-    println!("# effective contract: {source}");
-    println!("# fingerprint {}", contract.fingerprint());
-    println!("# keys marked `# default` are not in the file; their default applies");
-    print!("{}", mark_defaults(&yaml, written.as_ref()));
-    Ok(EXIT_OK)
+    Ok((
+        format!(
+            "# effective contract: {source}\n# fingerprint {}\n\
+             # keys marked `# default` are not in the file; their default applies\n{}",
+            contract.fingerprint(),
+            mark_defaults(&yaml, written.as_ref())
+        ),
+        EXIT_OK,
+    ))
 }
 
 /// Mark each top-level key, and each key of a top-level section, that the
@@ -605,16 +637,22 @@ fn cmd_explain(code: Option<&str>) -> Result<u8, String> {
         );
         return Ok(EXIT_OK);
     };
-    match RULES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)) {
-        Some((_, page)) => {
-            print!("{page}");
-            Ok(EXIT_OK)
-        }
-        None => Err(format!(
-            "unknown rule `{code}`; the rules are {}",
-            RULES.map(|(c, _)| c).join(", ")
-        )),
-    }
+    print!("{}", rule_reference(code)?);
+    Ok(EXIT_OK)
+}
+
+/// A rule's reference page, as `kv-cli explain <code>` prints it.
+fn rule_reference(code: &str) -> Result<&'static str, String> {
+    RULES
+        .iter()
+        .find(|(c, _)| c.eq_ignore_ascii_case(code))
+        .map(|(_, page)| *page)
+        .ok_or_else(|| {
+            format!(
+                "unknown rule `{code}`; the rules are {}",
+                RULES.map(|(c, _)| c).join(", ")
+            )
+        })
 }
 
 /// `# KV002: hardcoded credential` -> `hardcoded credential`.
@@ -651,24 +689,34 @@ fn cmd_schema() -> Result<u8, String> {
 }
 
 fn cmd_frameworks() -> Result<u8, String> {
-    println!(
+    print!("{}", frameworks_output());
+    Ok(EXIT_OK)
+}
+
+/// What `kv-cli frameworks` prints.
+fn frameworks_output() -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{} built-in framework profiles\n",
         frameworks::PROFILES.len().to_string().bold()
     );
     for p in frameworks::PROFILES {
-        println!("{}", p.name.cyan().bold());
-        println!("  {}", p.summary.dimmed());
+        let _ = writeln!(out, "{}", p.name.cyan().bold());
+        let _ = writeln!(out, "  {}", p.summary.dimmed());
         if !p.detect_imports.is_empty() {
-            println!(
+            let _ = writeln!(
+                out,
                 "  detected by   import {}",
                 p.detect_imports.join(", import ")
             );
         }
         for (name, leading) in p.owned_signatures {
-            println!("  owns          def {name}({})", leading.join(", "));
+            let _ = writeln!(out, "  owns          def {name}({})", leading.join(", "));
         }
         if !p.owned_decorators.is_empty() {
-            println!("  owns          @{}", p.owned_decorators.join(", @"));
+            let _ = writeln!(out, "  owns          @{}", p.owned_decorators.join(", @"));
         }
         if !p.governed_decorators.is_empty() {
             let note = if p.governed_auto_fix {
@@ -676,7 +724,8 @@ fn cmd_frameworks() -> Result<u8, String> {
             } else {
                 "  (reported, never auto-fixed)"
             };
-            println!(
+            let _ = writeln!(
+                out,
                 "  governs       @{}{note}",
                 p.governed_decorators.join(", @")
             );
@@ -693,17 +742,18 @@ fn cmd_frameworks() -> Result<u8, String> {
             .map(|(label, n)| format!("{n} {label}"))
             .collect();
         if !rules.is_empty() {
-            println!("  adds          {}", rules.join(", "));
+            let _ = writeln!(out, "  adds          {}", rules.join(", "));
         }
-        println!();
+        let _ = writeln!(out,);
     }
-    println!(
+    let _ = writeln!(
+        out,
         "{}",
         "Signatures a framework owns are never given contract parameters:\n\
          the framework calls them, so kv-cli must not change how."
             .dimmed()
     );
-    Ok(EXIT_OK)
+    out
 }
 
 /// Load the contract, falling back to the built-in defaults.
@@ -925,6 +975,54 @@ struct RunReport<'a> {
     named_excluded: usize,
 }
 
+/// A completed audit, before it is rendered. `kv-cli audit` prints it in each
+/// format, and the MCP `audit` tool returns it: one computation, so the two
+/// can never disagree.
+struct AuditRun {
+    findings: Vec<Finding>,
+    files: Vec<PathBuf>,
+    contract_path: Option<PathBuf>,
+    fingerprint: String,
+    expected: Option<String>,
+    drift: bool,
+    skipped: Vec<SkippedFile>,
+    detected: BTreeMap<&'static str, usize>,
+    errors: usize,
+    warnings: usize,
+    gating: usize,
+    strict: bool,
+    scope: Scope,
+    file_results: Vec<FileResult>,
+    symlinks_not_followed: usize,
+    named_excluded: usize,
+    /// The exit code `kv-cli audit` returns for this run.
+    code: u8,
+}
+
+impl AuditRun {
+    fn report<'a>(&'a self, show_clean: bool, identity: &'a IdentityFlags<'a>) -> RunReport<'a> {
+        RunReport {
+            files: &self.files,
+            contract_path: self.contract_path.as_deref(),
+            fingerprint: &self.fingerprint,
+            expected: self.expected.as_deref(),
+            drift: self.drift,
+            skipped: &self.skipped,
+            detected: &self.detected,
+            errors: self.errors,
+            warnings: self.warnings,
+            gating: self.gating,
+            strict: self.strict,
+            scope: self.scope,
+            file_results: &self.file_results,
+            show_clean,
+            identity,
+            symlinks_not_followed: self.symlinks_not_followed,
+            named_excluded: self.named_excluded,
+        }
+    }
+}
+
 fn cmd_audit(
     paths: &[PathBuf],
     config: Option<&Path>,
@@ -934,6 +1032,24 @@ fn cmd_audit(
     expect_contract: Option<&str>,
     identity: &IdentityFlags,
 ) -> Result<u8, String> {
+    let run = run_audit(paths, config, strict, expect_contract)?;
+    let report = run.report(show_clean, identity);
+    match format {
+        Format::Json => print_json(&run.findings, &report)?,
+        Format::Sarif => print_sarif(&run.findings, &report)?,
+        Format::Text => print_text(&run.findings, &report),
+    }
+    Ok(run.code)
+}
+
+/// Audit `paths` and decide the exit code, printing nothing. `Err` is a tool
+/// error: exit 2.
+fn run_audit(
+    paths: &[PathBuf],
+    config: Option<&Path>,
+    strict: bool,
+    expect_contract: Option<&str>,
+) -> Result<AuditRun, String> {
     let root = root_of(paths);
     let (engine, contract_path) = load_engine(config, &root)?;
     // Findings are born with a normalized path so their identity does not
@@ -1007,41 +1123,34 @@ fn cmd_audit(
     let expected = expect_contract.map(parse_expected_contract).transpose()?;
     let drift = expected.as_deref().is_some_and(|e| e != fingerprint);
 
-    let report = RunReport {
-        files: &files,
-        contract_path: contract_path.as_deref(),
-        fingerprint: &fingerprint,
-        expected: expected.as_deref(),
-        drift,
-        skipped: &skipped,
-        detected: &detected,
-        errors,
-        warnings,
-        gating,
-        strict,
-        scope,
-        file_results: &file_results,
-        show_clean,
-        identity,
-        symlinks_not_followed,
-        named_excluded,
-    };
-
-    match format {
-        Format::Json => print_json(&findings, &report)?,
-        Format::Sarif => print_sarif(&findings, &report)?,
-        Format::Text => print_text(&findings, &report),
-    }
-
     // Drift outranks findings: if the contract is not the expected one, the
     // findings were computed against the wrong rules and the two failures
     // escalate to different people.
-    Ok(if drift {
+    let code = if drift {
         EXIT_DRIFT
     } else if gating > 0 {
         EXIT_FINDINGS
     } else {
         EXIT_OK
+    };
+    Ok(AuditRun {
+        findings,
+        files,
+        contract_path,
+        fingerprint,
+        expected,
+        drift,
+        skipped,
+        detected,
+        errors,
+        warnings,
+        gating,
+        strict,
+        scope,
+        file_results,
+        symlinks_not_followed,
+        named_excluded,
+        code,
     })
 }
 
@@ -1263,8 +1372,18 @@ fn slash_path(p: &Path) -> String {
 }
 
 fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&build_payload(findings, r)).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+/// The JSON payload for a run, as `--format json` prints it and the MCP
+/// `audit` tool returns it.
+fn build_payload<'a>(findings: &'a [Finding], r: &RunReport) -> Payload<'a> {
     let identity = Identity::resolve(r.identity);
-    let payload = Payload {
+    Payload {
         run: RunMeta {
             schema_version: SCHEMA_VERSION,
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1291,12 +1410,7 @@ fn print_json(findings: &[Finding], r: &RunReport) -> Result<(), String> {
             files: r.file_results.to_vec(),
         },
         findings,
-    };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
-    );
-    Ok(())
+    }
 }
 
 /// The same run as `print_json`, as one SARIF 2.1.0 log. Built from the same
@@ -1632,12 +1746,36 @@ struct FixOutcome {
     credentials_externalized: usize,
 }
 
-fn cmd_fix(
-    paths: &[PathBuf],
-    config: Option<&Path>,
-    dry_run: bool,
-    no_backup: bool,
-) -> Result<FixOutcome, String> {
+/// Everything `fix` would do, worked out without writing anything. `kv-cli
+/// fix` prints it and writes it; the MCP `fix_preview` tool shows it as a
+/// diff and `fix_apply` writes it - the same plan either way.
+struct FixPlan {
+    /// The fingerprint of the contract the plan was made under.
+    fingerprint: String,
+    /// Appended to a file's name for its backup; empty for none.
+    backup_suffix: String,
+    /// Each file whose source changes, in the order `fix` reports them.
+    changes: Vec<FileFix>,
+    /// What `fix` lists for a person to do, as `manual:` items.
+    manual: Vec<String>,
+    /// Files kv-cli has no reader for: never parsed, so never rewritten.
+    not_analysed: Vec<String>,
+}
+
+/// One file `fix` rewrites.
+struct FileFix {
+    /// As the caller named it, or as the walk found it.
+    path: PathBuf,
+    old: String,
+    new: String,
+    params_added: Vec<(String, String)>,
+    secrets_externalized: Vec<(String, String)>,
+    change_count: usize,
+}
+
+/// Plan the standard fixes for `paths` under the contract `config` names, or
+/// the nearest one. Reads files; writes nothing.
+fn plan_fix(paths: &[PathBuf], config: Option<&Path>) -> Result<(Engine, FixPlan), String> {
     let root = root_of(paths);
     let (engine, contract_path) = load_engine(config, &root)?;
     let base = project_root(contract_path.as_deref(), paths);
@@ -1645,29 +1783,16 @@ fn cmd_fix(
         files, sql_models, ..
     } = resolve_targets(&engine, paths, &base)?;
 
-    println!(
-        "{} {}{}",
-        "kv-cli".bold(),
-        "fix".cyan().bold(),
-        if dry_run {
-            "  (dry run)".yellow()
-        } else {
-            "".normal()
-        }
-    );
-
-    let mut changed_files = 0usize;
-    let mut total_changes = 0usize;
-    let mut skipped: Vec<String> = Vec::new();
-    // Credentials moved out of source, and the backups that still hold them.
-    let mut externalized = 0usize;
-    let mut credential_backups: Vec<PathBuf> = Vec::new();
-    // Files kv-cli has no reader for: never parsed, so never rewritten.
-    let mut not_analysed: Vec<String> = Vec::new();
-
+    let mut plan = FixPlan {
+        fingerprint: engine.contract.fingerprint(),
+        backup_suffix: engine.contract.fix.backup_suffix.clone(),
+        changes: Vec::new(),
+        manual: Vec::new(),
+        not_analysed: Vec::new(),
+    };
     for file in &files {
         if !is_sql_model(file, &sql_models) && matches!(file_kind(file), FileKind::NoReader) {
-            not_analysed.push(format!(
+            plan.not_analysed.push(format!(
                 "{} ({})",
                 file.display(),
                 not_analysed_detail(&engine, file, &base)
@@ -1677,7 +1802,7 @@ fn cmd_fix(
         let src = match read_source(file) {
             Ok(s) => s,
             Err(e) => {
-                skipped.push(e);
+                plan.manual.push(e);
                 continue;
             }
         };
@@ -1690,7 +1815,7 @@ fn cmd_fix(
                 let audit::FindingKind::HardcodedInfrastructure { detector, .. } = &f.kind else {
                     continue;
                 };
-                skipped.push(format!(
+                plan.manual.push(format!(
                     "{shown}:{} {} - {} by hand",
                     f.line,
                     f.message,
@@ -1725,25 +1850,94 @@ fn cmd_fix(
         };
         if let Some((findings, what)) = manual {
             for f in findings {
-                skipped.push(format!("{shown}:{} {what}", f.line));
+                plan.manual.push(format!("{shown}:{} {what}", f.line));
             }
             continue;
         }
         let report = fix::fix_source(&engine, file, &src);
-        skipped.extend(report.skipped.iter().cloned());
+        plan.manual.extend(report.skipped.iter().cloned());
 
-        let Some(new_source) = &report.new_source else {
+        let Some(new_source) = report.new_source.clone() else {
             continue;
         };
-        if new_source == &src {
+        if new_source == src {
             continue;
         }
+        plan.changes.push(FileFix {
+            path: file.clone(),
+            change_count: report.change_count(),
+            params_added: report.params_added.clone(),
+            secrets_externalized: report.secrets_externalized.clone(),
+            old: src,
+            new: new_source,
+        });
+    }
+    Ok((engine, plan))
+}
 
-        changed_files += 1;
-        total_changes += report.change_count();
-        externalized += report.secrets_externalized.len();
-        println!("\n{}", file.display().to_string().underline());
-        for (func, param) in &report.params_added {
+/// What writing one planned file did about its backup.
+struct Written {
+    /// The backup that holds the source as it was before this rewrite -
+    /// written now, or kept from an earlier run. `None` when no backup is
+    /// kept (`--no-backup`, or an empty `fix.backup_suffix`).
+    backup: Option<PathBuf>,
+    /// The backup was already there and was left alone.
+    kept_existing: bool,
+}
+
+/// Back up `file` (unless `no_backup`), then write its planned source. The
+/// only place `fix` writes a source file, for the CLI and the MCP server.
+fn write_fixed_file(
+    file: &FileFix,
+    backup_suffix: &str,
+    no_backup: bool,
+) -> Result<Written, String> {
+    let mut written = Written {
+        backup: None,
+        kept_existing: false,
+    };
+    if !no_backup && !backup_suffix.is_empty() {
+        let mut backup = file.path.clone().into_os_string();
+        backup.push(backup_suffix);
+        let backup = PathBuf::from(backup);
+        written.kept_existing = !write_backup(&backup, &file.old)
+            .map_err(|e| format!("cannot write backup for {}: {e}", file.path.display()))?;
+        written.backup = Some(backup);
+    }
+    std::fs::write(&file.path, &file.new)
+        .map_err(|e| format!("cannot write {}: {e}", file.path.display()))?;
+    Ok(written)
+}
+
+fn cmd_fix(
+    paths: &[PathBuf],
+    config: Option<&Path>,
+    dry_run: bool,
+    no_backup: bool,
+) -> Result<FixOutcome, String> {
+    let (_engine, plan) = plan_fix(paths, config)?;
+
+    println!(
+        "{} {}{}",
+        "kv-cli".bold(),
+        "fix".cyan().bold(),
+        if dry_run {
+            "  (dry run)".yellow()
+        } else {
+            "".normal()
+        }
+    );
+
+    let mut total_changes = 0usize;
+    // Credentials moved out of source, and the backups that still hold them.
+    let mut externalized = 0usize;
+    let mut credential_backups: Vec<PathBuf> = Vec::new();
+
+    for file in &plan.changes {
+        total_changes += file.change_count;
+        externalized += file.secrets_externalized.len();
+        println!("\n{}", file.path.display().to_string().underline());
+        for (func, param) in &file.params_added {
             println!(
                 "  {} added `{}` to {}()",
                 "+".green().bold(),
@@ -1751,7 +1945,7 @@ fn cmd_fix(
                 func
             );
         }
-        for (key, env) in &report.secrets_externalized {
+        for (key, env) in &file.secrets_externalized {
             println!(
                 "  {} `{}` now reads os.environ[{}]",
                 "~".yellow().bold(),
@@ -1761,14 +1955,9 @@ fn cmd_fix(
         }
 
         if !dry_run {
-            let backup_suffix = &engine.contract.fix.backup_suffix;
-            if !no_backup && !backup_suffix.is_empty() {
-                let mut backup = file.clone().into_os_string();
-                backup.push(backup_suffix);
-                let backup = PathBuf::from(backup);
-                if !write_backup(&backup, &src)
-                    .map_err(|e| format!("cannot write backup for {}: {e}", file.display()))?
-                {
+            let written = write_fixed_file(file, &plan.backup_suffix, no_backup)?;
+            if let Some(backup) = written.backup {
+                if written.kept_existing {
                     println!(
                         "  {} kept existing backup {}",
                         "\u{b7}".dimmed(),
@@ -1777,23 +1966,22 @@ fn cmd_fix(
                 }
                 // Written now or kept from an earlier run, it predates this
                 // rewrite - so it holds the credential this run removed.
-                if !report.secrets_externalized.is_empty() {
+                if !file.secrets_externalized.is_empty() {
                     credential_backups.push(backup);
                 }
             }
-            std::fs::write(file, new_source)
-                .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
         }
     }
+    let changed_files = plan.changes.len();
 
     println!();
-    for s in &skipped {
+    for s in &plan.manual {
         println!("  {} {s}", "manual:".yellow().bold());
     }
-    for s in &not_analysed {
+    for s in &plan.not_analysed {
         println!("  {} not analysed: {s}", "\u{b7}".dimmed());
     }
-    if !skipped.is_empty() || !not_analysed.is_empty() {
+    if !plan.manual.is_empty() || !plan.not_analysed.is_empty() {
         println!();
     }
 
@@ -1816,11 +2004,9 @@ fn cmd_fix(
         println!("{}", "review the diff, then re-run `kv-cli audit`".dimmed());
     }
 
-    print_credential_warnings(
-        externalized,
-        &credential_backups,
-        &engine.contract.fix.backup_suffix,
-    );
+    for line in credential_warnings(externalized, &credential_backups, &plan.backup_suffix) {
+        println!("{line}");
+    }
     Ok(FixOutcome {
         code: EXIT_OK,
         credentials_externalized: externalized,
@@ -1833,13 +2019,15 @@ fn cmd_fix(
 /// only safe assumption is that it is exposed and must be rotated. And the
 /// `fix` backup is a plaintext copy of exactly what was removed, sitting next
 /// to the file where `git add .` will pick it up. Both are said every time,
-/// because the rewrite alone reads like the problem is solved.
-fn print_credential_warnings(externalized: usize, backups: &[PathBuf], suffix: &str) {
+/// because the rewrite alone reads like the problem is solved. Returns the
+/// lines to print, none when nothing was externalized.
+fn credential_warnings(externalized: usize, backups: &[PathBuf], suffix: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     if externalized == 0 {
-        return;
+        return lines;
     }
-    println!();
-    println!(
+    lines.push(String::new());
+    lines.push(format!(
         "  {} {externalized} credential{} {} in source: treat {it} as exposed - rotate, \
          then set the new value in the environment; removing {it} from the file \
          does not remove {it} from git history",
@@ -1847,18 +2035,19 @@ fn print_credential_warnings(externalized: usize, backups: &[PathBuf], suffix: &
         if externalized == 1 { "" } else { "s" },
         if externalized == 1 { "was" } else { "were" },
         it = if externalized == 1 { "it" } else { "them" },
-    );
+    ));
     if backups.is_empty() {
-        return;
+        return lines;
     }
-    println!(
+    lines.push(format!(
         "  {} still holding the original plaintext - delete after reviewing the \
          diff, and add `*{suffix}` to .gitignore so a backup is never committed:",
         "backups:".red().bold()
-    );
+    ));
     for b in backups {
-        println!("        {}", b.display());
+        lines.push(format!("        {}", b.display()));
     }
+    lines
 }
 
 /// Write `contents` to `backup` unless a backup is already there.
