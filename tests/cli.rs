@@ -1405,6 +1405,106 @@ fn readme_snippets_pin_this_release() {
     }
 }
 
+/// Every preset in docs/standards/ - each ```yaml block that starts with
+/// `version: 1` - is a contract kv-cli accepts, uses only keys from
+/// schema/contract.v1.json, and has the fingerprint its page states. A
+/// preset that rots, or a fingerprint that changes, fails here first.
+#[test]
+fn standards_presets_are_valid_contracts_with_their_stated_fingerprints() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("schema/contract.v1.json")).unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    let dir = tempdir("standards");
+    let mut checked = 0;
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(repo.join("docs/standards"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md") && !p.ends_with("README.md"))
+        .collect();
+    pages.sort();
+    assert_eq!(pages.len(), 3, "airflow, databricks and dbt: {pages:?}");
+    for page in &pages {
+        let text = std::fs::read_to_string(page).unwrap();
+        let name = page.file_name().unwrap().to_string_lossy();
+        let presets: Vec<&str> = text
+            .split("```yaml\n")
+            .skip(1)
+            .filter_map(|b| b.split("```").next())
+            .filter(|b| b.starts_with("version: 1"))
+            .collect();
+        assert!(!presets.is_empty(), "{name} has no preset");
+        for (i, preset) in presets.iter().enumerate() {
+            let as_json: serde_json::Value = serde_yaml::from_str(preset).unwrap();
+            let errors: Vec<String> = validator
+                .iter_errors(&as_json)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{name} preset {i}: {errors:?}");
+
+            let file = dir.join(format!(
+                "{}-{i}.yaml",
+                page.file_stem().unwrap().to_string_lossy()
+            ));
+            std::fs::write(&file, preset).unwrap();
+            let check = Command::new(bin())
+                .args(["contract", "check"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert_eq!(
+                check.status.code(),
+                Some(0),
+                "{name} preset {i}: {}",
+                String::from_utf8_lossy(&check.stdout)
+            );
+            let show = Command::new(bin())
+                .args(["contract", "show", "--config"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            let shown = String::from_utf8_lossy(&show.stdout);
+            let fingerprint = shown
+                .lines()
+                .find_map(|l| l.strip_prefix("# fingerprint "))
+                .expect("contract show prints the fingerprint");
+            assert!(
+                text.contains(&format!("Fingerprint, used verbatim: `{fingerprint}`")),
+                "{name} preset {i} has fingerprint {fingerprint}; the page doesn't state it"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 4, "two Airflow presets, one dbt, one Databricks");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The example workflows in docs/standards/workflows/ pin a release, like the
+/// README's snippets. They must name this one.
+#[test]
+fn standards_workflows_pin_this_release() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for (file, prefix) in [
+        ("kovallent.yml", "uses: kovallent/kv-cli@"),
+        ("pre-commit-config.yaml", "rev: "),
+    ] {
+        let text =
+            std::fs::read_to_string(repo.join("docs/standards/workflows").join(file)).unwrap();
+        let pins: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.find(prefix).map(|at| &l[at + prefix.len()..]))
+            .map(|rest| rest.split_whitespace().next().unwrap_or(""))
+            .collect();
+        assert!(!pins.is_empty(), "{file} pins no release");
+        for pin in pins {
+            assert_eq!(pin, tag, "{file} is stale");
+        }
+    }
+}
+
 /// Every relative link in the README and docs/ points at a file that exists,
 /// so moving a page cannot leave a dead link behind.
 #[test]

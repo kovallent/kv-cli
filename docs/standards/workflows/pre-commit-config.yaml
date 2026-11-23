@@ -1,0 +1,12 @@
+# kv-cli on every commit, for any preset in docs/standards/.
+#
+# Save as .pre-commit-config.yaml and run `pre-commit install`. The hooks use
+# the repository's .kovallent.yaml, so they enforce the same preset as CI.
+# A hook is advisory (`git commit --no-verify` skips it); the CI gate is what
+# guarantees it.
+repos:
+  - repo: https://github.com/kovallent/kv-cli-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: kv-cli            # audits staged Python, notebooks and config files
+      - id: kv-cli-contract   # validates .kovallent.yaml when it changes

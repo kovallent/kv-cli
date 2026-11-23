@@ -11,7 +11,18 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Standards: copy-pasteable contract presets** in
+  [`docs/standards/`](docs/standards/README.md), for
+  [Airflow](docs/standards/airflow.md), [dbt](docs/standards/dbt.md) and
+  [Databricks](docs/standards/databricks.md). Each page has a complete
+  `.kovallent.yaml`, what it reports and what it leaves alone, and the
+  preset's fingerprint. Example [GitHub Actions](docs/standards/workflows/kovallent.yml)
+  and [pre-commit](docs/standards/workflows/pre-commit-config.yaml) configs
+  sit beside them. A test checks that every preset validates against
+  `schema/contract.v1.json` with the fingerprint its page states, and that
+  the examples pin the current release.
 
 ---
 

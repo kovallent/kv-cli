@@ -355,6 +355,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 - **Rules:** [KV001](docs/rules/KV001.md), [KV002](docs/rules/KV002.md), [KV003](docs/rules/KV003.md), [KV004](docs/rules/KV004.md), also available offline as `kv-cli explain <code>`.
 - [Configuration](docs/configuration.md): the contract file, how patterns match, editor validation, upgrading.
 - [Frameworks](docs/frameworks.md): profiles, owned signatures, governed decorators.
+- [Standards](docs/standards/): copy-pasteable contract presets for Airflow, dbt and Databricks, with example CI and pre-commit configs.
 - [CI](docs/ci.md): the GitHub Action's inputs, required status checks, protecting the workflow, uploading with OIDC, code scanning with SARIF, and the GitLab CI/CD component and CircleCI orb.
 - [Contract pinning](docs/contract-pinning.md): stopping a pull request from weakening the contract.
 - [JSON payload](docs/json-payload.md): the `--format json` schema.
