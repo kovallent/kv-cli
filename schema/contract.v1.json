@@ -382,6 +382,13 @@
           },
           "type": "array"
         },
+        "detectors": {
+          "description": "Which built-in detector set adds to `value_patterns`. `1` adds\nnothing: `value_patterns` alone, today's 12 by default. `2` also\napplies `azure_storage_key`, `databricks_pat` and `sendgrid_api_key`.\nAny other value is a contract error. A set never changes once\nreleased; new built-in shapes arrive as a new set, so opting in is\nalways a contract change you can see.",
+          "format": "uint32",
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
         "enabled": {
           "default": true,
           "type": "boolean"

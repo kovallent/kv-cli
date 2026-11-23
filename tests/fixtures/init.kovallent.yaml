@@ -1,0 +1,270 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kovallent/kv-cli/vVERSION/schema/contract.v1.json
+# .kovallent.yaml - Kovallent parameter contract
+# Checked by `kv-cli audit`; repaired by `kv-cli fix`.
+version: 1
+
+# Which files participate in the audit.
+scan:
+  # Python files get the full audit. Notebooks and config files - YAML
+  # (dbt profiles.yml, CI config), .env, TOML, INI/.cfg, JSON - are scanned
+  # for credentials only. `.env.example`-style templates get value patterns
+  # only, since placeholders are their purpose.
+  include:
+    - "**/*.py"
+    - "**/*.ipynb"
+    - "**/*.yml"
+    - "**/*.yaml"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.env"
+    - "**/*.toml"
+    - "**/*.ini"
+    - "**/*.cfg"
+    - "**/*.json"
+  exclude:
+    - "**/.venv/**"
+    - "**/venv/**"
+    - "**/.git/**"
+    - "**/__pycache__/**"
+    - "**/node_modules/**"
+    - "**/site-packages/**"
+    - "**/build/**"
+    - "**/dist/**"
+    - "**/target/**"
+    - "**/.tox/**"
+    - "**/.mypy_cache/**"
+    - "**/.kovallent.yaml"
+
+# Every in-scope function must declare these parameters.
+# `annotation` and `default` are the text `kv-cli fix` inserts.
+parameters:
+  - name: target_environment
+    annotation: str
+    default: '"dev"'
+    severity: error
+  - name: dry_run
+    annotation: bool
+    default: "False"
+    severity: warning
+
+# A function is in scope when it matches ANY rule below.
+applies_to:
+  name_patterns:
+    - "deploy*"
+    - "run_*"
+    - "*_pipeline"
+    - "*_job"
+    - "main"
+  decorators:
+    - "kovallent.task"
+    - "task"
+    - "entrypoint"
+    - "pipeline"
+  # Set true to govern every function definition in scope files.
+  all_functions: false
+  # Checked first; a match here always wins.
+  exempt_name_patterns:
+    - "_*"
+    - "test_*"
+
+# Hardcoded credential detection.
+secrets:
+  enabled: true
+  # Assignment targets that imply a secret when bound to a string literal.
+  key_patterns:
+    - "*password*"
+    - "*passwd*"
+    - "*secret*"
+    - "*token*"
+    - "*api_key*"
+    - "*apikey*"
+    - "*access_key*"
+    - "*private_key*"
+    - "*credential*"
+  # Built-in shapes added to value_patterns: 2 adds Azure storage keys, Databricks tokens and SendGrid keys.
+  detectors: 2
+  # High-confidence literal shapes, matched anywhere in the file.
+  value_patterns:
+    - name: aws_access_key_id
+      regex: '\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b'
+    - name: github_token
+      regex: '\bgh[pousr]_[A-Za-z0-9]{36,}\b'
+    - name: slack_token
+      regex: '\bxox[baprs]-[A-Za-z0-9-]{10,}'
+    - name: anthropic_api_key
+      regex: '\bsk-ant-[A-Za-z0-9_-]{20,}'
+    - name: openai_api_key
+      regex: '\bsk-[A-Za-z0-9]{32,}\b'
+    - name: private_key_block
+      regex: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----'
+    - name: url_basic_auth
+      regex: '[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s:@]+@'
+    - name: github_fine_grained_token
+      regex: '\bgithub_pat_[A-Za-z0-9_]{22,}'
+    - name: openai_project_key
+      regex: '\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}'
+    - name: google_api_key
+      regex: '\bAIza[0-9A-Za-z_-]{35}'
+    - name: stripe_live_key
+      regex: '\b(?:sk|rk)_live_[0-9A-Za-z]{24,}'
+    - name: jwt
+      regex: '\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+  # Literals that are obviously placeholders (compared case-insensitively).
+  allow_values:
+    - ""
+    - "changeme"
+    - "change-me"
+    - "your-key-here"
+    - "xxx"
+    - "xxxx"
+    - "todo"
+    - "none"
+    - "null"
+    - "placeholder"
+    - "example"
+    - "test"
+    - "dummy"
+    - "redacted"
+  # Any line containing this marker is skipped.
+  ignore_marker: "kovallent:allow-secret"
+  min_value_length: 4
+  # Names that match a key pattern but refer to a credential rather than hold
+  # one (a secret's name, ARN, path or URL). Checked first; value patterns
+  # still apply, so a real token is reported whatever it is called.
+  exempt_key_patterns:
+    - "*_name"
+    - "*_arn"
+    - "*_id"
+    - "*_ref"
+    - "*_path"
+    - "*_file"
+    - "*_dir"
+    - "*_url"
+    - "*_uri"
+    - "*_endpoint"
+    - "*_header"
+    - "*_field"
+    - "*_prefix"
+    - "*_type"
+    - "*_policy"
+    - "*_var"
+    - "*tokenizer*"
+    - "*max_tokens*"
+  # Placeholder value shapes (case-insensitive), for the key rule only.
+  placeholder_patterns:
+    - "your*"
+    - "<*>"
+    - "{*}"
+    - "*placeholder*"
+    - "replace*"
+    - "change*me"
+    - "xxx*"
+    - "todo*"
+    - "fixme*"
+    - "insert*"
+    - "*here"
+
+# Built-in framework profiles. Each one contributes signatures the framework
+# owns (never given contract parameters), credential shapes, and infrastructure
+# identifiers - all scoped to files where the framework is actually used.
+# Available: dbt, polars, flink, databricks, snowpark, airflow.
+# Run `kv-cli frameworks`.
+frameworks:
+  # "auto" detects each framework per file from its imports. Naming frameworks
+  # explicitly applies them to every scanned file instead.
+  enable:
+    - auto
+  # Never apply these, even when detected.
+  disable: []
+
+# KV003: identifiers that should vary by target_environment - warehouses,
+# catalogs, buckets, cluster IDs, endpoints. Reported only; `fix` never
+# rewrites them, because the right replacement is a deployment decision.
+infrastructure:
+  enabled: true
+  # Defaults to `warning` so adopting KV003 does not break CI on day one.
+  severity: warning
+  key_patterns:
+    - "*warehouse*"
+    - "*catalog*"
+    - "*cluster_id*"
+    - "*workspace_url*"
+    - "*bucket*"
+  # key_patterns apply only in files that use a data framework (a profile
+  # is detected). Value patterns apply everywhere. false: key_patterns in
+  # every Python file, as before 0.10.0.
+  global_key_patterns_require_framework: true
+  # Also check Databricks asset bundles: databricks.yml and the files its
+  # include: globs name. Values under targets: and variables: are exempt,
+  # since that is where a bundle declares what varies. false: every YAML
+  # file is credentials-only, as before 0.13.0.
+  bundle_files: true
+  value_patterns:
+    - name: object_store_uri
+      regex: '\b(?:s3a?|gs|abfss?|wasbs?|gcs)://[^\s\x22'']+'
+    - name: jdbc_url
+      regex: '\bjdbc:[a-z0-9]+://[^\s\x22'']+'
+  allow_values:
+    - "local"
+    - "localhost"
+    - "dev"
+    - "test"
+    - "default"
+    - "main"
+    - "memory"
+    - "sample"
+  ignore_marker: "kovallent:allow-infra"
+  min_value_length: 3
+  # Names that match a key pattern but never hold an identifier. Checked first.
+  exempt_key_patterns:
+    - "*_column"
+    - "*_col"
+    - "*_field"
+    - "*_header"
+    - "*_type"
+
+# KV004: naming rules for functions. There are none by default, so KV004
+# reports nothing until you add one. `pattern` is a regex the whole function
+# name must match. `applies_to` is in_scope (functions in scope of the
+# contract, framework-exempt ones included) or all_functions.
+# exempt_name_patterns above still win. `fix` never renames a function.
+# naming:
+#   severity: warning
+#   rules:
+#     - name: pipeline_functions
+#       applies_to: in_scope
+#       pattern: '^[a-z][a-z0-9_]*$'
+#       message: "pipeline entrypoints use snake_case"
+
+# dbt SQL models: the .sql files under each dbt_project.yml's model and
+# snapshot paths, found whatever scan.include says. KV003 applies to them
+# under the infrastructure settings above. false: .sql files are never read,
+# as before 0.14.0.
+sql:
+  enabled: true
+  # The dbt_project.yml path keys whose .sql files are read.
+  paths:
+    - model-paths
+    - snapshot-paths
+  # generic tries the generic dialect, then snowflake, bigquery, databricks
+  # and postgres in turn. Name one of those to parse with it alone.
+  dialect: generic
+  # Dotted names that are the same in every environment, ignoring case.
+  allow_names:
+    - "*.information_schema.*"
+    - "information_schema.*"
+    - "pg_catalog.*"
+    - "snowflake.account_usage.*"
+    - "snowflake.organization_usage.*"
+    - "bigquery-public-data.*"
+  # Also report two-part schema.table names written as literals.
+  two_part_names: false
+
+# Behaviour of `kv-cli fix`.
+fix:
+  insert_missing_parameters: true
+  externalize_secrets: true
+  # Prepended to generated environment variable names, e.g. "ACME_".
+  env_var_prefix: ""
+  # Written next to each modified file. Set to "" to disable backups.
+  backup_suffix: ".kvbak"

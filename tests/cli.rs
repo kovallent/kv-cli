@@ -2757,3 +2757,209 @@ fn pep696_type_parameter_defaults_are_never_silently_clean() {
     let (strict, _) = repo_run(&["audit", fixture, "--strict"]);
     assert_eq!(strict, Some(1), "--strict never passes it");
 }
+
+// --- detector set 2 ---------------------------------------------------------
+
+/// Credential-shaped values for set 2, assembled at run time so the
+/// repository never holds one whole.
+fn set2_fill(alphabet: &str, n: usize) -> String {
+    alphabet.chars().cycle().take(n).collect()
+}
+fn set2_databricks_pat() -> String {
+    format!("dapi{}", set2_fill("7c2a9f4e8b1d6a3c5e0f", 32))
+}
+fn set2_azure_connection() -> String {
+    format!(
+        "DefaultEndpointsProtocol=https;AccountName=acmeprodlake;AccountKey={}==;EndpointSuffix=core.windows.net",
+        set2_fill("R7c2Kq9Lm4Xv8Bn1Zt6Wy3Hs5Jd0Pf+/", 86)
+    )
+}
+fn set2_sendgrid_key() -> String {
+    format!(
+        "SG.{}.{}",
+        set2_fill("R7c2Kq9Lm4Xv-8Bn1_Zt6W", 22),
+        set2_fill("Hs5Jd0Pf_R7c2Kq9Lm4Xv8Bn1Zt6Wy3", 43)
+    )
+}
+
+/// Golden: a fresh `kv-cli init` writes `detectors: 2` and says so, with the
+/// fingerprint to pin. The written file is compared byte for byte apart
+/// from the release in its schema URL; `KV_GOLDEN_BLESS=1` rewrites both
+/// goldens after an intended change.
+#[test]
+fn a_fresh_init_writes_detector_set_2_and_is_golden() {
+    let dir = tempdir("init-golden");
+    let out = Command::new(bin())
+        .args(["init", "--path"])
+        .arg(&dir)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("kv-cli runs");
+    assert!(out.status.success());
+    let written = std::fs::read_to_string(dir.join(".kovallent.yaml")).unwrap();
+    assert!(written.contains("\n  detectors: 2\n"), "{written}");
+    let version = env!("CARGO_PKG_VERSION");
+    let written = written.replace(&format!("/kv-cli/v{version}/"), "/kv-cli/vVERSION/");
+    let stdout = String::from_utf8(out.stdout).unwrap().replace(
+        &dir.join(".kovallent.yaml").display().to_string(),
+        "<dir>/.kovallent.yaml",
+    );
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (name, actual) in [("init.kovallent.yaml", &written), ("init.stdout", &stdout)] {
+        let path = repo.join("tests/fixtures").join(name);
+        if std::env::var_os("KV_GOLDEN_BLESS").is_some() {
+            std::fs::write(&path, actual).unwrap();
+        }
+        let golden = std::fs::read_to_string(&path).expect("golden file");
+        assert_eq!(
+            *actual, golden,
+            "{name}: rerun with KV_GOLDEN_BLESS=1 if intended"
+        );
+    }
+    assert!(
+        stdout.contains("  · contract 4bc0fc3192e4e992\n"),
+        "{stdout}"
+    );
+
+    // The written contract's fingerprint is the one `audit` reports, and the
+    // built-in default is untouched.
+    write(&dir, "a.py", "x = 1\n");
+    let (_, payload) = run_json(&dir, &[]);
+    assert_eq!(payload["run"]["contract_sha256"], "4bc0fc3192e4e992");
+    std::fs::remove_file(dir.join(".kovallent.yaml")).unwrap();
+    let (_, payload) = run_json(&dir, &[]);
+    assert_eq!(payload["run"]["contract_sha256"], "a6edcff00199c1cf");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `detectors: 3` names a set this build doesn't have: a contract error on
+/// its own line, from `contract check` and `audit` alike (exit 2).
+#[test]
+fn an_unknown_detector_set_is_a_contract_error_naming_its_line() {
+    let dir = tempdir("detectors-3");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nsecrets:\n  detectors: 3\n",
+    );
+    write(&dir, "a.py", "x = 1\n");
+    for args in [&["contract", "check"][..], &["audit", "."][..]] {
+        let out = Command::new(bin())
+            .args(args)
+            .env("NO_COLOR", "1")
+            .current_dir(&dir)
+            .output()
+            .expect("kv-cli runs");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains(".kovallent.yaml:3: secrets.detectors: detector set 3 doesn't exist"),
+            "{args:?}: {text}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Set 2's findings in real output: redacted like every value pattern, never
+/// printed whole; and `fix` handles them as it handles the others. A name the
+/// key rule knows is externalized, a value only the shape finds is listed as
+/// `manual:`, and a config file's credential is listed for a human.
+#[test]
+fn detector_set_2_findings_are_redacted_and_fixed_like_the_others() {
+    let dir = tempdir("set2-fix");
+    write(
+        &dir,
+        ".kovallent.yaml",
+        "version: 1\nsecrets:\n  detectors: 2\n",
+    );
+    let pat = set2_databricks_pat();
+    let conn = set2_azure_connection();
+    let sg = set2_sendgrid_key();
+    write(
+        &dir,
+        "jobs.py",
+        &format!("DATABRICKS_TOKEN = \"{pat}\"\nhost_auth = \"{pat}\"\nlake = \"{conn}\"\n"),
+    );
+    write(
+        &dir,
+        "config.yml",
+        &format!("mail:\n  sendgrid: \"{sg}\"\n"),
+    );
+
+    let (code, text) = text_audit(&dir, &["audit", "."]);
+    assert_eq!(code, Some(1));
+    assert!(
+        text.contains("hardcoded credential detected (databricks_pat)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("matched \"da…\" (<redacted>, 36 chars)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("hardcoded credential detected (azure_storage_key)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("hardcoded credential detected (sendgrid_api_key)"),
+        "{text}"
+    );
+    for secret in [&pat, &conn, &sg] {
+        assert!(!text.contains(&secret[2..]), "a matched value was printed");
+    }
+
+    let stdout = fix_stdout(&dir, &["fix", ".", "--no-backup"]);
+    assert!(
+        stdout.contains("`DATABRICKS_TOKEN` now reads os.environ[\"DATABRICKS_TOKEN\"]"),
+        "{stdout}"
+    );
+    let manual: Vec<&str> = stdout.lines().filter(|l| l.contains("manual:")).collect();
+    assert!(
+        manual
+            .iter()
+            .any(|l| l.contains("jobs.py:2 credential-shaped literal has no assignment target")),
+        "{stdout}"
+    );
+    assert!(
+        manual
+            .iter()
+            .any(|l| l.contains("jobs.py:3 credential-shaped literal has no assignment target")),
+        "{stdout}"
+    );
+    assert!(
+        manual
+            .iter()
+            .any(|l| l.contains("config.yml:2 credential in YAML")),
+        "{stdout}"
+    );
+    for secret in [&pat, &conn, &sg] {
+        assert!(
+            !stdout.contains(&secret[2..]),
+            "fix printed a matched value"
+        );
+    }
+    let fixed = std::fs::read_to_string(dir.join("jobs.py")).unwrap();
+    assert!(
+        fixed.contains("DATABRICKS_TOKEN = os.environ[\"DATABRICKS_TOKEN\"]"),
+        "{fixed}"
+    );
+    assert!(
+        fixed.contains(&format!("host_auth = \"{pat}\"")),
+        "only the key rule's binding is rewritten"
+    );
+
+    // Under set 1, the value-only hits aren't there to list.
+    write(&dir, ".kovallent.yaml", "version: 1\n");
+    write(
+        &dir,
+        "jobs.py",
+        &format!("host_auth = \"{pat}\"\nlake = \"{conn}\"\n"),
+    );
+    let (code, text) = text_audit(&dir, &["audit", "jobs.py"]);
+    assert_eq!(code, Some(0), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

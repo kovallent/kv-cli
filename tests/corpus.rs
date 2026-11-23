@@ -14,6 +14,11 @@
 //!   reported when its value is a credential shape, or when a secret name holds
 //!   a real-looking literal. See [`truth`].
 //!
+//! The corpus runs twice: once with the built-in defaults and once with
+//! `secrets.detectors: 2`. `tests/corpus/detectors2/**` holds the shapes set 2
+//! adds, labelled like `cases/`; under set 1 the same lines are scored as
+//! clean, so a set-2 shape firing without the opt-in is a false positive.
+//!
 //! Where kv-cli disagrees with a label, the case is listed in
 //! `tests/corpus/baseline.tsv` as a known false positive or miss. The test
 //! fails when that list changes in either direction - a regression, or a fix
@@ -74,6 +79,42 @@ fn fakes() -> Vec<(&'static str, String)> {
             ),
         ),
         ("@@DATABRICKS_PAT@@", format!("dapi{}", fill(hex, 32))),
+        // Detector set 2 (`secrets.detectors: 2`) and its near-misses.
+        (
+            "@@AZURE_STORAGE_KEY@@",
+            format!("{}==", fill("R7c2Kq9Lm4Xv8Bn1Zt6Wy3Hs5Jd0Pf+/", 86)),
+        ),
+        (
+            "@@SENDGRID_API_KEY@@",
+            format!(
+                "SG.{}.{}",
+                fill("R7c2Kq9Lm4Xv-8Bn1_Zt6W", 22),
+                fill("Hs5Jd0Pf_R7c2Kq9Lm4Xv8Bn1Zt6Wy3", 43)
+            ),
+        ),
+        ("@@DATABRICKS_PAT_31@@", format!("dapi{}", fill(hex, 31))),
+        (
+            "@@SENDGRID_SHORT@@",
+            format!("SG.{}.{}", fill(alnum, 21), fill(alnum, 43)),
+        ),
+        (
+            "@@SENDGRID_LONG@@",
+            format!("SG.{}.{}", fill(alnum, 22), fill(alnum, 44)),
+        ),
+        // Values the providers' documentation prints as examples, split here
+        // so no scanner mistakes this file for a leak.
+        (
+            "@@AZURITE_KEY@@",
+            concat!(
+                "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq",
+                "/K1SZFPTOtr/KBHBeksoGMGw=="
+            )
+            .to_string(),
+        ),
+        (
+            "@@DATABRICKS_DOC_EXAMPLE@@",
+            concat!("dapi", "12345678901234567890123456789012").to_string(),
+        ),
         (
             "@@PRIVATE_KEY_BLOCK@@",
             "-----BEGIN RSA PRIVATE KEY-----".to_string(),
@@ -131,6 +172,9 @@ fn code_of(s: &str) -> Option<&'static str> {
 }
 
 fn group_of(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("detectors2/") {
+        return format!("detectors2/{}", group_of(rest));
+    }
     if let Some(rest) = path.strip_prefix("edge/") {
         return format!("edge/{}", rest.split('/').next().unwrap_or(""));
     }
@@ -175,16 +219,24 @@ fn expected_skip(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Copy `cases/` into `root`, expanding placeholders, and collect the labels
-/// and the expected `(path, reason)` skips.
-fn materialize_cases(root: &Path, cases: &mut Vec<Case>, skips: &mut BTreeSet<(String, String)>) {
-    let src_root = Path::new(CORPUS).join("cases");
+/// Copy `dir/` (`cases/` or `detectors2/`) into `root`, expanding
+/// placeholders, and collect the labels and the expected `(path, reason)`
+/// skips. A labelled line counts as `truth`: `Report`, or `Clean` for set-2
+/// shapes scored without the opt-in.
+fn materialize_cases(
+    root: &Path,
+    dir: &str,
+    truth: Truth,
+    cases: &mut Vec<Case>,
+    skips: &mut BTreeSet<(String, String)>,
+) {
+    let src_root = Path::new(CORPUS).join(dir);
     let mut files = Vec::new();
     walk(&src_root, &mut files);
 
     for src in files {
         let rel = src.strip_prefix(&src_root).unwrap();
-        let rel_str = format!("cases/{}", rel.to_string_lossy().replace('\\', "/"));
+        let rel_str = format!("{dir}/{}", rel.to_string_lossy().replace('\\', "/"));
         if rel_str.ends_with(".expect") {
             continue;
         }
@@ -236,7 +288,7 @@ fn materialize_cases(root: &Path, cases: &mut Vec<Case>, skips: &mut BTreeSet<(S
                 path: rel_str.clone(),
                 line,
                 code,
-                truth: Truth::Report,
+                truth,
                 group: group.clone(),
             });
         }
@@ -546,17 +598,40 @@ fn write_baseline(deviations: &BTreeMap<String, String>, old: &BTreeMap<String, 
     std::fs::write(Path::new(CORPUS).join("baseline.tsv"), out).unwrap();
 }
 
-#[test]
-fn corpus_matches_labels_up_to_the_recorded_baseline() {
-    let root = std::env::temp_dir().join(format!("kvcli-corpus-{}", std::process::id()));
+/// The contract each run audits with: the built-in defaults, pinned so no
+/// contract above the temp dir applies, plus the detector set.
+fn corpus_contract(detectors: u32) -> String {
+    match detectors {
+        1 => "version: 1\n".to_string(),
+        n => format!("version: 1\nsecrets:\n  detectors: {n}\n"),
+    }
+}
+
+/// Materializes the corpus, audits it under detector set `detectors`, prints
+/// the report and checks it against the recorded baseline. Both sets share the
+/// baseline: set 2 adds shapes, so it must not add or remove a deviation.
+fn run_corpus(detectors: u32) {
+    let root =
+        std::env::temp_dir().join(format!("kvcli-corpus-{detectors}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    // Built-in defaults, pinned so no contract above the temp dir applies.
-    std::fs::write(root.join(".kovallent.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join(".kovallent.yaml"), corpus_contract(detectors)).unwrap();
 
     let mut cases = Vec::new();
     let mut expected_skips = BTreeSet::new();
-    materialize_cases(&root, &mut cases, &mut expected_skips);
+    materialize_cases(
+        &root,
+        "cases",
+        Truth::Report,
+        &mut cases,
+        &mut expected_skips,
+    );
+    let set2 = if detectors >= 2 {
+        Truth::Report
+    } else {
+        Truth::Clean
+    };
+    materialize_cases(&root, "detectors2", set2, &mut cases, &mut expected_skips);
     materialize_matrix(&root, &mut cases);
     materialize_edge(&root, &mut cases);
     let (mut reported, skipped) = findings(&root);
@@ -585,21 +660,29 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
         assert!(ids.insert(c.id.clone()), "duplicate case id {}", c.id);
     }
 
-    // Score labelled cases, consuming the findings they account for.
+    // Score labelled cases, consuming the findings they account for. Each
+    // outcome is tallied by group and by code.
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut by_code: BTreeMap<String, Tally> = BTreeMap::new();
     let mut deviations: BTreeMap<String, String> = BTreeMap::new();
     for c in &cases {
         let key = (c.path.clone(), c.line, c.code.to_string());
         let got = reported.remove(&key);
+        let code = by_code.entry(c.code.to_string()).or_default();
         let t = tallies.entry(c.group.clone()).or_default();
         match (c.truth, got) {
-            (Truth::Report, true) => t.tp += 1,
+            (Truth::Report, true) => {
+                t.tp += 1;
+                code.tp += 1;
+            }
             (Truth::Report, false) => {
                 t.fn_ += 1;
+                code.fn_ += 1;
                 deviations.insert(c.id.clone(), "FN".into());
             }
             (Truth::Clean, true) => {
                 t.fp += 1;
+                code.fp += 1;
                 deviations.insert(c.id.clone(), "FP".into());
             }
             (Truth::Clean, false) => {}
@@ -609,6 +692,7 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
     for (path, line, code) in reported {
         let id = format!("{path}:{line}:{code}");
         tallies.entry(group_of(&path)).or_default().fp += 1;
+        by_code.entry(code).or_default().fp += 1;
         deviations.insert(id, "FP".into());
     }
 
@@ -620,32 +704,60 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
         a
     });
     println!(
-        "\ncorpus: {} labelled cases, {} expected skips",
+        "\ncorpus, secrets.detectors: {detectors}: {} labelled cases, {} expected skips",
         cases.len(),
         expected_skips.len()
     );
-    println!(
-        "{:<26} {:>5} {:>5} {:>5} {:>10} {:>8}",
-        "group", "TP", "FP", "FN", "precision", "recall"
-    );
-    for (group, t) in tallies
-        .iter()
-        .chain(std::iter::once((&"TOTAL".to_string(), &total)))
-    {
+    let row = |label: &str, t: &Tally| {
         println!(
-            "{group:<26} {:>5} {:>5} {:>5} {:>9.1}% {:>7.1}%",
+            "{label:<26} {:>5} {:>5} {:>5} {:>9.1}% {:>7.1}%",
             t.tp,
             t.fp,
             t.fn_,
             100.0 * t.precision(),
             100.0 * t.recall()
-        );
+        )
+    };
+    println!(
+        "{:<26} {:>5} {:>5} {:>5} {:>10} {:>8}",
+        "group", "TP", "FP", "FN", "precision", "recall"
+    );
+    for (group, t) in &tallies {
+        row(group, t);
     }
+    row("TOTAL", &total);
+    println!(
+        "{:<26} {:>5} {:>5} {:>5} {:>10} {:>8}",
+        "code", "TP", "FP", "FN", "precision", "recall"
+    );
+    for (code, t) in &by_code {
+        row(code, t);
+    }
+
+    // KV002 has no recorded deviations, under either set: every credential
+    // labelled is reported, and nothing else is.
+    let kv002 = by_code.get("KV002").expect("the corpus labels KV002 cases");
+    assert!(
+        kv002.fp == 0 && kv002.fn_ == 0,
+        "KV002 under secrets.detectors: {detectors}: {} FP, {} FN; it must stay at 100% \
+         precision and recall:\n  {}",
+        kv002.fp,
+        kv002.fn_,
+        deviations
+            .iter()
+            .filter(|(id, _)| id.ends_with(":KV002"))
+            .map(|(id, kind)| format!("{kind} {id}"))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
 
     let baseline = read_baseline();
     if std::env::var_os("KV_CORPUS_BLESS").is_some() {
-        write_baseline(&deviations, &baseline);
-        println!("baseline rewritten: {} deviations", deviations.len());
+        // The set-1 run owns the file; set 2 is held to the same list.
+        if detectors == 1 {
+            write_baseline(&deviations, &baseline);
+            println!("baseline rewritten: {} deviations", deviations.len());
+        }
         return;
     }
 
@@ -663,10 +775,21 @@ fn corpus_matches_labels_up_to_the_recorded_baseline() {
     }
     assert!(
         problems.is_empty(),
-        "corpus outcomes changed against tests/corpus/baseline.tsv:\n{}\n\
+        "corpus outcomes under secrets.detectors: {detectors} changed against \
+         tests/corpus/baseline.tsv:\n{}\n\
          If intended, rerun with KV_CORPUS_BLESS=1 and review the diff.",
         problems.join("\n")
     );
+}
+
+#[test]
+fn corpus_matches_labels_up_to_the_recorded_baseline() {
+    run_corpus(1);
+}
+
+#[test]
+fn corpus_with_detector_set_2_matches_the_same_baseline() {
+    run_corpus(2);
 }
 
 // --- speed -------------------------------------------------------------------

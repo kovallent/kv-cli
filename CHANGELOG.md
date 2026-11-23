@@ -11,6 +11,48 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.15.0] — 2026-11-23
+
+Opt-in secret detector set 2. **Existing repositories keep their behaviour and
+their fingerprint**: the new shapes apply only to a contract that says
+`secrets.detectors: 2`. The default contract's fingerprint stays
+`a6edcff00199c1cf`, every existing finding's fingerprint is unchanged, and the
+JSON payload's `schema_version` stays `1`. To opt in, set `detectors: 2` and
+update the pinned fingerprint in the same pull request; see
+[Upgrading](docs/configuration.md#upgrading).
+
+### Added
+
+- **`secrets.detectors`, the built-in detector set.** `1`, the default, is
+  `secrets.value_patterns` alone, as before. `2` adds three shapes, each
+  checked against the provider's current documentation, which is cited
+  beside the pattern:
+  - `azure_storage_key`: an Azure Storage account key inside a connection
+    string, `AccountName=…;AccountKey=` and 88 base64 characters. A bare
+    88-character base64 string is not reported.
+  - `databricks_pat`: `dapi` and 32 hex characters, with an optional
+    `-<digits>` suffix, in every file and under any name. Before, only the
+    Databricks profile reported it, in files that use Databricks.
+  - `sendgrid_api_key`: `SG.`, 22 characters, a dot and 43 characters.
+
+  The examples the providers print in their documentation are never
+  reported under set 2. Findings are redacted, and `fix` handles them, as for
+  the existing value patterns. A set never changes once released. Any other
+  value is a contract error located to its line, and the contract schema
+  (`schema/contract.v1.json`) accepts `1` and `2`. See
+  [`KV002`](docs/rules/KV002.md#detector-sets).
+- **`kv-cli init` writes `detectors: 2`**, with a one-line comment, so a new
+  contract starts with every shape. Its fingerprint is `4bc0fc3192e4e992`,
+  and `init` now prints it.
+- **The labelled corpus runs under both sets.** `tests/corpus/detectors2/`
+  holds positives, near-misses and the providers' documented examples. KV002
+  stays at 100% precision and recall under set 1 (1156 cases) and set 2
+  (1168).
+
 ### Known limits
 
 - **PEP 696 type-parameter defaults parse only partially.** tree-sitter-python

@@ -39,6 +39,20 @@ Mistakes in a contract are caught at three points, each before they can quietly 
 
 - **On every run.** `audit` and `fix` refuse an invalid contract (exit `2`) with the same list. Beyond types and unknown keys, a contract is rejected when a parameter would not render as one Python parameter (so `fix` can never write a syntax error), a parameter is listed twice, a regex does not compile or matches the empty string (it would flag every line, or, as a naming pattern, require nothing of a name), a naming rule has no name or shares one, a pattern matches everything (disabling its own rule), or a framework is unknown, both enabled and disabled, or `auto` is disabled, or `sql.paths` names a key stage 1 doesn't read, or an `sql.allow_names` pattern is empty or matches every name.
 
+## Secret detector sets
+
+`secrets.detectors` picks the set of built-in credential shapes that [`KV002`](rules/KV002.md#detector-sets) adds to `secrets.value_patterns`:
+
+```yaml
+secrets:
+  detectors: 2   # 1 (the default): value_patterns alone; 2: also Azure storage keys, Databricks tokens and SendGrid keys
+```
+
+- **`1`**, the default when the key is absent: `secrets.value_patterns` alone, by default the 12 shapes kv-cli has always shipped.
+- **`2`**: set 1, plus `azure_storage_key` (an `AccountKey=` inside an Azure Storage connection string), `databricks_pat` and `sendgrid_api_key`. `kv-cli init` writes `detectors: 2` from 0.15.0.
+
+A set never changes after its release; new shapes come as a new set. Any other value is a contract error located to its line. The field is left out of the fingerprint at `1`, so contracts that don't mention it kept theirs; `detectors: 2` is part of the contract, so setting it changes the fingerprint. A contract with nothing but `version: 1` and `secrets.detectors: 2`, like the one `kv-cli init` writes, has the fingerprint `4bc0fc3192e4e992`.
+
 ## SQL
 
 The `sql:` section says which dbt SQL models are read and how. `KV003` applies to them under the `infrastructure` settings: `enabled`, `severity`, `value_patterns`, `allow_values` and `ignore_marker` work as they do for Python, so `infrastructure.enabled: false` turns SQL `KV003` off too. See [`KV003`](rules/KV003.md#dbt-sql-models) for what is reported.
@@ -91,6 +105,12 @@ infrastructure:
 ```
 
 ## Upgrading
+
+**Upgrading to 0.15.0.** Existing repositories keep their behaviour and their fingerprint. 0.15.0 adds detector set 2, which reports Azure Storage account keys in connection strings, Databricks personal access tokens in any file and SendGrid API keys, but only for a contract that says `secrets.detectors: 2`. A contract that doesn't mention the field stays on set 1, reports what it reported before and keeps its fingerprint. `kv-cli init` now writes `detectors: 2`, so a freshly initialised contract's fingerprint is `4bc0fc3192e4e992` where it used to be `a6edcff00199c1cf`. To opt in an existing repository:
+
+1. Add `detectors: 2` under `secrets:` in `.kovallent.yaml`, and run `kv-cli audit` to see what it now reports. Set-2 findings are `KV002` errors, so they gate.
+2. Run `kv-cli contract show`. Its second line, `# fingerprint …`, is the contract's new fingerprint.
+3. Update the pinned expected fingerprint **in the same pull request**, so the contract change and its new pin are reviewed and land together. Where the pin is an organization variable such as `KOVALLENT_CONTRACT_SHA`, whoever owns it sets the new value as that pull request merges. Wherever the pin and the contract disagree, the run reports contract drift, exit `3`.
 
 **Upgrading to 0.14.0.** Fingerprints do not change, but a repository with a dbt project may see **new KV003 warnings in its SQL models**. kv-cli now reads the `.sql` files under each `dbt_project.yml`'s model and snapshot paths, and reports a hardcoded three-part relation such as `ANALYTICS_PROD.RAW.ORDERS`, a `USE WAREHOUSE` or `USE DATABASE` statement, and an object-store path in a `COPY INTO` or `LOCATION` clause. They are warnings, so nothing gates unless you run `--strict`. A model that kv-cli can't parse is listed as skipped with reason `sql_not_parsed`, which is also a warning that gates only under `--strict`; its detail says why. Replace a relation with `{{ ref() }}` or `{{ source() }}`, move a `USE` statement's warehouse or database to the dbt target in `profiles.yml`, and pass a path in with `var()` or `env_var()`; `kv-cli fix` lists each one. To opt out, set `sql.enabled: false`; unlike the default, that value is part of the contract, so it changes the fingerprint: re-pin `--expect-contract` if you set it.
 
