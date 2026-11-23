@@ -54,7 +54,7 @@ required to take a contract parameter, and `kv-cli fix` never changes its signat
   `@dlt.expect_or_fail`, `@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail`;
 - `@pandas_udf`.
 
-Before kv-cli's next release, `@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail`
+Up to kv-cli 0.16.0, `@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail`
 exempt a function only through the `@dlt.table` or `@dlt.view` they decorate, which every
 DLT expectation does.
 
