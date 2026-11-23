@@ -7,6 +7,7 @@ mod configscan;
 mod fix;
 mod frameworks;
 mod jinja;
+mod mcp;
 mod notebook;
 mod payload;
 mod python;
@@ -67,7 +68,10 @@ const STAR_CTA: &str =
         0  compliant\n  \
         1  findings\n  \
         2  tool error\n  \
-        3  contract drift (see --expect-contract)"
+        3  contract drift (see --expect-contract)\n\n\
+        Use with AI agents: `kv-cli mcp` serves these checks to Claude Code, Cursor,\n\
+        VS Code and other MCP clients. Setup:\n  \
+        https://github.com/kovallent/kv-cli/blob/main/docs/mcp.md"
 )]
 struct Cli {
     /// Disable coloured output.
@@ -177,6 +181,18 @@ enum Command {
         no_backup: bool,
     },
 
+    /// Serve kv-cli's checks to AI coding agents over the Model Context
+    /// Protocol, on stdin and stdout.
+    #[command(
+        after_help = "An MCP client starts this for you; it reads JSON-RPC on stdin and\n\
+        writes it on stdout until stdin closes. No network, no socket.\n\n\
+        Tools: audit, explain, contract_show, contract_check, frameworks,\n\
+        fix_preview, fix_apply. No tool edits the contract or reads the CI pin.\n\n\
+        Setup for Claude Code, Cursor and VS Code:\n  \
+        https://github.com/kovallent/kv-cli/blob/main/docs/mcp.md"
+    )]
+    Mcp,
+
     /// Explain a rule: what it catches, how to fix it, how to suppress it.
     #[command(after_help = "Examples:\n  \
         kv-cli explain              list the rules\n  \
@@ -272,6 +288,7 @@ fn main() -> ExitCode {
             fix.code
         }),
         Command::Explain { code } => cmd_explain(code.as_deref()),
+        Command::Mcp => mcp::run(),
     };
 
     match code {
@@ -297,6 +314,9 @@ fn emits_machine_output(command: &Command) -> bool {
             action: ContractAction::Show { .. } | ContractAction::Schema,
         } => true,
         Command::Audit { format, .. } => *format != Format::Text,
+        // stdout is the protocol channel; nothing else may reach it, and the
+        // star line has no place on stderr either.
+        Command::Mcp => true,
         _ => false,
     }
 }

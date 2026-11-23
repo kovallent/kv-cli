@@ -1667,7 +1667,7 @@ pub fn render_param(p: &crate::config::RequiredParameter) -> String {
 }
 
 /// Never echo a full credential back to the terminal or a CI log.
-fn redact(value: &str) -> String {
+pub(crate) fn redact(value: &str) -> String {
     let v = value.trim();
     let n = v.chars().count();
     if n <= 4 {
