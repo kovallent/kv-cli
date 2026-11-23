@@ -1,6 +1,6 @@
 # 0006 — `kv-cli mcp`: a local MCP server
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-23
 - **Deciders:** the owner; see [Open questions](#open-questions-for-the-owner)
 - **Supersedes:** none
