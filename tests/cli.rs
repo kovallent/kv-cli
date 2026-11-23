@@ -2697,3 +2697,63 @@ fn fix_leaves_bundle_kv003_alone() {
     assert!(stdout.contains("nothing to fix"), "{stdout}");
     assert!(!stdout.contains("manual:"), "{stdout}");
 }
+
+/// PEP 696 type-parameter defaults (`def f[T = int](…)`, `class C[T = str]:`)
+/// parse only partially in tree-sitter-python, and the fix has to come from
+/// upstream. Whatever the pinned grammar does, the file is never silently
+/// clean: either it is fully analysed and the governed function's KV001 is
+/// reported on its `def` line, or it is listed in `run.skipped` with
+/// `analysis: partial`. With tree-sitter-python 0.25.0 it is the latter; see
+/// CHANGELOG.md's known limits. Either way, `--strict` gates on it.
+#[test]
+fn pep696_type_parameter_defaults_are_never_silently_clean() {
+    let fixture = "tests/fixtures/pep696.py";
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture))
+        .expect("fixture");
+    let def_line = source
+        .lines()
+        .position(|l| l.starts_with("def deploy_orders[T = int]"))
+        .expect("the governed function uses a type-parameter default")
+        + 1;
+    assert!(source.contains("\nclass Registry[T = str]:"));
+
+    let (_, stdout) = repo_run(&["audit", fixture, "--format", "json"]);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("JSON payload");
+    common::check_payload(&payload);
+    let files = payload["run"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{payload:#}");
+    let file = &files[0];
+    assert_eq!(file["path"], "pep696.py");
+    assert_ne!(file["status"], "clean", "never silently clean: {payload:#}");
+
+    let skipped = payload["run"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["path"] == "pep696.py");
+    match file["analysis"].as_str() {
+        Some("full") => {
+            assert!(skipped.is_none(), "{payload:#}");
+            let kv001: Vec<u64> = payload["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| {
+                    f["code"] == "KV001"
+                        && f["symbol"] == "deploy_orders"
+                        && f["subject"] == "target_environment"
+                })
+                .map(|f| f["line"].as_u64().unwrap())
+                .collect();
+            assert_eq!(kv001, [def_line as u64], "{payload:#}");
+        }
+        Some("partial") => {
+            let skipped = skipped.unwrap_or_else(|| panic!("partial but not skipped: {payload:#}"));
+            assert_eq!(skipped["reason"], "syntax_error");
+        }
+        other => panic!("analysed as {other:?}: {payload:#}"),
+    }
+
+    let (strict, _) = repo_run(&["audit", fixture, "--strict"]);
+    assert_eq!(strict, Some(1), "--strict never passes it");
+}

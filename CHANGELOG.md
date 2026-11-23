@@ -11,7 +11,15 @@ versions may carry breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Known limits
+
+- **PEP 696 type-parameter defaults parse only partially.** tree-sitter-python
+  0.25.0, the pinned grammar, doesn't parse a default in a type-parameter
+  list, such as `def f[T = int](...)` or `class C[T = str]:`. A file using one
+  is listed in `skipped` as `syntax_error` with `analysis: partial` and
+  audited on the partial parse: it is never reported clean, and it gates
+  under `--strict`. The fix has to come from upstream; no tree-sitter-python
+  release parses these yet. `tests/fixtures/pep696.py` guards the behaviour.
 
 ---
 
