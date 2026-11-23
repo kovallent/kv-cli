@@ -50,13 +50,13 @@ The built-in Databricks profile owns these decorators, so a function under them 
 required to take a contract parameter, and `kv-cli fix` never changes its signature:
 
 - `@dlt.table`, `@dlt.view`, and the bare `@table` and `@view`;
-- `@dlt.expect`, `@dlt.expect_all`, `@dlt.expect_or_drop`, `@dlt.expect_or_fail`;
+- every expectation: `@dlt.expect`, `@dlt.expect_all`, `@dlt.expect_or_drop`,
+  `@dlt.expect_or_fail`, `@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail`;
 - `@pandas_udf`.
 
-`@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail` aren't on that list. A function
-using them is still exempt, through the `@dlt.table` or `@dlt.view` that every DLT
-expectation decorates. A function with an expectation decorator and no table or view
-isn't exempt.
+Before kv-cli's next release, `@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail`
+exempt a function only through the `@dlt.table` or `@dlt.view` they decorate, which every
+DLT expectation does.
 
 ## Notes
 

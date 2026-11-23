@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.14.0
+      - uses: kovallent/kv-cli@v0.16.0
         with:
           # An organization variable: pull-request authors cannot edit it.
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
@@ -44,12 +44,12 @@ Set `KOVALLENT_CONTRACT_SHA` once, as an **organization** variable, to your cont
 
 ### Pinning the Action
 
-`uses: kovallent/kv-cli@v0.14.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
+`uses: kovallent/kv-cli@v0.16.0` runs the `action.yml` from that tag and, by default, the kv-cli binary from the same release. To pin the Action by commit SHA instead, set `version`, because a SHA names no release:
 
 ```yaml
-      - uses: kovallent/kv-cli@<full commit SHA> # v0.14.0
+      - uses: kovallent/kv-cli@<full commit SHA> # v0.16.0
         with:
-          version: v0.14.0
+          version: v0.16.0
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
 
@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: kovallent/kv-cli@v0.14.0
+      - uses: kovallent/kv-cli@v0.16.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 
@@ -146,7 +146,7 @@ jobs:
       # the step above already decided the job's result.
       - name: kv-cli SARIF
         if: always()
-        run: pipx run --spec kv-cli==0.14.0 kv-cli audit --format sarif > kv-cli.sarif || true
+        run: pipx run --spec kv-cli==0.16.0 kv-cli audit --format sarif > kv-cli.sarif || true
 
       - name: Upload to code scanning
         if: always()

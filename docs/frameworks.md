@@ -7,7 +7,7 @@ Run `kv-cli frameworks` for the live list. Each profile is scoped to files that 
 | **dbt** | `def model(dbt, session)` | Owns the model signature; `profiles.yml` credential scanning |
 | **polars** | `import polars` | `storage_options` credentials; object-store path identifiers |
 | **flink** | `import pyflink` | Owns `@udf`/`@udtf`/`@udaf`; broker and JDBC endpoints |
-| **databricks** | `import dlt` / `databricks` / `pyspark` | Owns `@dlt.table`/`@dlt.view`; PATs; workspace URLs, cluster IDs, DBFS paths |
+| **databricks** | `import dlt` / `databricks` / `pyspark` | Owns `@dlt.table`/`@dlt.view` and every `@dlt.expect…` expectation; PATs; workspace URLs, cluster IDs, DBFS paths |
 | **snowpark** | `import snowflake` | Owns `@sproc`/`@udf`; session config account, warehouse, role |
 | **airflow** | `import airflow` | Owns `@dag`/`@task_group`/`@setup`/`@teardown`; governs `@task` (report-only); Fernet keys; `conn_id`, pool, queue |
 

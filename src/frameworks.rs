@@ -108,6 +108,8 @@ pub const PROFILES: &[FrameworkProfile] = &[
             "dlt.expect_all",
             "dlt.expect_or_drop",
             "dlt.expect_or_fail",
+            "dlt.expect_all_or_drop",
+            "dlt.expect_all_or_fail",
             "table",
             "view",
             "pandas_udf",
@@ -360,6 +362,23 @@ mod tests {
             "from pyflink.table import DataTypes, udf\n\
              @udf(result_type=DataTypes.INT())\ndef run_calc(x):\n    pass\n"
         ));
+    }
+
+    /// Every Delta Live Tables expectation decorator, on its own, makes the
+    /// function framework-owned - not only those that also carry `@dlt.table`.
+    #[test]
+    fn every_dlt_expectation_is_owned() {
+        for expectation in [
+            "expect(\"ok\", \"x > 0\")",
+            "expect_all({\"ok\": \"x > 0\"})",
+            "expect_or_drop(\"ok\", \"x > 0\")",
+            "expect_or_fail(\"ok\", \"x > 0\")",
+            "expect_all_or_drop({\"ok\": \"x > 0\"})",
+            "expect_all_or_fail({\"ok\": \"x > 0\"})",
+        ] {
+            let src = format!("import dlt\n@dlt.{expectation}\ndef orders_pipeline():\n    pass\n");
+            assert!(owns("databricks", &src), "@dlt.{expectation}");
+        }
     }
 
     /// The root of a dotted decorator resolves through an alias.

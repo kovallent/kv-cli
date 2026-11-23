@@ -1503,6 +1503,19 @@ fn standards_workflows_pin_this_release() {
             assert_eq!(pin, tag, "{file} is stale");
         }
     }
+
+    // And copied into a repository, the workflow passes its own gate.
+    let dir = tempdir("standards-workflow");
+    std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+    std::fs::copy(
+        repo.join("docs/standards/workflows/kovallent.yml"),
+        dir.join(".github/workflows/kovallent.yml"),
+    )
+    .unwrap();
+    let (code, payload) = run_json(&dir, &["--strict"]);
+    assert_eq!(payload["findings"], serde_json::json!([]), "{payload:#}");
+    assert_eq!(code, Some(0), "{payload:#}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every relative link in the README and docs/ points at a file that exists,
@@ -2310,12 +2323,29 @@ fn ci_wrappers_take_the_actions_inputs_and_pin_this_release() {
         Some(format!("kovallent/kv-cli@{version}").as_str())
     );
     let docs = repo_file("docs/ci.md");
-    for (what, pattern) in [
+    let tag = format!("v{version}");
+    for (what, pattern, want) in [
         (
             "GitLab component",
             r"component: \S+/kovallent/kv-cli/kv-cli@(\S+)",
+            version,
         ),
-        ("CircleCI orb", r"kv-cli: kovallent/kv-cli@(\S+)"),
+        ("CircleCI orb", r"kv-cli: kovallent/kv-cli@(\S+)", version),
+        ("pipx spec", r"--spec kv-cli==(\S+)", version),
+        // The Action, by tag or by SHA with its tag in a comment, and the
+        // `version` input that goes with a SHA. Older releases named on
+        // purpose ("available from `v0.7.1`") are prose, not these forms.
+        (
+            "GitHub Action",
+            r"uses: kovallent/kv-cli@(v[0-9][^\s`]*)",
+            &tag,
+        ),
+        (
+            "Action SHA comment",
+            r"kovallent/kv-cli@<full commit SHA> # (\S+)",
+            &tag,
+        ),
+        ("Action version input", r"(?m)^\s+version: (v\S+)$", &tag),
     ] {
         let pins: Vec<&str> = regex::Regex::new(pattern)
             .unwrap()
@@ -2324,7 +2354,7 @@ fn ci_wrappers_take_the_actions_inputs_and_pin_this_release() {
             .collect();
         assert!(!pins.is_empty(), "docs/ci.md has no {what} pin");
         for pin in pins {
-            assert_eq!(pin, version, "docs/ci.md {what} pin is stale");
+            assert_eq!(pin, want, "docs/ci.md {what} pin is stale");
         }
     }
 }

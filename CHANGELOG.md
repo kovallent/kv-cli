@@ -24,6 +24,18 @@ versions may carry breaking changes.
   `schema/contract.v1.json` with the fingerprint its page states, and that
   the examples pin the current release.
 
+### Fixed
+
+- **`@dlt.expect_all_or_drop` and `@dlt.expect_all_or_fail` are owned by the
+  Databricks profile**, like the other four DLT expectations. A function
+  carrying only one of them was in scope for KV001 and could be given
+  contract parameters by `kv-cli fix`. Functions that also carry
+  `@dlt.table` or `@dlt.view`, as DLT requires, were already exempt. No
+  fingerprint changes.
+- **`docs/ci.md`'s examples pin the current release.** The GitHub Action
+  examples and the SARIF workflow's `pipx` command still named 0.14.0. The
+  release-pin test now checks every form they pin a version in.
+
 ---
 
 ## [0.16.0] — 2026-11-23
