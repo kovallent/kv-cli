@@ -1,0 +1,31 @@
+# The Kovallent gate, for any preset in docs/standards/.
+#
+# Save as .github/workflows/kovallent.yml, then make "Kovallent gate" a
+# required status check. kv-cli reads the repository's .kovallent.yaml, so
+# the preset you copied there is what this enforces.
+name: Kovallent
+
+on:
+  pull_request:
+  push:
+    branches: [main] # your default branch
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Kovallent gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: kovallent/kv-cli@v0.16.0
+        with:
+          # The contract's fingerprint (`kv-cli contract show` prints it),
+          # stored as an organization variable so a pull request can't edit
+          # it. A pull request that weakens .kovallent.yaml fails with exit 3.
+          expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
+          # Warnings gate too: the Action's default, written out. Set "false"
+          # to gate on errors only.
+          strict: "true"
