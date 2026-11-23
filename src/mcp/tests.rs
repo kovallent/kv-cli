@@ -127,6 +127,19 @@ fn path(p: &Path) -> String {
     p.display().to_string()
 }
 
+/// `p` as a client sends a root: `file:///home/me/repo`, or on Windows
+/// `file:///C:/Users/me/repo` (without the `\\?\` prefix `canonicalize`
+/// adds).
+fn file_uri(p: &Path) -> String {
+    let shown = p.display().to_string();
+    if cfg!(windows) {
+        let plain = shown.strip_prefix(r"\\?\").unwrap_or(&shown);
+        format!("file:///{}", plain.replace('\\', "/"))
+    } else {
+        format!("file://{shown}")
+    }
+}
+
 // --- the security tests ADR 0006 and the build require ----------------------
 
 /// Every literal a KV002 finding flags in the samples, from the same audit
@@ -757,7 +770,7 @@ fn modern_roots_are_asked_for_and_narrow_the_workspace() {
         "roots/list"
     );
     // The retry, with a root narrower than the server's.
-    let uri = format!("file://{}", root.join("narrow").display());
+    let uri = file_uri(&root.join("narrow"));
     let retry = s
         .send(call(
             2,
@@ -769,7 +782,8 @@ fn modern_roots_are_asked_for_and_narrow_the_workspace() {
         retry["result"]["isError"], true,
         "deploy.py is outside the declared root"
     );
-    let inside = json!({ "inputResponses": { "roots": { "roots": [{ "uri": format!("file://{}", root.display()) }] } } });
+    let inside =
+        json!({ "inputResponses": { "roots": { "roots": [{ "uri": file_uri(&root) }] } } });
     let ok = s.send(call(3, inside)).pop().unwrap();
     assert_eq!(ok["result"]["structuredContent"]["verdict"], "FAIL");
     // Tools that use no workspace don't ask.
@@ -791,7 +805,7 @@ fn legacy_roots_are_requested_after_initialized() {
     let call = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
         "params": { "name": "audit", "arguments": { "paths": [path(&root.join("deploy.py"))] } } });
     assert!(s.server.handle(call.clone()).deferred.is_some());
-    let uri = format!("file://{}", root.join("narrow").display());
+    let uri = file_uri(&root.join("narrow"));
     assert!(s
         .send(json!({ "jsonrpc": "2.0", "id": roots_id, "result": { "roots": [{ "uri": uri }] } }))
         .is_empty());

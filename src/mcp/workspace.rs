@@ -296,6 +296,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // Unix paths make `file://` URIs directly; src/mcp/tests.rs covers roots
+    // on every platform.
+    #[cfg(unix)]
     #[test]
     fn client_roots_replace_the_working_directory() {
         let d = tempdir("roots");
