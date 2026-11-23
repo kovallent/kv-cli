@@ -1,0 +1,7 @@
+created <dir>/.kovallent.yaml
+  · required parameters: target_environment, dry_run
+  · secret detectors: 9 name patterns, 15 value patterns (detector set 2)
+  · contract 4bc0fc3192e4e992
+  · framework profiles: dbt, polars, flink, databricks, snowpark, airflow (auto-detected per file)
+
+Next: kv-cli audit

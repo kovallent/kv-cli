@@ -8,7 +8,7 @@ description: >
 parameters:
   version:
     type: string
-    default: v0.14.1
+    default: v0.15.0
     description: >
       kv-cli release to run, for example v0.11.0. Defaults to the release this
       version of the orb was published with.

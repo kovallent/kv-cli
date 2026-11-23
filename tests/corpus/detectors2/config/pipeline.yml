@@ -1,0 +1,7 @@
+databricks:
+  host: https://adb-1234567890123456.7.azuredatabricks.net
+  auth: "@@DATABRICKS_PAT@@"  # expect: KV002
+notifications:
+  sendgrid: "@@SENDGRID_API_KEY@@"  # expect: KV002
+  sendgrid_docs: "SG.xxxxxxxx.yyyyyyyy"
+  databricks_docs: "@@DATABRICKS_DOC_EXAMPLE@@"

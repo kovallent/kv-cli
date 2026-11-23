@@ -331,7 +331,9 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
         "created".green().bold(),
         target.display().to_string().bold()
     );
-    let c = Contract::default();
+    // Describe what was written, which is the template, not the built-in
+    // defaults: it opts new repositories into the larger detector set.
+    let c = Contract::from_yaml(DEFAULT_CONTRACT_YAML).expect("the init template parses");
     println!(
         "  {} required parameters: {}",
         "·".dimmed(),
@@ -342,11 +344,13 @@ fn cmd_init(dir: &Path, force: bool) -> Result<u8, String> {
             .join(", ")
     );
     println!(
-        "  {} secret detectors: {} name patterns, {} value patterns",
+        "  {} secret detectors: {} name patterns, {} value patterns (detector set {})",
         "·".dimmed(),
         c.secrets.key_patterns.len(),
-        c.secrets.value_patterns.len()
+        c.secrets.value_patterns.len() + config::detector_set_additions(c.secrets.detectors).len(),
+        c.secrets.detectors
     );
+    println!("  {} contract {}", "·".dimmed(), c.fingerprint());
     println!(
         "  {} framework profiles: {} (auto-detected per file)",
         "·".dimmed(),

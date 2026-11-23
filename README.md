@@ -29,14 +29,15 @@ This is a real session against [`samples/deploy.py`](samples/deploy.py), shorten
 $ kv-cli init
 created ./.kovallent.yaml
   · required parameters: target_environment, dry_run
-  · secret detectors: 9 name patterns, 12 value patterns
+  · secret detectors: 9 name patterns, 15 value patterns (detector set 2)
+  · contract 4bc0fc3192e4e992
   · framework profiles: dbt, polars, flink, databricks, snowpark, airflow (auto-detected per file)
 
 Next: kv-cli audit
 
 $ kv-cli audit --strict samples/deploy.py
 kv-cli audit  .kovallent.yaml  1 file
-  · contract a6edcff00199c1cf
+  · contract 4bc0fc3192e4e992
   · functions: 7 in scope, 0 framework-exempt, 2 user-exempt, 1 out of scope
 
 samples/deploy.py
@@ -168,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kovallent/kv-cli@v0.14.1
+      - uses: kovallent/kv-cli@v0.15.0
         with:
           expect-contract: ${{ vars.KOVALLENT_CONTRACT_SHA }}
 ```
@@ -194,7 +195,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install kv-cli
         env:
-          KV_VERSION: v0.14.1
+          KV_VERSION: v0.15.0
           TARGET: x86_64-unknown-linux-gnu
         run: |
           cd "$RUNNER_TEMP"
@@ -250,7 +251,7 @@ With the Action, that is the `expect-contract` input; in the workflow without it
 ```yaml
 repos:
   - repo: https://github.com/kovallent/kv-cli-pre-commit
-    rev: v0.14.1
+    rev: v0.15.0
     hooks:
       - id: kv-cli            # audits staged Python, notebooks and config files
       - id: kv-cli-contract   # validates .kovallent.yaml when it changes
@@ -351,7 +352,7 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 ### Other ways to install
 
 ```bash
-cargo install --git https://github.com/kovallent/kv-cli --tag v0.14.1
+cargo install --git https://github.com/kovallent/kv-cli --tag v0.15.0
 ```
 
 Building from source (`cargo install`, `make release`) needs a C compiler for the tree-sitter grammar: Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. The first compile takes a few minutes.

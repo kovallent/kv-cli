@@ -215,7 +215,11 @@ struct CompiledFramework {
 /// Compiled, reusable view of a contract.
 pub struct Engine {
     pub contract: Contract,
+    /// The contract's value patterns, then those its detector set adds.
     secret_values: Vec<(String, Regex)>,
+    /// Detector names and the provider-documented example values they never
+    /// report; see [`config::BuiltinDetector`].
+    documented_examples: Vec<(&'static str, &'static [&'static str])>,
     infra_values: Vec<(String, Regex)>,
     /// KV004: each naming rule's pattern, anchored to the whole name.
     naming: Vec<Regex>,
@@ -251,11 +255,24 @@ impl Engine {
                 })
                 .collect()
         };
-        let secret_values = if contract.secrets.enabled {
+        let mut secret_values = if contract.secrets.enabled {
             compile_list(&contract.secrets.value_patterns)
         } else {
             Vec::new()
         };
+        // The detector set's built-in shapes, after the contract's own. A
+        // contract pattern of the same name wins: it was written on purpose.
+        let mut documented_examples = Vec::new();
+        if contract.secrets.enabled {
+            for d in config::detector_set_additions(contract.secrets.detectors) {
+                documented_examples.push((d.name, d.documented_examples));
+                if secret_values.iter().any(|(n, _)| n == d.name) {
+                    continue;
+                }
+                let re = Regex::new(d.regex).expect("built-in detector patterns compile");
+                secret_values.push((d.name.to_string(), re));
+            }
+        }
         let infra_values = if contract.infrastructure.enabled {
             compile_list(&contract.infrastructure.value_patterns)
         } else {
@@ -286,6 +303,7 @@ impl Engine {
         Ok(Self {
             contract,
             secret_values,
+            documented_examples,
             infra_values,
             naming,
             frameworks: compiled,
@@ -389,6 +407,17 @@ impl Engine {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, re)| re)
+    }
+
+    /// True when `matched`, found by the detector `name`, is a value that
+    /// detector's provider documents as an example. Applies to a framework
+    /// profile's pattern of the same name too, so the example is silent
+    /// whichever pattern finds it.
+    fn documented_example(&self, name: &str, matched: &str) -> bool {
+        self.documented_examples
+            .iter()
+            .filter(|(n, _)| *n == name)
+            .any(|(_, examples)| examples.iter().any(|e| matched.contains(e)))
     }
 
     /// True when `rel`, a `/`-separated path relative to the project, is
@@ -773,6 +802,9 @@ impl Engine {
             .chain(framework_values)
         {
             for mat in re.find_iter(source) {
+                if self.documented_example(name, mat.as_str()) {
+                    continue;
+                }
                 let line = line_starts.partition_point(|&s| s <= mat.start());
                 if skip(line) {
                     continue;
@@ -1281,6 +1313,9 @@ impl FileContext<'_> {
         // Rule 2: high-confidence credential shapes anywhere in the file.
         for (framework, (name, re)) in self.secret_value_patterns() {
             for mat in re.find_iter(source) {
+                if self.engine.documented_example(name, mat.as_str()) {
+                    continue;
+                }
                 let line = a.line_of(mat.start());
                 if self.line_ignored(source, a, line, &cfg.ignore_marker) {
                     continue;
@@ -1350,10 +1385,11 @@ impl FileContext<'_> {
                 continue;
             }
             let text = lit.text(source);
-            let Some((framework, (name, mat))) = patterns
-                .iter()
-                .find_map(|(fw, (name, re))| re.find(&text).map(|m| (*fw, (name, m))))
-            else {
+            let Some((framework, (name, mat))) = patterns.iter().find_map(|(fw, (name, re))| {
+                re.find(&text)
+                    .filter(|m| !self.engine.documented_example(name, m.as_str()))
+                    .map(|m| (*fw, (name, m)))
+            }) else {
                 continue;
             };
             if !covered.insert(lit.span.clone()) {
@@ -3213,5 +3249,224 @@ jobs:
         }
         let not_bundle = engine().audit_config("jobs.yml", JOBS, ConfigKind::Yaml, None, false);
         assert!(not_bundle.is_empty(), "{not_bundle:#?}");
+    }
+
+    // --- detector set 2 -------------------------------------------------
+
+    /// Credential-shaped values, assembled at run time so the repository
+    /// never holds one whole.
+    fn fill(alphabet: &str, n: usize) -> String {
+        alphabet.chars().cycle().take(n).collect()
+    }
+    /// 86 base64 characters and `==`: a 512-bit key.
+    fn azure_key() -> String {
+        format!("{}==", fill("R7c2Kq9Lm4Xv8Bn1Zt6Wy3Hs5Jd0Pf+/", 86))
+    }
+    fn azure_connection(key: &str) -> String {
+        format!(
+            "DefaultEndpointsProtocol=https;AccountName=acmeprodlake;AccountKey={key};\
+             EndpointSuffix=core.windows.net"
+        )
+    }
+    fn databricks_pat() -> String {
+        format!("dapi{}", "7c2a9f4e8b1d6a3c5e0f7c2a9f4e8b1d")
+    }
+    /// `SG.`, 22 and 43 characters; ending in `-`, which `\b` can't follow.
+    fn sendgrid_key() -> String {
+        format!(
+            "SG.{}.{}-",
+            fill("R7c2Kq9Lm4Xv-8Bn1_Zt6W", 22),
+            fill("Hs5Jd0Pf_R7c2Kq9Lm4Xv8Bn1Zt6Wy3", 42)
+        )
+    }
+
+    fn engine_with(detectors: u32) -> Engine {
+        let yaml = format!("version: 1\nsecrets:\n  detectors: {detectors}\n");
+        Engine::new(Contract::from_yaml(&yaml).unwrap()).unwrap()
+    }
+
+    /// `(detector, line)` of each KV002 finding on Python `src`.
+    fn kv002_py(e: &Engine, src: &str) -> Vec<(String, usize)> {
+        let a = python::analyze(src);
+        e.context(&a)
+            .audit("t.py", src, &a)
+            .into_iter()
+            .filter(|f| f.code == CODE_HARDCODED_SECRET)
+            .map(|f| match f.kind {
+                FindingKind::HardcodedSecret { detector, .. } => (detector, f.line),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    fn kv002_cfg(e: &Engine, name: &str, src: &str, kind: ConfigKind) -> Vec<(String, usize)> {
+        e.audit_config(name, src, kind, None, false)
+            .into_iter()
+            .filter(|f| f.code == CODE_HARDCODED_SECRET)
+            .map(|f| match f.kind {
+                FindingKind::HardcodedSecret { detector, .. } => (detector, f.line),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    fn one(detector: &str, line: usize) -> Vec<(String, usize)> {
+        vec![(detector.to_string(), line)]
+    }
+
+    /// Under names no key rule matches, so only the value patterns can fire.
+    fn positives() -> String {
+        format!(
+            "conn = \"{}\"\nhost_auth = \"{}\"\nmail_cfg = \"{}\"\n",
+            azure_connection(&azure_key()),
+            databricks_pat(),
+            sendgrid_key()
+        )
+    }
+
+    #[test]
+    fn detector_set_1_adds_none_of_the_three() {
+        assert!(kv002_py(&engine(), &positives()).is_empty());
+        assert!(kv002_py(&engine_with(1), &positives()).is_empty());
+    }
+
+    #[test]
+    fn detector_set_2_finds_each_shape_under_any_name() {
+        assert_eq!(
+            kv002_py(&engine_with(2), &positives()),
+            vec![
+                ("azure_storage_key".to_string(), 1),
+                ("databricks_pat".to_string(), 2),
+                ("sendgrid_api_key".to_string(), 3)
+            ]
+        );
+        // Config files and .env, where connection strings usually live.
+        let e = engine_with(2);
+        let json = format!(
+            "{{\n  \"ConnectionStrings\": {{\n    \"Lake\": \"{}\"\n  }}\n}}\n",
+            azure_connection(&azure_key())
+        );
+        assert_eq!(
+            kv002_cfg(&e, "appsettings.json", &json, ConfigKind::Json),
+            one("azure_storage_key", 3)
+        );
+        let env = format!(
+            "DATABRICKS_HOST_AUTH={}-2\nMAIL={}\n",
+            databricks_pat(),
+            sendgrid_key()
+        );
+        assert_eq!(
+            kv002_cfg(&e, ".env", &env, ConfigKind::Env),
+            vec![
+                ("databricks_pat".to_string(), 1),
+                ("sendgrid_api_key".to_string(), 2)
+            ]
+        );
+        // A connection string written over lines, as the docs print some.
+        let spread = format!(
+            "conn = (\"AccountName=acmeprodlake;\"\n        \" AccountKey={}\")\n",
+            azure_key()
+        );
+        assert_eq!(kv002_py(&e, &spread), one("azure_storage_key", 1));
+    }
+
+    #[test]
+    fn detector_set_2_stays_silent_on_near_misses() {
+        let e = engine_with(2);
+        let key = azure_key();
+        let near = [
+            // An 88-character base64 blob outside a connection string.
+            format!("blob = \"{key}\"\n"),
+            // `AccountKey=` without the connection string around it.
+            format!("cfg = \"AccountKey={key}\"\n"),
+            // An 87-character value, not a 512-bit key.
+            format!("conn = \"{}\"\n", azure_connection(&key[1..])),
+            // `dapi` and 31 hex characters; and 33.
+            format!("t = \"dapi{}\"\n", &databricks_pat()[4..35]),
+            format!("t = \"{}a\"\n", databricks_pat()),
+            // `SG.` with the wrong segment lengths.
+            format!("k = \"SG.{}.{}\"\n", "a".repeat(21), "b".repeat(43)),
+            format!("k = \"SG.{}.{}\"\n", "a".repeat(22), "b".repeat(42)),
+            format!("k = \"SG.{}.{}\"\n", "a".repeat(22), "b".repeat(44)),
+            // Each provider's documented placeholders.
+            "conn = \"DefaultEndpointsProtocol=https;AccountName=myAccountName;AccountKey=myAccountKey\"\n"
+                .to_string(),
+            "conn = \"DefaultEndpointsProtocol=https;AccountName=storagesample;AccountKey=<account-key>\"\n"
+                .to_string(),
+            format!(
+                "conn = \"DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey={};\"\n",
+                concat!(
+                    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq",
+                    "/K1SZFPTOtr/KBHBeksoGMGw=="
+                )
+            ),
+            format!("t = \"{}\"\n", concat!("dapi", "12345678901234567890123456789012")),
+            "k = \"SG.xxxxxxxx.yyyyyyyy\"\n".to_string(),
+            "k = \"<<YOUR_API_KEY>>\"\n".to_string(),
+        ];
+        for src in &near {
+            assert_eq!(kv002_py(&e, src), vec![], "{src}");
+        }
+    }
+
+    /// The documented Databricks example is silent under set 2 even in a file
+    /// the databricks profile applies to, whose own pattern also matches it.
+    #[test]
+    fn a_documented_example_is_silent_whichever_pattern_finds_it() {
+        let src = format!(
+            "from pyspark.sql import SparkSession\nhost_auth = \"{}\"\n",
+            concat!("dapi", "12345678901234567890123456789012")
+        );
+        assert_eq!(kv002_py(&engine_with(2), &src), vec![]);
+        // Set 1 is unchanged: the profile's pattern reports it, as before.
+        assert_eq!(kv002_py(&engine_with(1), &src), one("databricks_pat", 2));
+    }
+
+    /// Redaction is the same as for every value pattern: two characters and
+    /// a length, never the value.
+    #[test]
+    fn set_2_matches_are_redacted() {
+        let e = engine_with(2);
+        let src = positives();
+        let a = python::analyze(&src);
+        let found = e.context(&a).audit("t.py", &src, &a);
+        let details: Vec<String> = found.iter().map(|f| f.detail.clone().unwrap()).collect();
+        assert_eq!(
+            details,
+            [
+                "matched \"Ac…\" (<redacted>, 124 chars)",
+                "matched \"da…\" (<redacted>, 36 chars)",
+                "matched \"SG…\" (<redacted>, 70 chars)"
+            ]
+        );
+        let all = format!("{found:?}");
+        for secret in [azure_key(), databricks_pat(), sendgrid_key()] {
+            assert!(!all.contains(&secret[2..]), "a matched value leaked");
+        }
+    }
+
+    /// A contract's own pattern of the same name replaces the built-in one.
+    #[test]
+    fn a_contract_pattern_of_the_same_name_wins() {
+        let yaml = "version: 1\nsecrets:\n  detectors: 2\n  value_patterns:\n    - name: databricks_pat\n      regex: 'dapi_never'\n";
+        let e = Engine::new(Contract::from_yaml(yaml).unwrap()).unwrap();
+        assert_eq!(
+            kv002_py(&e, &format!("t = \"{}\"\n", databricks_pat())),
+            vec![]
+        );
+        assert_eq!(
+            e.secret_values
+                .iter()
+                .filter(|(n, _)| n == "databricks_pat")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn secrets_disabled_disables_set_2_too() {
+        let yaml = "version: 1\nsecrets:\n  enabled: false\n  detectors: 2\n";
+        let e = Engine::new(Contract::from_yaml(yaml).unwrap()).unwrap();
+        assert!(kv002_py(&e, &positives()).is_empty());
     }
 }

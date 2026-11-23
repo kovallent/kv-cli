@@ -575,6 +575,19 @@ pub struct SecretsConfig {
     /// High-confidence literal shapes matched anywhere in the file.
     #[serde(default = "default_secret_values")]
     pub value_patterns: Vec<ValuePattern>,
+    /// Which built-in detector set adds to `value_patterns`. `1` adds
+    /// nothing: `value_patterns` alone, today's 12 by default. `2` also
+    /// applies `azure_storage_key`, `databricks_pat` and `sendgrid_api_key`.
+    /// Any other value is a contract error. A set never changes once
+    /// released; new built-in shapes arrive as a new set, so opting in is
+    /// always a contract change you can see.
+    //
+    // Left out of the serialized contract at its default, so the built-in
+    // contract, and every contract that does not set it, keeps the
+    // fingerprint it had before the field existed (ADR 0001).
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    #[schemars(range(min = 1, max = 2))]
+    pub detectors: u32,
     /// Placeholder values that are never reported.
     #[serde(default = "default_secret_allow")]
     pub allow_values: Vec<String>,
@@ -595,6 +608,91 @@ pub struct SecretsConfig {
     /// key rule only.
     #[serde(default = "default_placeholders")]
     pub placeholder_patterns: Vec<String>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(n: &u32) -> bool {
+    *n == 1
+}
+
+/// The detector sets this build knows: `secrets.detectors` must be one.
+pub const DETECTOR_SETS: &[u32] = &[1, 2];
+
+/// A built-in credential shape that a detector set adds to
+/// `secrets.value_patterns`. It isn't part of the serialized contract: the
+/// set's number is, and a set's shapes never change once released.
+pub struct BuiltinDetector {
+    pub name: &'static str,
+    pub regex: &'static str,
+    /// Values the provider's own documentation prints as examples. They
+    /// match the shape but are never reported: one is the storage emulator's
+    /// published key, the other a sample token.
+    pub documented_examples: &'static [&'static str],
+}
+
+/// Detector set 2's additions to the 12 value patterns of set 1. Each shape
+/// was checked against the provider's documentation on 2026-11-23.
+pub const DETECTOR_SET_2: &[BuiltinDetector] = &[
+    // Azure Storage account key, matched inside a connection string, never as
+    // a bare base64 blob.
+    // - Connection string format, `AccountName` before `AccountKey`, with
+    //   optional whitespace after `;`: "DefaultEndpointsProtocol=[http|https];
+    //   AccountName=myAccountName;AccountKey=myAccountKey"
+    //   https://learn.microsoft.com/en-us/azure/storage/common/storage-configure-connection-string
+    // - Key size: "Azure generates two 512-bit storage account access keys
+    //   for the account." 512 bits is 64 bytes: 88 base64 characters, the
+    //   last two `==`.
+    //   https://learn.microsoft.com/en-us/azure/storage/common/storage-account-keys-manage
+    // - The emulator's published key, from the connection-string page above,
+    //   is an example, not a secret.
+    BuiltinDetector {
+        name: "azure_storage_key",
+        regex: r"(?i:AccountName)=[^;\s'\x22]+;\s*(?i:AccountKey)=[A-Za-z0-9+/]{86}==",
+        documented_examples: &[concat!(
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq",
+            "/K1SZFPTOtr/KBHBeksoGMGw=="
+        )],
+    },
+    // Databricks personal access token: `dapi` and 32 hex characters.
+    // - "The new token's value is in the response's token_value field, for
+    //   example dapi" and 32 digits, the `documented_examples` entry below
+    //   (split there so no scanner reads this file as a leak).
+    //   https://docs.databricks.com/partner-connect/admin.html
+    // - "A combination of 32 characters consisting of: a-f or A-F
+    //   (case-sensitive) or 0-9", keyword `dapi`:
+    //   https://learn.microsoft.com/en-us/purview/sit-defn-azure-databricks-personal-access-token
+    // - The optional `-<digits>` suffix isn't described on either page; it
+    //   only lengthens a match, never decides one.
+    BuiltinDetector {
+        name: "databricks_pat",
+        regex: r"\bdapi[0-9a-fA-F]{32}(?:-[0-9]+)?\b",
+        documented_examples: &[concat!("dapi", "12345678901234567890123456789012")],
+    },
+    // SendGrid API key: `SG.`, then 22 and 43 characters of `[A-Za-z0-9_-]`
+    // separated by a dot: 69 characters in all.
+    // - "API keys limited to 69 characters", and the example response
+    //   `"api_key": "SG.xxxxxxxx.yyyyyyyy"`:
+    //   https://www.twilio.com/docs/sendgrid/api-reference/api-keys/create-api-keys
+    // - The 22/43 split isn't stated there; it is what adds up to the
+    //   documented 69 (3 + 22 + 1 + 43). A key can end in `-`, which `\b`
+    //   can't follow, so the character after it is matched instead.
+    BuiltinDetector {
+        name: "sendgrid_api_key",
+        regex: r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?:[^A-Za-z0-9_-]|$)",
+        documented_examples: &[],
+    },
+];
+
+/// The shapes `secrets.detectors: n` adds to `secrets.value_patterns`.
+pub fn detector_set_additions(n: u32) -> &'static [BuiltinDetector] {
+    if n >= 2 {
+        DETECTOR_SET_2
+    } else {
+        &[]
+    }
 }
 
 fn yes() -> bool {
@@ -680,6 +778,7 @@ impl Default for SecretsConfig {
                         .into(),
                 },
             ],
+            detectors: 1,
             allow_values: [
                 "",
                 "changeme",
@@ -991,6 +1090,21 @@ impl Contract {
                     Ok(_) => {}
                 }
             }
+        }
+
+        // --- secrets.detectors: a detector set this build has. A typo'd or
+        // future set would otherwise run with fewer shapes than it says.
+        if !DETECTOR_SETS.contains(&self.secrets.detectors) {
+            problem(
+                "secrets.detectors".into(),
+                locate(raw, "detectors", &self.secrets.detectors.to_string(), 0),
+                format!(
+                    "detector set {} doesn't exist; this build has sets 1 (the 12 built-in \
+                     value patterns) and 2 (those, plus azure_storage_key, databricks_pat and \
+                     sendgrid_api_key)",
+                    self.secrets.detectors
+                ),
+            );
         }
 
         // --- naming rules (KV004): a name findings can report, and a
@@ -1384,6 +1498,8 @@ secrets:
     - "*access_key*"
     - "*private_key*"
     - "*credential*"
+  # Built-in shapes added to value_patterns: 2 adds Azure storage keys, Databricks tokens and SendGrid keys.
+  detectors: 2
   # High-confidence literal shapes, matched anywhere in the file.
   value_patterns:
     - name: aws_access_key_id
@@ -1799,9 +1915,26 @@ mod tests {
 
     #[test]
     fn the_init_template_has_no_unknown_keys() {
-        let c = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
-        // ...and means exactly the built-in defaults.
+        let mut c = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
+        // ...and means exactly the built-in defaults, apart from the larger
+        // detector set it gives new repositories.
+        assert_eq!(c.secrets.detectors, 2);
+        c.secrets.detectors = 1;
         assert_eq!(c.fingerprint(), Contract::default().fingerprint());
+    }
+
+    /// The fingerprint of a fresh `kv-cli init`: the built-in defaults plus
+    /// `secrets.detectors: 2`. It moves only when the template's meaning
+    /// does; the built-in default (`a6edcff00199c1cf`) never moves with it.
+    const INIT_FINGERPRINT: &str = "4bc0fc3192e4e992";
+
+    #[test]
+    fn the_init_template_writes_detector_set_2() {
+        assert!(DEFAULT_CONTRACT_YAML.contains("\n  detectors: 2\n"));
+        let template = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
+        assert_eq!(template.secrets.detectors, 2);
+        assert_eq!(template.fingerprint(), INIT_FINGERPRINT);
+        assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
     }
 
     // --- contract fingerprint (exit criterion) --------------------------
@@ -1979,13 +2112,14 @@ mod tests {
             base,
             fp(&format!("{BASE}infrastructure:\n  bundle_files: false\n"))
         );
-        // The init template writes it out, at its default.
+        // The init template writes it out, at its default, so it adds nothing
+        // to the template's fingerprint.
         assert!(DEFAULT_CONTRACT_YAML.contains("  bundle_files: true\n"));
         assert_eq!(
             Contract::from_yaml(DEFAULT_CONTRACT_YAML)
                 .unwrap()
                 .fingerprint(),
-            "a6edcff00199c1cf"
+            INIT_FINGERPRINT
         );
     }
 
@@ -2109,7 +2243,7 @@ mod tests {
         assert!(DEFAULT_CONTRACT_YAML.contains("\nsql:\n  enabled: true\n"));
         let template = Contract::from_yaml(DEFAULT_CONTRACT_YAML).unwrap();
         assert!(template.sql.is_default());
-        assert_eq!(template.fingerprint(), "a6edcff00199c1cf");
+        assert_eq!(template.fingerprint(), INIT_FINGERPRINT);
     }
 
     /// Stage 1 reads model and snapshot paths. Analyses and singular tests
@@ -2154,5 +2288,66 @@ mod tests {
         assert!(Contract::from_yaml(&format!("{BASE}sql:\n  enable: false\n")).is_err());
         let e = Contract::from_yaml(&format!("{BASE}sql:\n  dialect: oracle\n")).unwrap_err();
         assert!(e.contains("snowflake"), "{e}");
+    }
+
+    /// `secrets.detectors` stays out of the serialized contract at its
+    /// default, so adding it moved no fingerprint. Setting it to 2 serializes
+    /// that one field and moves the fingerprint, as an opt-in should.
+    #[test]
+    fn detectors_at_its_default_leaves_the_fingerprint_alone() {
+        assert_eq!(Contract::default().secrets.detectors, 1);
+        let canonical = serde_yaml::to_string(&Contract::default()).unwrap();
+        assert!(!canonical.contains("detectors"), "{canonical}");
+        assert_eq!(Contract::default().fingerprint(), "a6edcff00199c1cf");
+        let base = fp(BASE);
+        assert_eq!(base, fp(&format!("{BASE}secrets:\n  detectors: 1\n")));
+        let two = Contract::from_yaml(&format!("{BASE}secrets:\n  detectors: 2\n")).unwrap();
+        assert_ne!(base, two.fingerprint());
+        let yaml = serde_yaml::to_string(&two).unwrap();
+        assert_eq!(yaml.matches("detectors").count(), 1, "{yaml}");
+        assert!(yaml.contains("  detectors: 2\n"), "{yaml}");
+    }
+
+    /// Only the sets this build has: any other number is a contract error on
+    /// its own line, never a run with fewer shapes than the contract says.
+    #[test]
+    fn an_unknown_detector_set_is_a_contract_error_on_its_line() {
+        for n in [0, 3, 99] {
+            let p = problems(&format!("{BASE}secrets:\n  detectors: {n}\n"));
+            assert_eq!(p.len(), 1, "{p:?}");
+            assert_eq!(p[0].path, "secrets.detectors");
+            assert_eq!(p[0].line, Some(8), "{p:?}");
+            assert!(
+                p[0].message
+                    .starts_with(&format!("detector set {n} doesn't exist")),
+                "{}",
+                p[0].message
+            );
+        }
+        assert_eq!(
+            problems(&format!("{BASE}secrets:\n  detectors: 2\n")),
+            vec![]
+        );
+        assert!(Contract::from_yaml(&format!("{BASE}secrets:\n  detectors: two\n")).is_err());
+    }
+
+    /// Set 2's shapes compile, carry the names the docs use, and add exactly
+    /// three to set 1's twelve.
+    #[test]
+    fn detector_set_2_adds_three_shapes_to_set_1() {
+        assert!(detector_set_additions(1).is_empty());
+        let names: Vec<&str> = detector_set_additions(2).iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            ["azure_storage_key", "databricks_pat", "sendgrid_api_key"]
+        );
+        assert_eq!(Contract::default().secrets.value_patterns.len(), 12);
+        for d in detector_set_additions(2) {
+            let re = regex::Regex::new(d.regex).unwrap();
+            assert!(!re.is_match(""), "{}", d.name);
+            for e in d.documented_examples {
+                assert!(re.is_match(&format!("x={e} ")) || d.name == "azure_storage_key");
+            }
+        }
     }
 }
