@@ -52,6 +52,10 @@ demo: release ## Audit the bundled sample project (expected to fail)
 	@echo "--- kv-cli audit samples/ ---"
 	@./$(RELEASE_BIN) audit samples/ || echo "exit code: $$? (expected 1)"
 
+.PHONY: demo-gif
+demo-gif: release ## Re-record docs/media/kv-cli-demo.gif (needs asciinema and agg)
+	docs/media/demo/record.sh $(RELEASE_BIN)
+
 .PHONY: install
 install: release ## Install to $(PREFIX)/bin
 	install -m 0755 $(RELEASE_BIN) $(PREFIX)/bin/$(BIN)

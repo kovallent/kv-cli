@@ -23,6 +23,8 @@ It is a single binary with no runtime dependencies. It parses your code locally 
 
 ## What a run looks like
 
+![A recorded terminal session on a one-file project. kv-cli init writes the contract. kv-cli audit fails with 2 errors and 2 warnings: a hardcoded DB_PASSWORD, shown redacted, run_load missing target_environment and dry_run, and a pinned s3:// path. kv-cli fix adds both parameters and moves the password to os.environ, git diff shows the change, and kv-cli audit passes with one warning left for the s3:// path.](docs/media/kv-cli-demo.gif)
+
 This is a real session against [`samples/deploy.py`](samples/deploy.py), shortened where marked `…`:
 
 ```text
