@@ -299,8 +299,11 @@ fn resolve_all(ws: &Workspace, args: &[String]) -> Result<Vec<PathBuf>, String> 
     args.iter().map(|a| ws.resolve(a)).collect()
 }
 
-fn pretty(v: &Value) -> String {
-    serde_json::to_string_pretty(v).expect("JSON serializes")
+/// A structured result as the text block MCP asks for beside it: compact,
+/// since a model reads it as well indented or not, and every byte of a tool
+/// result costs the agent context.
+fn compact(v: &Value) -> String {
+    serde_json::to_string(v).expect("JSON serializes")
 }
 
 fn slash(p: &Path) -> String {
@@ -345,7 +348,7 @@ fn audit(args: AuditArgs, ws: &Workspace, flagged: &mut Vec<Flagged>) -> ToolRes
                 "exit_code": run.code,
                 "payload": payload,
             });
-            ToolResult::ok(pretty(&structured), structured)
+            ToolResult::ok(compact(&structured), structured)
         }
         Err(e) => {
             let structured = json!({
@@ -355,7 +358,7 @@ fn audit(args: AuditArgs, ws: &Workspace, flagged: &mut Vec<Flagged>) -> ToolRes
                 "kv_cli_version": VERSION,
             });
             ToolResult {
-                text: pretty(&structured),
+                text: compact(&structured),
                 structured,
                 is_error: true,
             }
