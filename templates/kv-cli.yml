@@ -16,7 +16,7 @@ spec:
       description: >-
         kv-cli release to run, for example v0.11.0. Defaults to the release
         this version of the component was published with.
-      default: v0.15.0
+      default: v0.16.0
     paths:
       description: >-
         Files or directories to audit, separated by spaces or newlines,
