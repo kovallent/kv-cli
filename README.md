@@ -23,7 +23,7 @@ It is a single binary with no runtime dependencies. It parses your code locally 
 
 ## What a run looks like
 
-![A recorded terminal session on a one-file project. kv-cli init writes the contract. kv-cli audit fails with 2 errors and 2 warnings: a hardcoded DB_PASSWORD, shown redacted, run_load missing target_environment and dry_run, and a pinned s3:// path. kv-cli fix adds both parameters and moves the password to os.environ, git diff shows the change, and kv-cli audit passes with one warning left for the s3:// path.](docs/media/kv-cli-demo.gif)
+![A captioned recording of a terminal session on a one-file project, zooming in on each result. kv-cli init writes the contract, .kovallent.yaml, and prints its fingerprint. The job hardcodes DB_PASSWORD and a production s3:// path, and run_load doesn't take target_environment. kv-cli audit fails with 2 errors and 2 warnings, showing the password redacted. kv-cli fix adds target_environment and dry_run, moves the password to os.environ and says to rotate it, git diff shows the change, and kv-cli audit passes with one warning left for the s3:// path.](docs/media/kv-cli-demo-v2.gif)
 
 This is a real session against [`samples/deploy.py`](samples/deploy.py), shortened where marked `…`:
 

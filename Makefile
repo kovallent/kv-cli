@@ -11,7 +11,7 @@ PREFIX      ?= /usr/local
 
 .PHONY: help
 help: ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
@@ -55,6 +55,10 @@ demo: release ## Audit the bundled sample project (expected to fail)
 .PHONY: demo-gif
 demo-gif: release ## Re-record docs/media/kv-cli-demo.gif (needs asciinema and agg)
 	docs/media/demo/record.sh $(RELEASE_BIN)
+
+.PHONY: demo-v2
+demo-v2: release ## Re-record docs/media/kv-cli-demo-v2.gif and .mp4, with zooms and captions
+	docs/media/demo/record-v2.sh $(RELEASE_BIN)
 
 .PHONY: install
 install: release ## Install to $(PREFIX)/bin
