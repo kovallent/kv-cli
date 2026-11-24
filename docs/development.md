@@ -7,6 +7,7 @@ make corpus   # precision/recall report for the labelled corpus
 make bench    # release-build timings for the large generated files
 make demo     # build, then audit samples/ (exits 1 by design)
 make demo-gif # re-record the README's demo GIF (needs asciinema and agg)
+make demo-v2  # re-record the captioned demo, with zooms (needs ffmpeg and pyte too)
 ```
 
 The demo in the README, `docs/media/kv-cli-demo.gif`, is a real recording.
@@ -16,6 +17,17 @@ git repository and records `docs/media/demo/session.sh` there with
 every line of output is kv-cli's own. It then renders the GIF with
 [agg](https://github.com/asciinema/agg). Re-record it when kv-cli's output
 changes; the recording keeps the raw session as `docs/media/kv-cli-demo.cast`.
+
+A second cut, `docs/media/kv-cli-demo-v2.gif` (and `.mp4`, for web pages),
+records the same commands, holding each result longer, then zooms in on the
+lines that matter and captions each step. `docs/media/demo/record-v2.sh` records
+`session-v2.sh`, renders it with agg at twice the output size, and has
+`render_v2.py` follow `storyboard-v2.json`: each shot waits for a line of
+kv-cli's real output, found by replaying the recording through
+[pyte](https://github.com/selectel/pyte), so a shot follows its line when the
+output changes. ffmpeg encodes the frames, and gifsicle, when installed, halves
+the GIF. A storyboard line that no longer appears stops the render with its
+text, rather than zooming in on the wrong place.
 
 CI (`.github/workflows/ci.yml`) runs the same gate on every pull request and push to `main`: `cargo fmt --check` and `clippy -D warnings` on Linux, and the full test suite — corpus included — on Linux, macOS and Windows, the platforms the release ships for.
 

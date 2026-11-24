@@ -1,0 +1,99 @@
+{
+  "comment": "Shots for docs/media/kv-cli-demo-v2.gif, rendered by render_v2.py. A shot starts when its `after` text first appears on screen (plus `delay`), or, without `after`, where the previous shot ends, or at `at` seconds. While it lasts, its caption shows; with `focus`, the camera zooms to the lines that contain those texts; with `card`, a title card covers the terminal.",
+  "font_size": 32,
+  "scale": 0.5,
+  "fps": 20,
+  "gif_fps": 10,
+  "transition": 0.5,
+  "min_zoom": 1.25,
+  "max_zoom": 2.2,
+  "caption_height": 80,
+  "shots": [
+    {
+      "at": 0,
+      "duration": 2.6,
+      "card": {
+        "title": "kv-cli",
+        "subtitle": "Local contract guardrails for Python data pipelines"
+      },
+      "caption": "It checks pipeline code against your repository's contract"
+    },
+    {
+      "after": "auto-detected per file",
+      "delay": 0.3,
+      "duration": 2.8,
+      "focus": ["created ./.kovallent.yaml", "required parameters"],
+      "caption": "kv-cli init writes the contract, .kovallent.yaml"
+    },
+    {
+      "duration": 2.8,
+      "focus": ["contract 4bc0fc3192e4e992"],
+      "caption": "CI pins its fingerprint, so a pull request can't quietly weaken the rules"
+    },
+    {
+      "after": "return write_table",
+      "delay": 0.3,
+      "duration": 2.7,
+      "focus": ["DB_PASSWORD = ", "SOURCE = "],
+      "caption": "A pipeline job with a hardcoded password and a production S3 path"
+    },
+    {
+      "duration": 2.6,
+      "focus": ["def run_load(day):"],
+      "caption": "and a run_* job that doesn't take target_environment"
+    },
+    {
+      "after": "FAIL 2 errors",
+      "delay": 0.4,
+      "duration": 3.0,
+      "focus": ["error  KV002", "(<redacted>, 20 chars)"],
+      "caption": "kv-cli audit finds the credential, and never prints it"
+    },
+    {
+      "duration": 3.0,
+      "focus": ["missing contract parameter `target_environment`", "declare `target_environment"],
+      "caption": "run_load must take target_environment, as the contract requires"
+    },
+    {
+      "duration": 2.6,
+      "focus": ["FAIL 2 errors, 2 warnings"],
+      "caption": "Errors fail the gate: kv-cli exits 1"
+    },
+    {
+      "after": "kvbak",
+      "delay": 0.3,
+      "duration": 3.2,
+      "focus": ["added `target_environment`", "added `dry_run`", "now reads os.environ"],
+      "caption": "kv-cli fix adds both parameters and moves the password to os.environ"
+    },
+    {
+      "duration": 3.0,
+      "focus": ["rotate:", "git history"],
+      "caption": "and says to rotate the credential: it is still in git history"
+    },
+    {
+      "after": "+def run_load",
+      "delay": 0.3,
+      "duration": 3.0,
+      "focus": ["-DB_PASSWORD", "+def run_load"],
+      "caption": "The change is plain code, ready for review"
+    },
+    {
+      "after": "PASS 0 errors",
+      "delay": 0.3,
+      "duration": 3.4,
+      "focus": ["warning  KV003", "should vary by environment", "PASS 0 errors"],
+      "caption": "The gate passes. The pinned S3 path stays a warning, yours to change"
+    },
+    {
+      "delay": 0.7,
+      "duration": 5.0,
+      "card": {
+        "title": "kv-cli",
+        "subtitle": "Local contract guardrails for Python data pipelines",
+        "command": "pip install kv-cli"
+      },
+      "caption": "github.com/kovallent/kv-cli"
+    }
+  ]
+}
