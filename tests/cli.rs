@@ -1549,6 +1549,15 @@ fn readme_snippets_pin_this_release() {
     ] {
         let pins: Vec<&str> = readme
             .match_indices(prefix)
+            // Another project's hooks, such as Ruff's, pin that project's own
+            // release: only a `rev` under one of kv-cli's repositories must
+            // name this one.
+            .filter(|(i, _)| {
+                prefix != "rev: v"
+                    || readme[..*i]
+                        .rfind("repo:")
+                        .is_some_and(|r| readme[r..*i].contains("github.com/kovallent/"))
+            })
             .map(|(i, _)| {
                 let rest = &readme[i + prefix.len() - 1..];
                 rest.split(|c: char| c.is_whitespace()).next().unwrap()
