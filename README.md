@@ -293,7 +293,7 @@ repos:
         files: '(\.(py|ipynb|ya?ml|toml|ini|cfg|json|env)|(^|/)\.env(\.[^/]*)?)$'
 ```
 
-A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It is where a finding is cheapest to fix. The CI gate is what guarantees compliance.
+A hook is advisory: `--no-verify` skips it, and a fresh clone installs none. It is where a finding is cheapest to fix. The CI gate is what guarantees compliance. To run kv-cli next to Ruff, see [How kv-cli fits alongside Ruff and pre-commit](#how-kv-cli-fits-alongside-ruff-and-pre-commit).
 
 ---
 
@@ -338,6 +338,61 @@ A signature the framework owns is exempt from `KV001`, because the framework cal
 * **Python:** source written for any Python 3 release through 3.14. `kv-cli` never runs Python; it parses source with tree-sitter, so no interpreter is needed and the version installed does not matter. Covered syntax includes `:=` and `/` parameters (3.8), `match` (3.10), `except*` (3.11), `type` aliases, generic `def f[T]` / `class C[T]` and nested-quote f-strings (3.12), and `t"…"` template strings and unparenthesised `except A, B:` (3.14).
   * **Known gap:** type-parameter defaults (`def f[T = int]`, 3.13) do not parse. Such a file is audited on a partial parse and listed as `syntax_error` (a warning; an error under `--strict`); findings elsewhere in the file are still reported, and `fix` will not rewrite it.
 * **Files:** Python gets all three rules. Notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) get `KV002`. Files must be UTF-8; anything else is reported as unreadable rather than guessed at. A file of a type kv-cli doesn't read, or a `.sql` file that isn't a dbt model, named on the command line is listed as `not_analysed`, a warning that never gates, rather than parsed as Python.
+
+---
+
+## How kv-cli fits alongside Ruff and pre-commit
+
+pre-commit is the runner: it decides when checks run and on which staged files, and kv-cli is one of the hooks it runs, as Ruff is. Ruff checks that Python is well-formed and consistently styled, with lint rules and a formatter. kv-cli checks that pipeline code is portable across environments, against your contract: required parameters (`KV001`), credentials (`KV002`), pinned infrastructure (`KV003`) and the naming rules your contract sets (`KV004`).
+
+| Concern | Ruff | kv-cli |
+| --- | --- | --- |
+| Formatting, import order, unused code, style | Yes: `ruff format`, and lint rules such as `I001` (import order), `F401` and `F841` (unused code) | No |
+| Python syntax errors | Yes: always reported, whichever rules are selected | No. A file it can't fully parse is listed as `syntax_error`, a warning, and audited on a partial parse; `fix` won't rewrite it |
+| A function missing a parameter your contract requires | No | `KV001` |
+| A hardcoded credential | `S105`, `S106` and `S107`, not on by default: hardcoded passwords in strings, function calls and argument defaults | `KV002`, an error: a literal assigned to a name your contract forbids, or shaped like a known token. The value is redacted in the output |
+| A warehouse, bucket, cluster ID or endpoint pinned to one environment | No | `KV003`, a warning by default |
+| Function naming | `N802`, not on by default: function names in PEP 8 `snake_case` | `KV004`: the naming rules your contract sets. There are none by default |
+| Notebooks and config files (YAML, `.env`, TOML, INI/`.cfg`, JSON) | Notebooks are linted and formatted by default. Config files: no, apart from `RUF200`, which checks `pyproject.toml` against the schema in the relevant PEPs | `KV002` in notebooks and in each of those config files, and `KV003` in Databricks bundle files |
+| dbt SQL models | No | `KV003`. Credentials aren't checked in SQL |
+| Framework awareness (Airflow, dbt, Databricks, Snowpark, Flink, Polars) | Airflow, with the `AIR` rules. None for the other five | A profile for each of the six, applied only to files that use the framework |
+| Rewrites code | Yes: `ruff check --fix` applies safe fixes, and `ruff format` reformats | `kv-cli fix` inserts missing parameters and moves credentials to `os.environ`, adding `import os` when needed. It never formats, never reorders imports, and never changes code for a `KV003` or `KV004` finding |
+
+The credential rules overlap. Ruff's `S105`, `S106` and `S107` flag hardcoded passwords in Python code. `KV002` also scans config files and notebook outputs, matches the names your contract forbids as well as known token shapes, redacts the value in its output, and in Python files `kv-cli fix` moves the credential to `os.environ`.
+
+The naming rules don't overlap: use `N802` for PEP 8 style everywhere, and `KV004` for a convention your project sets, such as one for its pipeline functions.
+
+### One pre-commit config for both
+
+```yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.17.6
+    hooks:
+      # Run the linter.
+      - id: ruff-check
+      # Run the formatter.
+      - id: ruff-format
+  - repo: https://github.com/kovallent/kv-cli-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: kv-cli            # audits staged Python, notebooks and config files
+      - id: kv-cli-contract   # validates .kovallent.yaml when it changes
+```
+
+Set Ruff's `rev` to the version your project already uses. kv-cli comes after Ruff's lint and format hooks because it reports findings by line, and running it after the formatter means the lines it reports are the lines that get committed.
+
+### After `kv-cli fix`
+
+`fix` edits files and doesn't reformat them. If you use Ruff's formatter, run it after `fix`, before committing:
+
+```bash
+kv-cli fix
+ruff format
+```
+
+Ruff decides whether the code is well-formed. kv-cli decides whether it will behave the same in every environment. pre-commit runs both before the commit, and the CI gate runs kv-cli again where it can't be skipped.
 
 ---
 
